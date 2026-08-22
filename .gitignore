@@ -1,0 +1,25 @@
+node_modules/
+dist/
+coverage/
+build/
+*.log
+plugins/*/runtime/.venv/
+
+# Local FRIDAY state and credentials.
+.env
+.env.*
+!.env.example
+/.friday/
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Python caches.
+__pycache__/
+*.py[cod]

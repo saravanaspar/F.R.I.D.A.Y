@@ -1,0 +1,39 @@
+{
+  "name": "@friday/tools",
+  "version": "0.0.1",
+  "description": "FRIDAY coding tool definitions and execution facades",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./execution-access": {
+      "types": "./dist/execution-access.d.ts",
+      "import": "./dist/execution-access.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsgo -p tsconfig.build.json",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "diff": "^9.0.0",
+    "typebox": "^1.3.9"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "private": true
+}

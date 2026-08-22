@@ -1,0 +1,23 @@
+[Unit]
+Description=FRIDAY personal agent
+# Never stop retrying after a burst of crashes. FRIDAY records catchable fatal failures; the system journal covers hard kills/OOMs.
+StartLimitIntervalSec=0
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# FRIDAY performs verified two-process handoffs during self-improvement. Keep the
+# unit active while either predecessor or successor remains in this cgroup.
+ExitType=cgroup
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=%h
+ExecStart=/usr/bin/env friday
+Restart=always
+RestartSec=5
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

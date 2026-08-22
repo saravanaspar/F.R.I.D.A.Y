@@ -1,0 +1,152 @@
+# FRIDAY Plugin Map
+
+## Rule
+
+FRIDAY has no permanent application dispatcher or runtime command registry.
+The non-plugin host is limited to fixed setup, process startup/shutdown, and
+an ephemeral symbol-only plugin bootstrap session. Everything functional at
+runtime is a plugin.
+
+The `capabilities` plugin is the composition microkernel. All other built-in
+plugins declare `requires`, `optional`, and `provides` capability metadata with
+`definePlugin()`. The kernel resolves the dependency graph after discovery;
+`friday.config.json` no longer orchestrates plugin activation by list order. It
+also owns typed multi-provider contributions, hooks, plugin-scoped reversible
+effects, lifecycle state, and dependency-safe disposal.
+
+Before introducing another top-level plugin, apply the boundary test:
+
+1. Does it own an independent runtime responsibility/domain?
+2. Does it own an independent resource, state, worker, transport, or cleanup lifecycle?
+3. Do other plugins need a genuine stable typed capability boundary from it?
+4. Is there no cleaner existing owner it can extend without creating real coupling?
+
+A new plugin is justified only when those answers establish a real ownership
+boundary. Styling/configuration extensions stay with their existing owner, and
+shared dependency-free mechanics stay utility packages rather than becoming
+plugins just because they have many callers.
+
+## Current graph
+
+```text
+optional setup CLI
+        |
+        +-- uses plugin-owned runtime-settings persistence helpers
+        |
+        +-- writes bounded non-secret runtime.env / explicit sandbox setup
+        |
+src/host/runtime-env.ts
+        |
+        +-- loads bounded non-secret defaults before plugin discovery
+        |
+src/runtime.ts
+        |
+        +-- ephemeral symbol-only bootstrap
+              |
+              +-- capabilities (Plugin Kernel v2)
+                    |
+                    +-- session-resources
+                    +-- sessions
+                    +-- session-jobs <---- sessions + events + optional channels.trusted
+                    +-- memory ----------> refinement
+                    +-- execution -------> lifecycle
+                    +-- audit ----------> permissions -----> sandbox -------> evaluation
+                    +-- vault
+                    +-- events ----------> observability + alerts
+                    +-- channels --------> protected interactions + turn.ingress
+                    +-- artifacts -------> safe attachment/package intake
+                    +-- worktrees
+                    +-- generations
+                    +-- scheduler -------> turn.executor + scheduler.action
+                    +-- system ----------> turn.executor + system.action/status
+                    +-- integrations ----> agent.tool + system.action
+                    +-- tools
+                    +-- skills
+                    +-- prompts
+                    +-- model
+                    +-- runtime-settings -> typed config + verified restart
+                    +-- routing <-------- sessions + memory + model + events + optional session-jobs
+                    +-- agent
+                    +-- turn-loop <------ routing + sessions + agent + tools + permissions + events
+                    |      |               + optional session-jobs
+                    |      +------------> detached persistent-session admission
+                    |      ^
+                    |      +------------ turn.executor contributions
+                    +-- compaction
+                    +-- subagents --------> rlm
+                    +-- auth -------------> mcp <-------- vault + permissions + events
+                    |                         |
+                    |                         +----------> agent.tool + system.action/status
+                    +-- autonomy ----------> system.action: autonomy.run
+                    +-- self-improvement --> run + feasibility-gated capability extension
+```
+
+`packages/operational-errors` is deliberately outside the plugin graph. It is a
+dependency-free redacted failure-reporting facade with a terminal fallback;
+`observability` installs its live sink and owns telemetry. Operational failures
+are not Audit records.
+
+`autonomy` owns the ordinary autonomous-run workflow. `self-improvement` owns
+self-development orchestration and consumes `autonomy` when an isolated
+candidate needs an agent to edit it. There is no central application/god plugin.
+
+`self-improvement` declares generic last-stage activation. Its position in
+`friday.config.json` is irrelevant: the Plugin Kernel activates it only after
+all normal plugins have reached readiness. During a replacement launch it
+validates the active generation, durable mission and pending generation handoff
+before acknowledging lifecycle readiness, so that acknowledgement also proves
+that the complete configured plugin graph has loaded.
+
+Cross-plugin dependencies are declared through capability contracts in plugin
+manifests and resolved by the Plugin Kernel after discovery. Implementation
+packages must not import sibling FRIDAY runtime packages directly.
+
+## Current plugin boundaries
+
+- `capabilities` - FRIDAY's plugin composition microkernel. It owns declarative manifests, complete-graph dependency validation, topological activation, optional service edges, last-stage activation, typed single-provider services, typed multi-provider contributions, typed hooks, activation-scoped contexts, reversible effects and dependency-safe disposal. The ephemeral host bootstrap only triggers its generic symbol-keyed finalizer/disposer hooks and never resolves this graph itself.
+- `session-resources` - session-scoped cleanup registration and dispatch
+- `sessions` - durable append-only JSONL sessions, tree history, branching, branch extraction, listing, lifecycle/name metadata, stored context projection and session file/artifact deletion
+- `session-jobs` - transactional SQLite lifecycle and per-session queue for detached persistent Agent work. A job is an execution record, not a replacement for its long-lived Session: admission is persisted before the user receives a started acknowledgement, different sessions may run concurrently, work targeting the same persistent session is serialized, and a newly created session is bound back into that queue before follow-up work can race it. Successors open suspended and activate only after lifecycle takeover. Jobs retain bounded public progress/retry metadata, notify the originating reply port on terminal success/failure, expose current-work/cancel/transcript control through System contributions, and use exact protected channel prompts/approvals for ambiguous or destructive cancellation. Session transcript content remains Sessions-owned; Session Jobs stores only bounded job metadata and explicit public progress, never hidden model reasoning.
+- `memory` - persistent local/global continual state for prompt notes, memories, reusable skill descriptions, reusable subagent specifications and normalized preference/habit relationship graphs. Graph records track confidence, frequency and recency, reject secret-shaped keys, support explicit deletion, and contribute only bounded query-relevant context to a turn; Memory does not perform refinement or prompt composition.
+- `execution` - persistent Jupyter/IPython kernel transport over TCP or IPC, Python cell execution, raw display payloads, namespace snapshot/restore, low-level shell/process execution and process lifecycle primitives, including host-owned kernel launch and generic detached child launch transport
+- `lifecycle` - generic FRIDAY process-replacement transport: current-runtime relaunch specs, private restart status/token records, detached successor launch through injected execution, liveness/timeout/cancellation checks, authenticated full-graph readiness, and a second takeover/rejection handshake that keeps the predecessor alive through post-restart verification; generation/candidate policy remains outside it
+- `audit` - append-only security/authority ledger for privileged authorization decisions and trusted-identity changes. The ordinary capability is read-only; only `audit.trusted` can append. Records live in private global `FRIDAY_HOME/audit` state, are HMAC-chained in sequence order, and are cross-checked against a separate authenticated head anchor so database-only suffix truncation/deletion cannot silently reset history. Chain/anchor integrity is verified on startup and around every append; records are never retention-trimmed or exposed through a delete/clear API. Permissions treats audit append failure as fail-closed, so an allowed privileged action cannot proceed without a durable audit decision. Audit stores host-owned action/actor/decision metadata only; model-controlled reason prose and secret material are excluded or redacted. It owns authority history rather than execution-result history: Sessions/Events/Observability continue to own actual execution/domain outcomes and operational telemetry.
+- `permissions` - action-aware authorization plus trusted execution identity. Host adapters supply stable action ids/effects/resources; model-controlled `reason` prose never determines authority, and effect/access mismatches fail closed. `ask` automatically permits workspace reads, `auto` also permits workspace writes, while external/credential/system effects and network access still require approval until `full`. A private `0600` trusted-channel registry under stable `FRIDAY_HOME` (not mission-scoped `FRIDAY_STATE_DIR`) separates transport admission from privilege and assigns `read-only` or `operator` roles to exact `(channel, accountId, senderId)` identities. `permissions.trusted` carries local/system/channel identity through host-owned async context; unregistered channel identities fail closed and read-only identities cannot mutate even in `full`. Access outside the selected workspace is denied in every mode.
+- `sandbox` - rootless Podman execution boundary for model-generated shell commands, persistent IPython kernels, deterministic evaluation gates, and host-owned inspection processes that must touch model-controlled workspaces. Workspace mounts are read-only or read-write according to the authorization boundary; external read-only mounts require explicit host source/target registration scoped to the exact workspace. Detached shell commands and kernels retain unrestricted outbound networking by default so unattended work is not stranded by an undiscovered allowlist; an explicit host caller may request network-off isolation. The image includes the normal Node/Python/native-build toolchain, enforces memory/CPU/PID/file ceilings, keeps the container root read-only, drops Linux capabilities, and never auto-pulls during execution. The fixed setup utility and the bounded `sandbox.setup` System action check for an existing usable image first and, only when it is missing, can build it locally after explicit approval/authorization; FRIDAY does not silently install the privileged Podman system package.
+- `vault` - host-owned encrypted secret storage outside the model workspace. The ordinary `vault` capability exposes only normalized references and non-secret metadata; a separate `vault.trusted` capability owns create/rotate/delete, callback-scoped secret consumption, and passphrase-encrypted master-key recovery kits. Recovery authenticates current records before replacement. Secret plaintext is never returned by a Vault API, persisted in metadata, or mounted into model sandboxes.
+- `events` - durable immutable occurrence log plus best-effort live subscriptions and at-least-once durable consumer delivery. Events have stable IDs/timestamps, producer deduplication by explicit ID or source-scoped dedupe key, bounded JSON payloads, replay queries, plugin-owned SQLite state, persistent consumer cursors, transactional delivery leases with heartbeats, stable per-consumer/event idempotency keys, retry/backoff, dead-letter progression, crash recovery and a plugin-lifecycle-owned graceful delivery worker in the default runtime. It owns WHAT happened and delivery semantics only; producers such as Channels/Scheduler/Webhooks and consumers such as Routing/automation remain separate.
+- `alerts` - channel-bound proactive notifications over durable Events metadata. Rules are exact-conversation bound, permission-gated, privately persisted and cooldown-limited; delivery excludes Event payload data and runs under a trusted alerts system principal. Raw logs remain query-on-demand rather than becoming a channel firehose.
+- `observability` - bounded operational telemetry, not an audit ledger. It persists redacted structured logs, counters, gauges, distribution summaries, completed trace spans and provider model-usage records in private mission-scoped SQLite state. Usage is attributable by session, root/parent agent/subagent and detached job, including input/output/cache tokens, hit rates, provider-reported cost/currency and separately labelled catalog estimates. It enforces retention and metric-series cardinality, propagates trace context with host-owned async context, subscribes only to Event metadata, and receives Model diagnostics through an injectable sink. Telemetry failures do not change business outcomes but are reported through the redacting operational-error fallback; corrupt startup state fails closed instead of being silently reset.
+- `webhooks` - inbound HTTP trust boundary for non-chat integrations. Trusted host code registers bounded HMAC-SHA256 routes backed by opaque Vault secret refs; Webhooks enforces method/body/media limits, signed timestamp freshness, nonce replay protection, persistent rate limiting, JSON validation and source-scoped Events deduplication before publishing a validated Event. Listener startup is explicit, loopback by default, and Webhooks never invokes Agent directly.
+- `artifacts` - safe durable attachment/package intake. It stores channel attachments by opaque integrity-checked references and stages user-provided HTTPS/GitHub packages inside Sandbox with bounded file/expanded-size limits and traversal/symlink/non-regular-file rejection. It does not decide Skill/MCP installation policy or execute package code.
+- `runtime-settings` - typed non-secret runtime configuration for main/routing models, permission mode, custom model endpoint metadata, and persona selection/definitions. Persona state is an extension of this existing configuration owner: it contributes style-only Agent prompt/tool surfaces and does not form a separate plugin boundary. Restart-required model updates use Lifecycle's verified successor/takeover handshake and roll back persisted settings if startup fails; the model never receives arbitrary environment-file mutation.
+- `routing` - semantic WHERE/HOW selection for sanitized human messages. Each routed message is classified by one disposable tool-free model call using the trusted principal, bounded in-memory context from that external conversation, host-generated session candidates and compact read-only Memory hints. When Session Jobs is installed, active job label/status metadata is folded read-only into the matching session candidate so follow-up phrases can resolve against work that is still running. External chats are not pinned to FRIDAY sessions; every message is classified independently. The model may choose only host-supplied destination IDs (`session:<id>`, `session:new`, `transient:utility`, `scheduler`, or `system`) and the host validates the matching execution profile. Routing has no Channels dependency, never invokes Agent, mutates Sessions/Memory/Session Jobs, uses Vault/MCP/tools, or executes the requested action; it publishes bounded decision/failure Events without persisting conversation text.
+- `channels` - human communication ingress/egress for Telegram, WhatsApp, Discord, Slack, Microsoft Teams, Google Chat, Signal, Email, and SMS, plus a host-local CLI output/testing adapter. It normalizes transport messages into a common transport-principal/message shape, default-denies untrusted network senders, authenticates platform webhook/socket ingress before publication, sanitizes credential-shaped content, and owns exact-principal protected interactions before Routing: channel-native Permissions approvals, strict one-field credential capture with optional validation, bounded protected prompts, and cancellation interception. Secrets are stored directly in Vault and only markers reach normal publication. Ordinary sanitized remote messages are emitted through the generic `turn.ingress` hook with a host-owned reply port; Channels does not know Routing, Sessions, Agent, or Turn Loop. Runtime `friday` never reads stdin as conversation input: the CLI transport is output-only in normal operation, while tests/trusted host code may inject an explicit local turn. Remote transport ingress is channel-authority and must resolve exact `(channel, accountId, senderId)` authority through `permissions.trusted` before privileged execution.
+- `turn-loop` - replaceable outer conversational admission lifecycle. It consumes generic `turn.ingress` events, establishes local or exact trusted-channel Permissions context, asks Routing WHERE/HOW the turn belongs, selects a matching `turn.executor` contribution, delivers the executor/admission result through the ingress-owned reply port, and records metadata-only received/completed/failed Events. External-conversation serialization protects Routing and admission context from races. Without Session Jobs, existing persistent-session Agent execution remains synchronously serialized as before; with Session Jobs installed, persistent Agent turns are durably admitted and acknowledged immediately, while Session Jobs owns detached execution and per-session serialization. The built-in `agent-session` executor composes Sessions, Agent, Model, Prompts, Tools and session resources; optional Memory, Skills, RLM/Subagents and Sandbox are resolved lazily by the executor, while optional Observability wraps the outer turn/routing spans. It dynamically collects generic `agent.tool` contributions on every Agent turn so capability plugins can add model-facing tools through the Turn Loop contract without depending on Turn Loop implementation details or requiring Turn Loop edits. Persistent Agent runtimes are cached and reopenable; transient utility turns use in-memory sessions. Turn Loop never contains transport-specific branches or Scheduler/System execution policy; those profiles are extension contributions.
+- `evaluation` - deterministic command evaluation, pass/partial/fail/timeout/error classification, bounded evidence capture and aggregate summaries; command gates execute through the sandbox and do not decide candidate promotion
+- `worktrees` - isolated Git worktree lifecycle for create/list/inspect/remove/reset plus host-owned candidate commit finalization; linked-worktree Git admin metadata is validated against the primary repository and candidate Git commands use explicit trusted `--git-dir`/`--work-tree` context; candidate commits disable hooks/signing and are verified clean before promotion; destructive-primary-worktree protection remains mandatory
+- `generations` - restart-safe clean-commit generation checkpoints, immutable pinned Git refs, active-generation lineage, guarded fast-forward activation and executable transactional rollback. Rollback is journaled across crash windows, validates pinned refs/exact HEAD/clean state, and recovers interrupted rollback before publishing the active-generation pointer
+- `scheduler` - production time-based scheduling with one-shot, fixed-interval and five-field cron/IANA-timezone schedules; plugin-owned SQLite state; transactional leases; stable occurrence idempotency keys; durable execution history; bounded exponential retry; coalesce/catch-up/skip missed-run policy; bounded concurrent due execution; expired-lease crash recovery; cancellation; and an explicit graceful in-process worker. It owns the `scheduler` turn executor but still owns WHEN only: a bounded tool-free planner chooses create/list/history/cancel/remove, while actual delayed work is provided through generic `scheduler.action` contributions. Durable action payloads are contributor-materialized, future execution resolves the current contribution dynamically under `system:scheduler`, and the default Scheduler plugin owns/starts/stops its production worker through kernel lifecycle effects. Channels contributes the first `channels.reminder` action and host-binds its destination to the originating conversation, so Scheduler never imports channel transport.
+- `system` - replaceable executor for the host-owned `system/system` routing destination. It performs one bounded tool-free action-selection call over installed `system.action` contributions, authorizes owner-declared mutations through Permissions, and exposes built-in `system.status`/`system.actions` over generic `system.status` contributions. It does not import Audit, Channels, Scheduler, Sandbox, Observability, Lifecycle, integrations, MCP, or other action owners; those plugins contribute their own bounded action/status surface. Permissions contributes exact trusted-identity list/trust/revoke actions, and Audit contributes ledger verification. System is not a shell/CLI or host-bootstrap bridge and cannot invoke arbitrary plugin methods.
+- `integrations` - generic external-service adapter registry, durable non-secret connection metadata, connection lifecycle and permission-gated action invocation. Provider APIs such as mail, chat and calendar remain adapter implementations outside the generic core; plaintext credentials are rejected from durable settings and referenced indirectly through `credentialRef`. The composition plugin contributes only safe Agent tools for listing configured connections and invoking existing actions through the same permission-gated service; connection/credential lifecycle is not exposed to the model.
+- `self-improvement` - candidate/promotion policy **and the self-development workflow that owns it**. It contributes the permission-gated `self-improvement.run` System action plus feasibility-gated missing-capability extension. Feasibility must complete before FRIDAY tells the user it can build a missing feature; authorization follows that notice, and successful generation handoff can durably resume the exact originating turn/artifact references after restart. It also exposes bounded status/history/cancel surfaces; private restart flags are process-handoff metadata rather than public commands. It creates an isolated candidate, invokes `autonomy` in that candidate, host-finalizes the candidate commit, evaluates the sealed commit, promotes through `generations`, publishes a durable self-improvement mission, coordinates lifecycle restart/takeover, resumes the generation handoff and triggers known-good rollback/recovery on failure. Git mutation, evaluation mechanics, process transport and autonomous-agent mechanics remain delegated to their independent capabilities
+- `tools` - coding-tool schemas and behavior for bash, edit and IPython; the FRIDAY adapter composes permissions and sandbox capabilities around all model-execution tools while low-level process/kernel transport remains delegated to execution
+- `skills` - skill discovery, frontmatter validation, source/collision tracking, Python-skill metadata, skill-block parsing and explicit `/skill:` expansion. It can inspect/install user-provided URL or attachment packages through Artifacts after separate network-inspection and mutation authorization, atomically maintains the private user Skills root, and publishes a revision so cached Agent sessions rebuild when installed skills change; prompt composition and Python environment preparation remain outside this plugin
+- `model` - model catalog, provider registry, streaming, reasoning, tool-call transport, token/cost handling and provider protocol behavior. It owns provider cache semantics, request-local stable-prefix breakpoints, session cache keys/retention and content-free request telemetry (duration, TTFT and cache usage); prompt text remains owned by `prompts`.
+- `refinement` - model-driven continual-state proposals, validation, automatic review and conflict-safe Memory application. Conversational apply/rollback is two-stage: show the proposed persistent edits, authorize, apply, then persist bounded full-result history so later rollback remains possible; scheduling remains outside this plugin
+- `compaction` - context-token thresholds, recent-context cut points, split-turn handling, continuation summaries and abandoned-branch summaries; model completion and session persistence are consumed through injected ports
+- `autonomy` - autonomous objective workflow plus its generic continuation policy. It contributes the bounded `autonomy.run` System action and creates the Agent/session/tool composition for an objective, enforces turn/token/time budgets, runs deterministic quality gates, retries failed gates with bounded evidence and requires gate success rather than assistant prose as completion. It does not own candidate promotion, generation mutation or restart policy
+- `subagents` - recursive child admission, depth/name/model policy, detached child lifecycle, parent-scoped registry persistence, cancellation and deletion; actual child runtime composition is injected through a narrow host port
+- `rlm` - model-facing recursive delegation protocol, typed host-request adapters, stable wire shapes, and the small Python kernel shim; child lifecycle and model matching are delegated to `subagents` through an injected port
+- `prompts` - pure system-prompt composition, skill XML formatting, recursive-agent doctrine, project-context rendering and host-supplied supplemental sections. It emits a stable-prefix plan that keeps per-session metadata at the tail for provider prompt-cache reuse; it does not implement provider caching itself. Discovery, persistence and execution remain outside this plugin
+- `agent` - generic Agent state/inner model/tool loop, streamed model events and execution of provided tool interfaces. It exposes only the Agent runtime capability; generic `agent.input`, `agent.tool`, `agent.prompt-section` and `agent.after-turn` extension contracts are owned by Turn Loop, which adapts them to Agent without making capability plugins depend on the Agent implementation.
+- `auth` - provider authentication flows, OAuth provider registry, PKCE and callback responses
+- `mcp` - remote MCP client and external-service operation boundary. It ships built-in Linear and Notion endpoints plus persistent custom server metadata, speaks bounded Streamable HTTP with 2026 stateless negotiation plus definitive legacy fallback/session recovery, discovers/lists/calls remote tools, and keeps bearer/OAuth credentials behind opaque Vault refs. OAuth credentials are encrypted by Vault and refreshed callback-scoped; ordinary MCP status never exposes credential refs or token material. Every operation is mapped to a stable action-aware Permissions request (`mcp.login`, `mcp.list-tools`, or `mcp.call-tool`); tool calls remain conservatively `external-write` because remote annotations are not trusted to reduce authority. Successful calls publish bounded Events containing only server/tool/error metadata. The composition plugin contributes safe Agent tools for server metadata, tool discovery and tool invocation. MCP management/status is exposed through bounded `system.action`/`system.status` contributions; OAuth/login and credential refs remain trusted host APIs behind those permission-gated operations. MCP never invokes Agent or depends on Turn Loop implementation/runtime capability; it imports only the generic Turn Loop contribution contract and owns neither routing nor scheduling.
+
+## Planned plugin boundaries
+
+- `voice` - speech input/output
+
+Subsystems stay separate when independently replaceable, reusable, or a meaningful
+safety boundary. Protocol internals and orchestration that exist only for one
+owner stay inside that owning plugin.

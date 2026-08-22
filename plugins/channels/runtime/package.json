@@ -1,0 +1,36 @@
+{
+  "name": "@friday/channels",
+  "version": "0.0.1",
+  "description": "FRIDAY human communication channels with pre-model credential capture and sanitization",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bridge"
+  ],
+  "dependencies": {
+    "@friday/operational-errors": "0.0.1"
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsgo -p tsconfig.build.json",
+    "test": "vitest run --config vitest.config.ts",
+    "setup:whatsapp": "npm install --prefix bridge/whatsapp --ignore-scripts --no-audit --no-fund"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "engines": {
+    "node": ">=22.8.0"
+  },
+  "private": true
+}

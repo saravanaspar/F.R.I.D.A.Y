@@ -1,0 +1,23 @@
+{
+  "name": "@friday/operational-errors",
+  "version": "0.0.1",
+  "description": "Dependency-free, redacted operational failure reporting for FRIDAY runtimes",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist"],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsgo -p tsconfig.build.json",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "license": "MIT",
+  "engines": { "node": ">=22.8.0" },
+  "private": true,
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

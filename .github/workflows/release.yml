@@ -1,0 +1,288 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (for example 0.1.0 or v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Serialize releases. A failed build creates no tag, so the same version can be
+# corrected and re-run after a fix lands on main.
+concurrency:
+  group: release-manual-main
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate manual release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      canonical: ${{ steps.version.outputs.canonical }}
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: Require dispatch from latest main
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "Releases may only be dispatched from the main branch." >&2
+            echo "Choose main in the Run workflow branch selector and try again." >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin main
+          latest_main="$(git rev-parse origin/main)"
+          checked_out="$(git rev-parse HEAD)"
+
+          if [ "$GITHUB_SHA" != "$latest_main" ] || [ "$checked_out" != "$latest_main" ]; then
+            echo "This release was not dispatched from the current tip of main." >&2
+            echo "event sha:   $GITHUB_SHA" >&2
+            echo "checked out: $checked_out" >&2
+            echo "latest main: $latest_main" >&2
+            echo "Run the workflow again from the latest main." >&2
+            exit 1
+          fi
+
+          echo "sha=$latest_main" >> "$GITHUB_OUTPUT"
+
+      - name: Validate FRIDAY release version
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          node scripts/release-version.mjs "$REQUESTED_VERSION" --github-output "$GITHUB_OUTPUT"
+
+      - name: Reject existing or equivalent release tags
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          CANONICAL_VERSION: ${{ steps.version.outputs.canonical }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+
+          while IFS= read -r tag; do
+            if canonical="$(node scripts/release-version.mjs "$tag" --canonical 2>/dev/null)"; then
+              if [ "$canonical" = "$CANONICAL_VERSION" ]; then
+                echo "Requested release $RELEASE_TAG is equivalent to existing tag $tag under FRIDAY version rules." >&2
+                exit 1
+              fi
+            fi
+          done < <(git tag --list 'v*.*.*')
+
+  verify:
+    name: Verify release source
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0, immutable
+        with:
+          version: "0.11.6"
+      - run: npm ci
+      - run: npm run setup:execution-python
+      - run: npm run verify
+
+  sbom:
+    name: Build release SBOM
+    needs: [validate, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version-file: .node-version
+      - name: Install locked dependencies for SBOM
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Generate SPDX SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/release
+          npm sbom --sbom-format spdx > build/release/friday-sbom.spdx.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: friday-sbom
+          path: build/release/friday-sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    name: Build ${{ matrix.asset }}
+    needs: [validate, verify]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            asset: friday-linux-x64
+          - runner: ubuntu-24.04-arm
+            asset: friday-linux-arm64
+          - runner: macos-15-intel
+            asset: friday-darwin-x64
+          - runner: macos-15
+            asset: friday-darwin-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      FRIDAY_BUILD_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - run: npm run package:binary
+
+      - name: Verify packaged asset name and embedded version
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "build/release/${{ matrix.asset }}"
+          test -f "build/release/${{ matrix.asset }}.sha256"
+          test "$(build/release/${{ matrix.asset }} --version)" = "$FRIDAY_BUILD_VERSION"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            build/release/${{ matrix.asset }}
+            build/release/${{ matrix.asset }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: [validate, verify, sbom, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reconfirm this commit is still latest main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          latest_main="$(git rev-parse origin/main)"
+          if [ "$latest_main" != "$RELEASE_SHA" ]; then
+            echo "main advanced while this release was building." >&2
+            echo "release sha: $RELEASE_SHA" >&2
+            echo "latest main: $latest_main" >&2
+            echo "No tag or release will be created. Re-run from the new main tip." >&2
+            exit 1
+          fi
+
+      - name: Refuse a tag or release created during the build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Tag $RELEASE_TAG appeared while the release was building; refusing to overwrite it." >&2
+            exit 1
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; refusing to replace it." >&2
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: friday-*
+          path: release
+          merge-multiple: true
+
+      - name: Verify complete release payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            friday-linux-x64
+            friday-linux-arm64
+            friday-darwin-x64
+            friday-darwin-arm64
+          )
+
+          for asset in "${expected[@]}"; do
+            test -f "release/$asset" || { echo "Missing release asset: $asset" >&2; exit 1; }
+            test -f "release/$asset.sha256" || { echo "Missing checksum: $asset.sha256" >&2; exit 1; }
+            (cd release && sha256sum -c "$asset.sha256")
+          done
+          test -s release/friday-sbom.spdx.json
+          (cd release && sha256sum "${expected[@]}" friday-sbom.spdx.json > SHA256SUMS)
+
+      - name: Attest release binaries and SBOM
+        uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
+        with:
+          subject-path: |
+            release/friday-linux-x64
+            release/friday-linux-arm64
+            release/friday-darwin-x64
+            release/friday-darwin-arm64
+            release/friday-sbom.spdx.json
+
+      - name: Create tag and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$RELEASE_SHA" \
+            --latest \
+            --title "F.R.I.D.A.Y $RELEASE_VERSION" \
+            --generate-notes

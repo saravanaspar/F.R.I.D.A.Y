@@ -1,0 +1,14 @@
+# Default owner for all repository changes.
+* @saravanaspar
+
+# Sensitive automation and security surfaces.
+/.github/CODEOWNERS @saravanaspar
+/.github/workflows/ @saravanaspar
+/scripts/ @saravanaspar
+/deploy/ @saravanaspar
+/plugins/vault/ @saravanaspar
+/plugins/permissions/ @saravanaspar
+/plugins/lifecycle/ @saravanaspar
+/plugins/self-improvement/ @saravanaspar
+/plugins/runtime-settings/ @saravanaspar
+/plugins/channels/ @saravanaspar

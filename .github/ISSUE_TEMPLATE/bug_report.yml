@@ -1,0 +1,81 @@
+name: Bug report
+description: Report a reproducible F.R.I.D.A.Y problem
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Do not include secrets, private tokens, or vulnerability details here. Security issues belong in the private process described in SECURITY.md.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Release tag or git commit SHA.
+      placeholder: v0.1.0 or abc1234
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installation method
+      options:
+        - GitHub Release installer
+        - Source checkout
+        - Standalone binary built locally
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS, architecture, and Node.js version if running from source.
+      placeholder: Ubuntu 24.04 x64, Node 22.x
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest reliable sequence that reproduces the issue.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      description: Remove credentials, tokens, private message content, and unrelated personal data.
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues for duplicates.
+          required: true
+        - label: I removed secrets and private credentials from this report.
+          required: true
+        - label: This is not a security vulnerability requiring private disclosure.
+          required: true

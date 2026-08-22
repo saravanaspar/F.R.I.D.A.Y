@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "assets": [
+    {
+      "source": "bridge/email/email_bridge.py",
+      "target": "channels/email/email_bridge.py"
+    },
+    {
+      "source": "bridge/whatsapp/bridge.mjs",
+      "target": "channels/whatsapp/bridge.mjs"
+    },
+    {
+      "source": "bridge/whatsapp/package.json",
+      "target": "channels/whatsapp/package.json"
+    },
+    {
+      "source": "bridge/whatsapp/package-lock.json",
+      "target": "channels/whatsapp/package-lock.json"
+    }
+  ]
+}

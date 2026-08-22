@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/saravanaspar/F.R.I.D.A.Y/security
+    about: Please use private vulnerability reporting instead of a public issue when available.
+  - name: Support guide
+    url: https://github.com/saravanaspar/F.R.I.D.A.Y/blob/main/SUPPORT.md
+    about: Read the support guide before filing setup or usage questions.

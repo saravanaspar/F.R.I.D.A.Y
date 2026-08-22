@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "assets": [
+    {
+      "source": "python/rlm",
+      "target": "rlm/python/rlm",
+      "recursive": true,
+      "exclude": [
+        "**/__pycache__/**",
+        "**/*.pyc"
+      ]
+    }
+  ]
+}

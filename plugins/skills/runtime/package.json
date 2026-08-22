@@ -1,0 +1,36 @@
+{
+  "name": "@friday/skills",
+  "version": "0.0.1",
+  "description": "FRIDAY skill discovery, validation, metadata, and explicit invocation",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsgo -p tsconfig.build.json",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@friday/operational-errors": "0.0.1",
+    "ignore": "^7.0.5",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "private": true
+}

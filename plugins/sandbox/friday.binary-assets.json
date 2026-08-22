@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "assets": [
+    {
+      "source": "Containerfile",
+      "target": "sandbox/Containerfile",
+      "role": "sandbox-containerfile",
+      "context": "."
+    }
+  ]
+}
