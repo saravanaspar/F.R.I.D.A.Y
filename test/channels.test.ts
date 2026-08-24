@@ -6,8 +6,6 @@ import { PluginTestHost } from "./helpers/plugin-host.js";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { collectContributions, definePlugin, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import { createVaultPlugin } from "../plugins/vault/index.js";
-import { VAULT_CAPABILITY } from "../plugins/vault/contract.js";
-import { VAULT_TRUSTED_CAPABILITY } from "../plugins/vault/trusted-contract.js";
 import { createChannelsPlugin } from "../plugins/channels/index.js";
 import { CHANNELS_CAPABILITY } from "../plugins/channels/contract.js";
 import { CHANNELS_TRUSTED_CAPABILITY } from "../plugins/channels/trusted-contract.js";
@@ -18,6 +16,7 @@ import type { InboundTurn } from "../plugins/turn-loop/contract.js";
 import { TURN_INGRESS_HOOK } from "../plugins/turn-loop/contract.js";
 
 const dirs: string[] = [];
+const originalFridayHome = process.env.FRIDAY_HOME;
 
 function temp(): string {
   const path = mkdtempSync(join(tmpdir(), "friday-channels-root-"));
@@ -26,12 +25,15 @@ function temp(): string {
 }
 
 afterEach(() => {
+  if (originalFridayHome === undefined) delete process.env.FRIDAY_HOME;
+  else process.env.FRIDAY_HOME = originalFridayHome;
   uninstallCapabilityRegistry();
   for (const directory of dirs.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
 async function activate(turns?: InboundTurn[]) {
   const home = temp();
+  process.env.FRIDAY_HOME = home;
   const friday = new PluginTestHost();
   await friday.activatePlugin(capabilitiesPlugin);
   await friday.activatePlugin(definePlugin({ id: "test-events", provides: [EVENTS_CAPABILITY] }, (ctx) => {
@@ -50,74 +52,12 @@ async function activate(turns?: InboundTurn[]) {
 }
 
 describe("channels plugin", () => {
-  it("captures a credential before publication and never emits it into conversational ingress", async () => {
-    const turns: InboundTurn[] = [];
-    await activate(turns);
+  it("does not register a CLI channel or expose local conversational ingestion", async () => {
+    await activate();
     const safe = requireCapability(CHANNELS_CAPABILITY);
-    const channels = requireCapability(CHANNELS_TRUSTED_CAPABILITY);
-    const vault = requireCapability(VAULT_CAPABILITY);
-    const trustedVault = requireCapability(VAULT_TRUSTED_CAPABILITY);
-    const observed: string[] = [];
-    expect(Object.keys(safe).sort()).toEqual(["list", "subscribe"]);
-    expect(safe).not.toHaveProperty("send");
-    expect(safe.list()).toEqual([{ channel: "cli", accountId: "local", state: "stopped" }]);
-    safe.subscribe((message) => { observed.push(message.text); });
-
-    const ref = "vault://channels/telegram/default/bot-token";
-    const sentinel = "CHANNEL_CAPTURE_SECRET_SENTINEL_7419";
-    channels.requestCredentialCapture({
-      principal: {
-        channel: "cli",
-        accountId: "local",
-        conversationId: "terminal",
-        senderId: "local-user",
-      },
-      ref,
-      kind: "bot-token",
-      mode: "create",
-      label: "Telegram bot token",
-    });
-
-    const result = await channels.ingestLocal(sentinel);
-    expect(result.classification).toBe("credential-captured");
-    expect(result.text).toBe("[credential supplied for Telegram bot token]");
-    expect(JSON.stringify(result)).not.toContain(sentinel);
-    expect(JSON.stringify(observed)).not.toContain(sentinel);
-    expect(turns).toEqual([]);
-    expect(vault.exists(ref)).toBe(true);
-
-    let consumed = "";
-    await trustedVault.consume(ref, (secret) => { consumed = Buffer.from(secret).toString("utf8"); });
-    expect(consumed).toBe(sentinel);
-  });
-
-  it("sanitizes ordinary inbound text and emits one generic local turn without knowing the Turn Loop", async () => {
-    const turns: InboundTurn[] = [];
-    await activate(turns);
-    const safe = requireCapability(CHANNELS_CAPABILITY);
-    const channels = requireCapability(CHANNELS_TRUSTED_CAPABILITY);
-    const observed: string[] = [];
-    safe.subscribe((message) => { observed.push(message.text); });
-
-    const result = await channels.ingestLocal("use api_key=sk-supersecretvalue123456 for this");
-    await requireCapability(EVENTS_CAPABILITY).runPending({ maxDeliveries: 10 });
-    expect(result.classification).toBe("message");
-    expect(result.text).toContain("api_key=[REDACTED]");
-    expect(result.text).not.toContain("supersecretvalue123456");
-    expect(observed).toEqual([result.text]);
-    expect(turns).toHaveLength(1);
-    expect(turns[0]).toMatchObject({
-      id: result.id,
-      text: result.text,
-      principal: {
-        authority: "local",
-        channel: "cli",
-        accountId: "local",
-        conversationId: "terminal",
-        senderId: "local-user",
-      },
-    });
-    expect(typeof turns[0]?.reply).toBe("function");
+    const trusted = requireCapability(CHANNELS_TRUSTED_CAPABILITY);
+    expect(safe.list()).toEqual([]);
+    expect(trusted).not.toHaveProperty("ingestLocal");
   });
 
   it("contributes a scheduled reminder whose destination is bound to the originating conversation", async () => {

@@ -5,6 +5,7 @@ import type {
   ChannelInboundHandler,
   ChannelPrincipal,
   ChannelSendResult,
+  ChannelProtectedAction,
   ChannelTarget,
   ChannelTransport,
   ChannelTransportStatus,
@@ -62,6 +63,12 @@ interface TelegramUpdate {
   message?: TelegramMessage;
   edited_message?: TelegramMessage;
   channel_post?: TelegramMessage;
+  callback_query?: {
+    id: string;
+    from: TelegramUser;
+    data?: string;
+    message?: TelegramMessage;
+  };
 }
 
 function escapeRegExp(value: string): string {
@@ -176,6 +183,21 @@ export class TelegramChannelTransport implements ChannelTransport {
     });
   }
 
+  async sendProtectedAction(target: ChannelTarget, text: string, action: ChannelProtectedAction): Promise<ChannelSendResult> {
+    const result = await this.#request<{ message_id: number }>("sendMessage", {
+      chat_id: target.conversationId,
+      text,
+      ...(target.threadId === undefined ? {} : { message_thread_id: Number(target.threadId) || target.threadId }),
+      reply_markup: {
+        inline_keyboard: [[
+          { text: action.approveLabel ?? "Approve", callback_data: `friday:${action.requestId}:approve` },
+          { text: action.denyLabel ?? "Deny", callback_data: `friday:${action.requestId}:deny` },
+        ]],
+      },
+    });
+    return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze([String(result.message_id)]) });
+  }
+
   async #poll(signal: AbortSignal): Promise<void> {
     let backoff = 500;
     while (!signal.aborted) {
@@ -183,12 +205,13 @@ export class TelegramChannelTransport implements ChannelTransport {
         const updates = await this.#request<TelegramUpdate[]>("getUpdates", {
           offset: this.#offset,
           timeout: Math.min(50, Math.max(1, this.#config.pollTimeoutSeconds ?? 25)),
-          allowed_updates: ["message", "edited_message", "channel_post"],
+          allowed_updates: ["message", "edited_message", "channel_post", "callback_query"],
         }, signal);
         backoff = 500;
         for (const update of updates) {
           const message = update.message ?? update.edited_message ?? update.channel_post;
           if (message) await this.#handleMessage(message);
+          if (update.callback_query) await this.#handleCallback(update.callback_query);
           // Checkpoint only after durable admission/intentional filtering.
           this.#offset = Math.max(this.#offset, update.update_id + 1);
         }
@@ -231,7 +254,8 @@ export class TelegramChannelTransport implements ChannelTransport {
 
     const text = message.text ?? message.caption ?? this.#attachmentPlaceholder(message);
     if (!text) return;
-    if (this.#config.requireMention === true && type !== "dm" && !this.#isMentioned(text)) return;
+    const protectedReply = /^(?:(?:<@!?\d+>|@[\w.]+)\s+)?(?:approve|deny|cancel)\s+[A-Z0-9]{6}$/i.test(text.trim());
+    if (this.#config.requireMention === true && type !== "dm" && !this.#isMentioned(text) && !protectedReply) return;
 
     await this.#handler({
       id: String(message.message_id),
@@ -244,6 +268,26 @@ export class TelegramChannelTransport implements ChannelTransport {
       ...(message.reply_to_message?.message_id === undefined ? {} : { replyToMessageId: String(message.reply_to_message.message_id) }),
       attachments: this.#attachments(message),
     });
+  }
+
+  async #handleCallback(callback: NonNullable<TelegramUpdate["callback_query"]>): Promise<void> {
+    const message = callback.message;
+    const data = callback.data ?? "";
+    const match = /^friday:([0-9a-f-]{36}):(approve|deny)$/.exec(data);
+    if (!message || !match || !message.chat || !callback.from?.id) {
+      await this.#request("answerCallbackQuery", { callback_query_id: callback.id, text: "This action is no longer valid." }).catch((error: unknown) => { reportOperationalError({ component: "channels.telegram", operation: "acknowledge invalid callback", error, severity: "warn" }); });
+      return;
+    }
+    const threadId = message.message_thread_id === undefined ? undefined : String(message.message_thread_id);
+    const principal: ChannelPrincipal = { channel: this.channel, accountId: this.accountId, conversationId: String(message.chat.id), senderId: String(callback.from.id), ...(threadId === undefined ? {} : { threadId }) };
+    const type = chatType(message.chat, threadId);
+    if (!channelPrincipalAllowed(principal, type, this.#config)) {
+      await this.#request("answerCallbackQuery", { callback_query_id: callback.id, text: "Not authorized." }).catch((error: unknown) => { reportOperationalError({ component: "channels.telegram", operation: "acknowledge unauthorized callback", error, severity: "warn" }); });
+      return;
+    }
+    const result = await this.#handler?.({ id: `callback-${callback.id}`, principal, chatType: type, text: "", timestamp: Date.now(), attachments: [], protectedAction: { requestId: match[1]!, decision: match[2] as "approve" | "deny" } });
+    const accepted = result?.classification === "approval-resolved";
+    await this.#request("answerCallbackQuery", { callback_query_id: callback.id, text: accepted ? (match[2] === "approve" ? "Approved" : "Denied") : "This action is no longer valid." }).catch((error: unknown) => { reportOperationalError({ component: "channels.telegram", operation: "acknowledge protected callback", error, severity: "warn" }); });
   }
 
   #isMentioned(text: string): boolean {

@@ -1,5 +1,4 @@
 export type ChannelKind =
-  | "cli"
   | "telegram"
   | "whatsapp"
   | "discord"
@@ -83,6 +82,7 @@ export interface RawChannelInboundMessage {
   readonly conversationName?: string | undefined;
   readonly replyToMessageId?: string | undefined;
   readonly attachments?: readonly ChannelAttachment[] | undefined;
+  readonly protectedAction?: { readonly requestId: string; readonly decision: "approve" | "deny" } | undefined;
 }
 
 export interface ChannelTarget {
@@ -99,6 +99,15 @@ export interface ChannelSendResult {
   readonly messageIds: readonly string[];
 }
 
+/** A provider-native protected action. Providers must authenticate the
+ * callback principal and emit it as a normal channel ingress; the hub still
+ * enforces the exact pending-principal match and one-shot expiry. */
+export interface ChannelProtectedAction {
+  readonly requestId: string;
+  readonly approveLabel?: string | undefined;
+  readonly denyLabel?: string | undefined;
+}
+
 export interface ChannelTransportStatus {
   readonly channel: ChannelKind;
   readonly accountId: string;
@@ -106,7 +115,7 @@ export interface ChannelTransportStatus {
   readonly detail?: string | undefined;
 }
 
-export type ChannelInboundHandler = (message: RawChannelInboundMessage) => void | Promise<void>;
+export type ChannelInboundHandler = (message: RawChannelInboundMessage) => void | ChannelInboundMessage | Promise<void | ChannelInboundMessage>;
 
 export interface ChannelAttachmentContent {
   readonly bytes: Uint8Array;
@@ -120,9 +129,10 @@ export interface ChannelTransport {
   start(handler: ChannelInboundHandler): Promise<void>;
   stop(): Promise<void>;
   send(target: ChannelTarget, text: string): Promise<ChannelSendResult>;
+  sendProtectedAction?(target: ChannelTarget, text: string, action: ChannelProtectedAction): Promise<ChannelSendResult>;
   /** Optional trusted fetch port for attachments previously emitted by this transport. */
   fetchAttachment?(attachment: ChannelAttachment, maxBytes: number): Promise<ChannelAttachmentContent>;
-  /** Optional local-terminal privacy control used while trusted credential capture is active. */
+  /** Optional provider UI privacy control used while trusted credential capture is active. */
   setInputPrivacy?(privacy: "normal" | "secret"): void;
   status(): ChannelTransportStatus;
 }
@@ -240,6 +250,8 @@ export interface ChannelCancellationHandle {
 
 export interface ChannelHubOptions {
   readonly credentialVault: CredentialVaultPort;
+  /** Private host path used for crash-safe protected-interaction tombstones. */
+  readonly protectedStatePath?: string | undefined;
   readonly now?: (() => number) | undefined;
   readonly onError?: ((message: string, error?: unknown) => void) | undefined;
 }

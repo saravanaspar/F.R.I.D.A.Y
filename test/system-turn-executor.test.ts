@@ -14,7 +14,7 @@ function context(text = "change a setting"): TurnExecutionContext {
       id: "message-1",
       principal: {
         authority: "local",
-        channel: "cli",
+        channel: "local-test",
         accountId: "local",
         conversationId: "terminal",
         senderId: "local-user",

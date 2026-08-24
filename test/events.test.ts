@@ -335,6 +335,30 @@ describe("events plugin", () => {
     expect(service.deliveryHistory({ consumerId: "consumer" })[0]?.status).toBe("success");
   });
 
+  it("aborts a cooperative active delivery before close waits for the worker", async () => {
+    const stateDir = await tempDir();
+    const service = events({ stateDir, idFactory: sequenceFactory("close") });
+    let started = false;
+    let aborted = false;
+    service.registerConsumer({ id: "consumer", types: ["test.close"], startAt: "beginning" }, async ({ signal }) => {
+      started = true;
+      await new Promise<void>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          aborted = true;
+          const error = new Error("closed");
+          error.name = "AbortError";
+          reject(error);
+        }, { once: true });
+      });
+    });
+    service.publish({ id: "evt", type: "test.close", source: "test", data: null });
+    service.startWorker({ pollIntervalMs: 5, leaseMs: 300 });
+    await waitFor(() => started);
+    await service.close();
+    expect(aborted).toBe(true);
+    expect(service.workerStatus().running).toBe(false);
+  });
+
   it("fails closed when the event database is corrupt", async () => {
     const stateDir = await tempDir();
     await mkdir(stateDir, { recursive: true });

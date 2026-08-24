@@ -44,20 +44,22 @@ Those belong to plugins.
 
 `friday setup` is a fixed, non-extensible host setup surface, not FRIDAY's runtime
 entrypoint. On first run it asks only for the minimum boot configuration: the
-main model plus a credential when that provider requires one. Safe defaults use
-the main model for routing and `ask` permission mode. Rerunning setup may collect
-and persist bounded non-secret runtime defaults and perform explicitly approved
-host provisioning such as building the approved local sandbox image. Secrets
-remain Vault-owned.
+main model plus a credential when that provider requires one, the IANA timezone,
+and at least one ingress channel with one explicitly confirmed exact operator
+identity. `allowAll` transport admission never implies operator authority. Safe
+defaults use the main model for routing and `ask` permission mode. Rerunning setup
+may collect and persist bounded non-secret runtime defaults and perform explicitly
+approved host provisioning such as building the approved local sandbox image.
+Secrets remain Vault-owned.
 
 Setup must not load the runtime plugin graph, expose a dynamic command
 registry, dispatch plugin operations, or become a second orchestration surface.
 Operational interaction happens through normal plugin contracts after FRIDAY is
 running. The `friday` runtime command is a foreground daemon/log process and does
 not consume stdin as conversational ingress. Human turns arrive through configured
-Channels transports such as Telegram or Discord. The CLI transport remains an
-output/testing adapter only; local interactive administration belongs to
-`friday setup`, not the runtime conversation path.
+Channels transports such as Telegram or Discord. There is no conversational CLI
+transport; local interactive administration belongs to `friday setup` and
+`friday doctor`, not the runtime conversation path.
 
 ## Composition Kernel Rule
 
@@ -222,7 +224,10 @@ intercepted by the trusted channel boundary before `turn.ingress`. They are
 matched to exact channel/account/conversation/sender/thread state and are never
 interpreted by Routing or an LLM. Secret capture must be field-specific, may
 validate before Vault mutation, and must not return plaintext into the normal
-turn path.
+turn path. Cancellation is checked before other protected interactions. Native
+provider actions and strict text fallbacks share the same one-shot state, which is
+privately persisted as bounded restart/replay tombstones so stale responses fail
+closed rather than becoming ordinary turns.
 
 ## Runtime Configuration Rule
 

@@ -272,6 +272,31 @@ describe("scheduler plugin", () => {
     expect(service.workerStatus().running).toBe(false);
   });
 
+  it("aborts a cooperative active task before close waits for the worker", async () => {
+    const stateDir = await tempDir();
+    const current = new Date("2026-08-18T12:00:00.000Z");
+    const service = scheduler({ stateDir, now: () => current, idFactory: sequenceFactory("close") });
+    service.schedule({ id: "close-me", taskType: "test.close", schedule: { kind: "once", at: current.toISOString() } });
+    let started = false;
+    let aborted = false;
+    service.registerExecutor("test.close", async ({ signal }) => {
+      started = true;
+      await new Promise<void>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          aborted = true;
+          const error = new Error("closed");
+          error.name = "AbortError";
+          reject(error);
+        }, { once: true });
+      });
+    });
+    service.startWorker({ pollIntervalMs: 5, leaseMs: 300 });
+    await waitFor(() => started);
+    await service.close();
+    expect(aborted).toBe(true);
+    expect(service.workerStatus().running).toBe(false);
+  });
+
   it("uses SQLite leases so concurrent scheduler instances claim a task only once", async () => {
     const stateDir = await tempDir();
     const current = new Date("2026-08-18T12:00:00.000Z");

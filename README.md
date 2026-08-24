@@ -114,7 +114,7 @@ Requirements:
 
 - Node.js **22.22.2** and npm for the release-equivalent toolchain (`.node-version` pins this exact build runtime);
 - Git;
-- at least one supported ingress channel during first-run setup;
+- at least one supported ingress channel and one explicitly confirmed exact operator identity during first-run setup;
 - credentials for the model provider you select, when required.
 
 ```bash
@@ -148,9 +148,9 @@ On the first setup, F.R.I.D.A.Y requires:
 1. a main model;
 2. provider credentials when the selected provider requires them;
 3. your IANA wall-clock timezone, for example `Asia/Kolkata`;
-4. at least **one enabled ingress channel**.
+4. at least **one enabled ingress channel** with one explicitly confirmed exact operator identity.
 
-Runtime defaults are not published until first-run channel setup is complete. Secrets are validated and stored in Vault rather than written to `runtime.env`.
+Runtime defaults are not published until first-run channel setup and exact operator pairing are complete. `allowAll` may widen transport admission, but it never creates an operator implicitly. Secrets are validated and stored in Vault rather than written to `runtime.env`.
 
 Useful setup commands:
 
@@ -183,19 +183,23 @@ Run `friday doctor` at any time for a sectioned installation, configuration, sec
 
 F.R.I.D.A.Y routes human messaging through a common trusted channel boundary while keeping provider-specific transport logic isolated.
 
-| Channel | Ingress | Egress | Notes |
-| --- | :---: | :---: | --- |
-| Telegram | Yes | Yes | Bot API polling/send path. |
-| Discord | Yes | Yes | Gateway + REST. |
-| Slack | Yes | Yes | Socket Mode + Web API. |
-| WhatsApp | Yes | Yes | Authenticated loopback bridge with durable message ACKs. |
-| Signal | Yes | Yes | Loopback `signal-cli` daemon integration. |
-| Email | Yes | Yes | IMAP polling + SMTP replies. |
-| Microsoft Teams | Yes | Yes | Bot Framework callbacks and outbound activities. |
-| Google Chat | Yes | Yes | Authenticated Chat callbacks and app sends. |
-| SMS / Twilio | Yes | Yes | Signed webhook ingress + REST egress. |
+| Channel | Ingress | Egress | Approval UI | Media ingress |
+| --- | :---: | :---: | --- | --- |
+| Telegram | Yes | Yes | Native buttons + text code | Retrieved |
+| Discord | Yes | Yes | Native buttons + text code | Retrieved |
+| Slack | Yes | Yes | Native buttons + text code | Safe notice only |
+| WhatsApp | Yes | Yes | Text code | Safe notice only |
+| Signal | Yes | Yes | Text code | Safe notice only |
+| Email | Yes | Yes | Text code | Safe notice only |
+| Microsoft Teams | Yes | Yes | Adaptive Card buttons + text code | Safe notice only |
+| Google Chat | Yes | Yes | Card buttons + text code | Safe notice only |
+| SMS / Twilio | Yes | Yes | Text code | Safe notice only |
 
-Network channels default toward explicit identity/access configuration. Protected approvals, credential capture, and trusted prompts are intercepted before ordinary routing/model use.
+Network channels default toward explicit identity/access configuration. Protected approvals, credential capture, trusted prompts, and cancellation codes are intercepted before ordinary routing/model use and scoped to the exact channel/account/conversation/sender/thread principal. Protected state is persisted privately so a restart rejects stale replies and callback replays instead of routing them as new user requests. Unsupported media is admitted as an explicit safe notice with no unusable attachment handle.
+
+Email identity is derived from the parsed `From` address; F.R.I.D.A.Y does not currently evaluate mailbox `Authentication-Results`. Grant privileged Email authority only when the receiving mailbox or upstream gateway reliably enforces anti-spoofing policy.
+
+The `friday` runtime does not read terminal conversation input and registers no CLI channel. The command line is reserved for setup/onboarding compatibility, doctor, and bounded stopped-runtime maintenance.
 
 ## How it fits together
 

@@ -3,10 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
 import { createHmac, createSign, generateKeyPairSync, type KeyObject } from "node:crypto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   ChannelHub,
-  CliChannelTransport,
   DiscordChannelTransport,
   EmailChannelTransport,
   GoogleChatChannelTransport,
@@ -26,10 +25,16 @@ import {
   type ChannelTransportStatus,
   type CredentialVaultPort,
 } from "../src/index.js";
+import { accountStatePath } from "../src/state.js";
 
 const tempDirs: string[] = [];
+const testHome = mkdtempSync(join(tmpdir(), "friday-channel-home-"));
+const originalFridayHome = process.env.FRIDAY_HOME;
+beforeAll(() => { process.env.FRIDAY_HOME = testHome; });
+afterAll(() => { rmSync(testHome, { recursive: true, force: true }); if (originalFridayHome === undefined) delete process.env.FRIDAY_HOME; else process.env.FRIDAY_HOME = originalFridayHome; });
 afterEach(() => {
   vi.unstubAllGlobals();
+  rmSync(join(testHome, "channels"), { recursive: true, force: true });
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -232,6 +237,7 @@ describe("credential capture", () => {
     expect(hub.cancelCredentialCapture("wrong")).toBe(false);
     expect(hub.cancelCredentialCapture(capture.id)).toBe(true);
     expect(hub.pendingCredentialCaptures()).toEqual([]);
+    expect((await hub.ingest(inbound("reply-after-cancel"))).classification).toBe("credential-capture-error");
     hub.requestCredentialCapture({ principal: principal(), ref: "vault://service/token", kind: "token", mode: "create", ttlMs: 1_000 });
     now = 2_001;
     expect(hub.pendingCredentialCaptures()).toEqual([]);
@@ -285,15 +291,123 @@ describe("protected channel interactions", () => {
     expect(hub.pendingApprovals()).toHaveLength(1);
 
     const wrongSender = await hub.ingest(inbound(`approve ${pending.code}`, principal({ senderId: "user-2" })));
-    expect(wrongSender.classification).toBe("message");
+    expect(wrongSender.classification).toBe("approval-error");
     expect(hub.pendingApprovals()).toHaveLength(1);
 
     const resolved = await hub.ingest(inbound(`approve ${pending.code}`));
     expect(resolved.classification).toBe("approval-resolved");
     expect(resolved.approval).toMatchObject({ requestId: pending.id, approved: true });
     await expect(approval).resolves.toBe(true);
-    expect(observed).toHaveLength(1);
-    expect(observed[0]?.principal.senderId).toBe("user-2");
+    expect(observed).toHaveLength(0);
+  });
+
+  it("keeps resolved and stopped approval codes fail-closed without blocking a fresh request", async () => {
+    const stateDirectory = mkdtempSync(join(tmpdir(), "friday-approval-replay-"));
+    tempDirs.push(stateDirectory);
+    const statePath = join(stateDirectory, "protected.json");
+    const first = new ChannelHub({ credentialVault: new FakeVault(), protectedStatePath: statePath });
+    first.registerTransport({ channel: "telegram", accountId: "default", start: async () => undefined, stop: async () => undefined, status: () => ({ channel: "telegram", accountId: "default", state: "running" }), send: async (target) => ({ channel: "telegram", accountId: "default", conversationId: target.conversationId, messageIds: ["1"] }) });
+    const approval = first.requestApproval({ principal: principal(), actionId: "test", effect: "write", resource: "x", reason: "test" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const resolvedPending = first.pendingApprovals()[0]!;
+    const code = resolvedPending.code;
+    expect((await first.ingest(inbound(`approve ${code}`))).classification).toBe("approval-resolved");
+    expect((await first.ingest(inbound(`approve ${code}`))).classification).toBe("approval-error");
+    expect((await first.ingest({ ...inbound(""), protectedAction: { requestId: resolvedPending.id, decision: "approve" } })).classification).toBe("approval-error");
+    await expect(approval).resolves.toBe(true);
+    const fresh = first.requestApproval({ principal: principal(), actionId: "test-2", effect: "write", resource: "y", reason: "test" });
+    expect(first.pendingApprovals()).toHaveLength(1);
+    const stoppedPending = first.pendingApprovals()[0]!;
+    await first.stopAll();
+    const second = new ChannelHub({ credentialVault: new FakeVault(), protectedStatePath: statePath });
+    expect((await second.ingest(inbound(`approve ${stoppedPending.code}`))).classification).toBe("approval-error");
+    expect((await second.ingest({ ...inbound(""), protectedAction: { requestId: stoppedPending.id, decision: "approve" } })).classification).toBe("approval-error");
+    await expect(fresh).resolves.toBe(false);
+  });
+
+  it("still stops every transport when the final protected-state snapshot fails", async () => {
+    const stateDirectory = mkdtempSync(join(tmpdir(), "friday-stop-persistence-"));
+    tempDirs.push(stateDirectory);
+    const statePath = join(stateDirectory, "protected.json");
+    let stopped = false;
+    const hub = new ChannelHub({ credentialVault: new FakeVault(), protectedStatePath: statePath, onError: () => undefined });
+    hub.registerTransport({
+      channel: "telegram",
+      accountId: "default",
+      start: async () => undefined,
+      stop: async () => { stopped = true; },
+      status: () => ({ channel: "telegram", accountId: "default", state: "running" }),
+      send: async (target) => ({ channel: "telegram", accountId: "default", conversationId: target.conversationId, messageIds: ["1"] }),
+    });
+    const approval = hub.requestApproval({ principal: principal(), actionId: "test", effect: "write", resource: "x", reason: "test" });
+    await Promise.resolve();
+    rmSync(statePath);
+    mkdirSync(statePath, { mode: 0o700 });
+    await expect(hub.stopAll()).rejects.toThrow();
+    expect(stopped).toBe(true);
+    await expect(approval).resolves.toBe(false);
+  });
+
+  it("sanitizes native approval notices and binds one-shot callbacks to the exact principal", async () => {
+    let nativeNotice = "";
+    const hub = new ChannelHub({ credentialVault: new FakeVault() });
+    hub.registerTransport({
+      channel: "telegram",
+      accountId: "default",
+      start: async () => undefined,
+      stop: async () => undefined,
+      status: () => ({ channel: "telegram", accountId: "default", state: "running" }),
+      send: async (target) => ({ channel: "telegram", accountId: "default", conversationId: target.conversationId, messageIds: ["fallback"] }),
+      sendProtectedAction: async (target, text) => {
+        nativeNotice = text;
+        return { channel: "telegram", accountId: "default", conversationId: target.conversationId, messageIds: ["native"] };
+      },
+    });
+
+    const approval = hub.requestApproval({
+      principal: principal({ threadId: "topic-1" }),
+      actionId: "native.test",
+      effect: "external-write",
+      resource: "remote",
+      reason: "use api_key=sk-native-secret-value-123456",
+    });
+    await Promise.resolve();
+    const pending = hub.pendingApprovals()[0]!;
+    expect(nativeNotice).toContain("api_key=[REDACTED]");
+    expect(nativeNotice).not.toContain("native-secret-value");
+
+    const wrong = await hub.ingest({ ...inbound("", principal({ senderId: "user-2", threadId: "topic-1" })), protectedAction: { requestId: pending.id, decision: "approve" } });
+    expect(wrong.classification).toBe("approval-error");
+    expect(hub.pendingApprovals()).toHaveLength(1);
+
+    const resolved = await hub.ingest({ ...inbound("", principal({ threadId: "topic-1" })), protectedAction: { requestId: pending.id, decision: "approve" } });
+    expect(resolved.classification).toBe("approval-resolved");
+    await expect(approval).resolves.toBe(true);
+    expect((await hub.ingest({ ...inbound("", principal({ threadId: "topic-1" })), protectedAction: { requestId: pending.id, decision: "approve" } })).classification).toBe("approval-error");
+  });
+
+  it("rejects principals that cannot be represented by the bounded restart state", async () => {
+    const { hub } = protectedHub();
+    await expect(hub.requestApproval({
+      principal: principal({ threadId: "x".repeat(257) }),
+      actionId: "test",
+      effect: "write",
+      resource: "x",
+      reason: "test",
+    })).rejects.toThrow(/threadId exceeds 256/);
+  });
+
+  it("lets cancellation win over a foreground approval and permits a new watcher after its tombstone", async () => {
+    const { hub } = protectedHub();
+    const approval = hub.requestApproval({ principal: principal(), actionId: "test", effect: "write", resource: "x", reason: "test" });
+    await Promise.resolve();
+    const cancellation = await hub.watchCancellation({ principal: principal(), label: "job" });
+    const result = await hub.ingest(inbound(`cancel ${cancellation.request.code}`));
+    expect(result.classification).toBe("cancellation-requested");
+    expect(cancellation.signal.aborted).toBe(true);
+    hub.cancelApproval((await hub.pendingApprovals())[0]!.id);
+    await expect(approval).resolves.toBe(false);
+    await expect(hub.watchCancellation({ principal: principal(), label: "new-job" })).resolves.toBeDefined();
   });
 
   it("keeps strict credential capture active until a token-only value validates", async () => {
@@ -394,6 +508,81 @@ describe("protected channel interactions", () => {
     await expect(hub.watchCancellation({ principal: principal(), label: "job" })).rejects.toThrow("transport unavailable");
     await expect(hub.watchCancellation({ principal: principal(), label: "job" })).resolves.toBeDefined();
   });
+
+  it("loads protected interactions as crash tombstones and never republishes the next reply", async () => {
+    const stateDirectory = mkdtempSync(join(tmpdir(), "friday-protected-state-"));
+    tempDirs.push(stateDirectory);
+    const statePath = join(stateDirectory, "protected.json");
+    const vault = new FakeVault();
+    const first = new ChannelHub({ credentialVault: vault, protectedStatePath: statePath });
+    first.requestCredentialCapture({ principal: principal(), ref: "vault://crash/key", kind: "api-key", mode: "create" });
+    const second = new ChannelHub({ credentialVault: vault, protectedStatePath: statePath });
+    const observed: ChannelInboundMessage[] = [];
+    second.subscribe((message) => { observed.push(message); });
+    const rejected = await second.ingest(inbound("secret-after-crash"));
+    expect(rejected.classification).toBe("credential-capture-error");
+    expect(observed).toHaveLength(0);
+    expect(vault.values.size).toBe(0);
+    const ordinary = await second.ingest(inbound("ordinary message"));
+    expect(ordinary.classification).toBe("message");
+    expect(observed).toHaveLength(1);
+  });
+
+  it("fails closed when protected-interaction restart state is malformed", () => {
+    const stateDirectory = mkdtempSync(join(tmpdir(), "friday-protected-malformed-"));
+    tempDirs.push(stateDirectory);
+    const statePath = join(stateDirectory, "protected.json");
+    writeFileSync(statePath, "{broken", { mode: 0o600 });
+    expect(() => new ChannelHub({ credentialVault: new FakeVault(), protectedStatePath: statePath })).toThrow(/could not be loaded safely/);
+  });
+
+  it("rejects stale approval and prompt replies after restart", async () => {
+    const stateDirectory = mkdtempSync(join(tmpdir(), "friday-protected-restart-"));
+    tempDirs.push(stateDirectory);
+    const statePath = join(stateDirectory, "protected.json");
+    const first = new ChannelHub({ credentialVault: new FakeVault(), protectedStatePath: statePath });
+    const transport: ChannelTransport = { channel: "telegram", accountId: "default", start: async () => undefined, stop: async () => undefined, status: () => ({ channel: "telegram", accountId: "default", state: "running" }), send: async (target) => ({ channel: "telegram", accountId: "default", conversationId: target.conversationId, messageIds: ["1"] }) };
+    first.registerTransport(transport);
+    const approval = first.requestApproval({ principal: principal(), actionId: "test.action", effect: "external-write", resource: "x", reason: "test" });
+    const promptPrincipal = principal({ senderId: "user-2", threadId: "topic-2" });
+    const prompt = first.requestPrompt({ principal: promptPrincipal, message: "Protected value" });
+    void prompt.catch(() => undefined);
+    await Promise.resolve();
+    const code = first.pendingApprovals()[0]!.code;
+    const second = new ChannelHub({ credentialVault: new FakeVault(), protectedStatePath: statePath });
+    const observed: ChannelInboundMessage[] = [];
+    second.subscribe((message) => { observed.push(message); });
+    expect((await second.ingest(inbound(`approve ${code}`))).classification).toBe("approval-error");
+    expect((await second.ingest(inbound("stale prompt reply", promptPrincipal))).classification).toBe("prompt-error");
+    expect(observed).toHaveLength(0);
+    expect((await second.ingest(inbound("ordinary after stale prompt", promptPrincipal))).classification).toBe("message");
+    expect(observed).toHaveLength(1);
+    first.cancelApproval(first.pendingApprovals()[0]!.id);
+    first.cancelPrompt(first.pendingPrompts()[0]!.id);
+    await approval;
+    await expect(prompt).rejects.toThrow(/cancelled/);
+  });
+
+  it("lets a live cancellation code outrank a stale prompt tombstone after restart", async () => {
+    const stateDirectory = mkdtempSync(join(tmpdir(), "friday-protected-cancel-priority-"));
+    tempDirs.push(stateDirectory);
+    const statePath = join(stateDirectory, "protected.json");
+    const transport: ChannelTransport = { channel: "telegram", accountId: "default", start: async () => undefined, stop: async () => undefined, status: () => ({ channel: "telegram", accountId: "default", state: "running" }), send: async (target) => ({ channel: "telegram", accountId: "default", conversationId: target.conversationId, messageIds: ["1"] }) };
+    const first = new ChannelHub({ credentialVault: new FakeVault(), protectedStatePath: statePath });
+    first.registerTransport(transport);
+    const prompt = first.requestPrompt({ principal: principal(), message: "Protected value" });
+    void prompt.catch(() => undefined);
+    await Promise.resolve();
+    await first.stopAll();
+    await expect(prompt).rejects.toThrow(/stopped/);
+
+    const second = new ChannelHub({ credentialVault: new FakeVault(), protectedStatePath: statePath });
+    second.registerTransport(transport);
+    const cancellation = await second.watchCancellation({ principal: principal(), label: "restarted job" });
+    expect((await second.ingest(inbound(`cancel ${cancellation.request.code}`))).classification).toBe("cancellation-requested");
+    expect(cancellation.signal.aborted).toBe(true);
+    expect((await second.ingest(inbound("stale prompt value"))).classification).toBe("prompt-error");
+  });
 });
 
 describe("channel hub", () => {
@@ -471,23 +660,6 @@ describe("access policy and chunking", () => {
   });
 });
 
-describe("CLI channel", () => {
-  it("feeds local input through the same hub boundary and sends to stdout abstraction", async () => {
-    const writes: string[] = [];
-    const cli = new CliChannelTransport("local", (text) => writes.push(text), false);
-    const hub = new ChannelHub({ credentialVault: new FakeVault() });
-    hub.registerTransport(cli);
-    const seen: ChannelInboundMessage[] = [];
-    hub.subscribe((message) => { seen.push(message); });
-    await hub.startAll();
-    await cli.ingest("token=supersecret123");
-    await hub.send({ channel: "cli", accountId: "local", conversationId: "terminal" }, "hello");
-    await hub.stopAll();
-    expect(seen[0]?.text).toBe("token=[REDACTED]");
-    expect(writes).toEqual(["hello\n"]);
-  });
-});
-
 describe("Telegram transport", () => {
   it("uses an opaque Vault ref, default-denies unknown senders, and normalizes allowed messages", async () => {
     const responses = [
@@ -557,7 +729,8 @@ let sends = 0;
 const sent = [];
 const pending = [
   { messageId: "blocked", chatId: "15550001@s.whatsapp.net", senderId: "15559999@s.whatsapp.net", body: "blocked" },
-  { messageId: "allowed", chatId: "15550001@s.whatsapp.net", senderId: "15551234:9@s.whatsapp.net", senderName: "Ada", body: "hello whatsapp", timestamp: 123 },
+  { messageId: "allowed", chatId: "15550001@s.whatsapp.net", senderId: "15551234:9@s.whatsapp.net", senderName: "Ada", body: "caption whatsapp", attachments: [{ id: "wa-media", mimeType: "image/png", size: 10 }], timestamp: 123 },
+  { messageId: "allowed-media-only", chatId: "15550001@s.whatsapp.net", senderId: "15551234:9@s.whatsapp.net", attachments: [{ id: "wa-media-only", mimeType: "image/png", size: 10 }], timestamp: 124 },
 ];
 
 function json(response, status, body) {
@@ -642,9 +815,10 @@ describe("WhatsApp transport", () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
 
-      expect(seen).toHaveLength(1);
-      expect(seen[0]?.id).toBe("allowed");
-      expect(seen[0]?.text).toBe("hello whatsapp");
+      expect(seen).toHaveLength(2);
+      expect(seen.find((item) => item.id === "allowed")?.text).toBe("caption whatsapp\n[attachment received; WhatsApp media retrieval is not enabled]");
+      expect(seen.find((item) => item.id === "allowed-media-only")?.text).toBe("[attachment received; WhatsApp media retrieval is not enabled]");
+      expect(seen.every((item) => item.attachments.length === 0)).toBe(true);
       expect(seen[0]?.principal.senderId).toBe("15551234@s.whatsapp.net");
       expect(seen[0]?.principal.conversationId).toBe("15550001@s.whatsapp.net");
       expect(seen[0]?.senderName).toBe("Ada");
@@ -703,6 +877,70 @@ function secretConsumer(values: Readonly<Record<string, string>>) {
   };
 }
 
+describe("native protected-action payloads", () => {
+  it("emits opaque callback payloads for Telegram, Discord, and Slack", async () => {
+    const action = { requestId: "123e4567-e89b-12d3-a456-426614174000", approveLabel: "Approve", denyLabel: "Deny" };
+    const telegramFetch = vi.fn(async () => new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", telegramFetch);
+    const telegram = new TelegramChannelTransport({ credentialRef: "vault://telegram/token" }, secretConsumer({ "vault://telegram/token": "telegram-token" }));
+    await telegram.sendProtectedAction({ channel: "telegram", accountId: "default", conversationId: "chat-1" }, "approval", action);
+    expect(JSON.parse(String(telegramFetch.mock.calls[0]?.[1]?.body))).toMatchObject({ reply_markup: { inline_keyboard: [[{ callback_data: `friday:${action.requestId}:approve` }, { callback_data: `friday:${action.requestId}:deny` }]] } });
+
+    const discordFetch = vi.fn(async () => new Response(JSON.stringify({ id: "d1" }), { status: 200, headers: { "content-type": "application/json" } }));
+    const discord = new DiscordChannelTransport({ credentialRef: "vault://discord/token", apiBaseUrl: "https://discord.test" }, secretConsumer({ "vault://discord/token": "discord-token" }), { fetch: discordFetch as typeof fetch, websocketFactory: () => { throw new Error("not used"); } });
+    await discord.sendProtectedAction({ channel: "discord", accountId: "default", conversationId: "channel-1" }, "approval", action);
+    expect(JSON.parse(String(discordFetch.mock.calls[0]?.[1]?.body))).toMatchObject({ components: [{ components: [{ custom_id: `friday:${action.requestId}:approve` }, { custom_id: `friday:${action.requestId}:deny` }] }] });
+
+    const slackFetch = vi.fn(async () => new Response(JSON.stringify({ ok: true, ts: "s1" }), { status: 200, headers: { "content-type": "application/json" } }));
+    const slack = new SlackChannelTransport({ botTokenRef: "vault://slack/bot", appTokenRef: "vault://slack/app" }, secretConsumer({ "vault://slack/bot": "slack-bot", "vault://slack/app": "slack-app" }), { fetch: slackFetch as typeof fetch, websocketFactory: () => { throw new Error("not used"); } });
+    await slack.sendProtectedAction({ channel: "slack", accountId: "default", conversationId: "D123", threadId: "thread-1" }, "approval", action);
+    const slackBody = JSON.parse(String(slackFetch.mock.calls[0]?.[1]?.body)) as { blocks?: Array<{ elements?: Array<{ action_id?: string }> }>; thread_ts?: string };
+    expect(slackBody.thread_ts).toBe("thread-1");
+    expect(slackBody.blocks?.[1]?.elements?.map((element) => element.action_id)).toEqual([`friday:${action.requestId}:approve`, `friday:${action.requestId}:deny`]);
+  });
+
+  it("turns an authenticated Telegram callback into a protected action before acknowledging it", async () => {
+    const requestId = "123e4567-e89b-12d3-a456-426614174000";
+    let delivered = false;
+    let polls = 0;
+    const telegramFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = String(input).split("/").at(-1);
+      if (method === "getMe") return new Response(JSON.stringify({ ok: true, result: { id: 99, username: "friday_bot" } }), { status: 200, headers: { "content-type": "application/json" } });
+      if (method === "getUpdates") {
+        polls += 1;
+        const result = polls === 1 ? [{
+          update_id: 1,
+          callback_query: {
+            id: "callback-1",
+            from: { id: 7, first_name: "Ada" },
+            data: `friday:${requestId}:approve`,
+            message: { message_id: 10, date: 1, chat: { id: 42, type: "private" } },
+          },
+        }] : [];
+        return new Response(JSON.stringify({ ok: true, result }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (method === "answerCallbackQuery") {
+        expect(JSON.parse(String(init?.body))).toMatchObject({ callback_query_id: "callback-1", text: "Approved" });
+        return new Response(JSON.stringify({ ok: true, result: true }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`unexpected Telegram method ${method}`);
+    });
+    vi.stubGlobal("fetch", telegramFetch);
+    const transport = new TelegramChannelTransport({ credentialRef: "vault://telegram/callback", allowedSenderIds: ["7"] }, secretConsumer({ "vault://telegram/callback": "telegram-token" }));
+    await transport.start(async (message) => {
+      expect(message.principal).toMatchObject({ conversationId: "42", senderId: "7" });
+      expect(message.protectedAction).toEqual({ requestId, decision: "approve" });
+      delivered = true;
+      return { ...message, attachments: [], classification: "approval-resolved", redactionCount: 0 };
+    });
+    const deadline = Date.now() + 1_000;
+    while (!delivered && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(delivered).toBe(true);
+    expect(telegramFetch.mock.calls.some(([input]) => String(input).endsWith("/answerCallbackQuery"))).toBe(true);
+    await transport.stop();
+  });
+});
+
 describe("Discord transport", () => {
   it("uses a Vault token, accepts an allowed Gateway message, sends via REST, and shuts down", async () => {
     const sockets: TestSocket[] = [];
@@ -711,6 +949,10 @@ describe("Discord transport", () => {
       if (url.includes("/channels/channel-1/messages")) {
         expect(init?.headers).toMatchObject({ authorization: "Bot discord-token" });
         return new Response(JSON.stringify({ id: "discord-out-1" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (url.includes("/interactions/interaction-1/interaction-token/callback")) {
+        expect(JSON.parse(String(init?.body))).toMatchObject({ type: 4, data: { content: "Approved." } });
+        return new Response(null, { status: 204 });
       }
       throw new Error(`unexpected Discord fetch ${url}`);
     });
@@ -732,6 +974,7 @@ describe("Discord transport", () => {
               socket.emit("message", { data: JSON.stringify({ op: 0, t: "READY", s: 1, d: { user: { id: "bot-1" } } }) });
               socket.emit("message", { data: JSON.stringify({ op: 0, t: "MESSAGE_CREATE", s: 2, d: { id: "discord-blocked", channel_id: "channel-1", content: "blocked discord", author: { id: "user-2", username: "mallory" } } }) });
               socket.emit("message", { data: JSON.stringify({ op: 0, t: "MESSAGE_CREATE", s: 3, d: { id: "discord-in-1", channel_id: "channel-1", content: "hello discord", author: { id: "user-1", username: "ada" } } }) });
+              socket.emit("message", { data: JSON.stringify({ op: 0, t: "INTERACTION_CREATE", s: 4, d: { id: "interaction-1", token: "interaction-token", type: 3, channel_id: "channel-1", user: { id: "user-1" }, data: { custom_id: "friday:123e4567-e89b-12d3-a456-426614174000:approve" } } }) });
             });
           }
         };
@@ -739,9 +982,18 @@ describe("Discord transport", () => {
       },
     });
     const seen: ChannelInboundMessage[] = [];
-    await transport.start((message) => { seen.push(message as ChannelInboundMessage); });
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    let protectedAction: unknown;
+    await transport.start((message) => {
+      if (message.protectedAction) {
+        protectedAction = message.protectedAction;
+        return { ...message, attachments: [], classification: "approval-resolved", redactionCount: 0 };
+      }
+      seen.push(message as ChannelInboundMessage);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(seen.map((item) => item.text)).toEqual(["hello discord"]);
+    expect(protectedAction).toEqual({ requestId: "123e4567-e89b-12d3-a456-426614174000", decision: "approve" });
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/interactions/interaction-1/interaction-token/callback"))).toBe(true);
     const identifyFrame = sockets[0]?.sent.find((frame) => {
       try { return (JSON.parse(frame) as { op?: number }).op === 2; } catch { return false; }
     });
@@ -753,6 +1005,72 @@ describe("Discord transport", () => {
     expect(sent.messageIds).toEqual(["discord-out-1"]);
     await transport.stop();
     expect(transport.status().state).toBe("stopped");
+  });
+
+  it("serializes durable admission and resumes from the last admitted Gateway sequence", async () => {
+    const order: string[] = [];
+    let firstSocket: TestSocket | undefined;
+    const first = new DiscordChannelTransport({
+      accountId: "resume-test",
+      credentialRef: "vault://discord/resume",
+      allowedSenderIds: ["user-1"],
+    }, secretConsumer({ "vault://discord/resume": "discord-token" }), {
+      fetch: vi.fn() as never,
+      websocketFactory: () => {
+        firstSocket = new TestSocket();
+        queueMicrotask(() => firstSocket?.emit("message", { data: JSON.stringify({ op: 10, d: { heartbeat_interval: 5_000 } }) }));
+        const originalSend = firstSocket.send.bind(firstSocket);
+        firstSocket.send = (data: string) => {
+          originalSend(data);
+          if ((JSON.parse(data) as { op?: number }).op !== 2) return;
+          queueMicrotask(() => {
+            firstSocket?.emit("message", { data: JSON.stringify({ op: 0, t: "READY", s: 1, d: { user: { id: "bot-1" }, session_id: "session-1", resume_gateway_url: "wss://gateway-us-east1-a.discord.gg" } }) });
+            firstSocket?.emit("message", { data: JSON.stringify({ op: 0, t: "MESSAGE_CREATE", s: 2, d: { id: "first", channel_id: "channel-1", content: "first", author: { id: "user-1" } } }) });
+            firstSocket?.emit("message", { data: JSON.stringify({ op: 0, t: "MESSAGE_CREATE", s: 3, d: { id: "second", channel_id: "channel-1", content: "second", author: { id: "user-1" } } }) });
+          });
+        };
+        return firstSocket as never;
+      },
+    });
+    await first.start(async (message) => {
+      order.push(`start:${message.id}`);
+      if (message.id === "first") await new Promise((resolve) => setTimeout(resolve, 25));
+      order.push(`end:${message.id}`);
+    });
+    const admittedDeadline = Date.now() + 1_000;
+    while (order.length < 4 && Date.now() < admittedDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(order).toEqual(["start:first", "end:first", "start:second", "end:second"]);
+    expect(JSON.parse(readFileSync(accountStatePath("discord", "resume-test", "session.json"), "utf8"))).toMatchObject({ sessionId: "session-1", sequence: 3, botUserId: "bot-1" });
+    await first.stop();
+
+    let resumeUrl = "";
+    let resumeFrame: unknown;
+    let secondSocket: TestSocket | undefined;
+    const second = new DiscordChannelTransport({
+      accountId: "resume-test",
+      credentialRef: "vault://discord/resume",
+      allowedSenderIds: ["user-1"],
+    }, secretConsumer({ "vault://discord/resume": "discord-token" }), {
+      fetch: vi.fn() as never,
+      websocketFactory: (url) => {
+        resumeUrl = url;
+        secondSocket = new TestSocket();
+        queueMicrotask(() => secondSocket?.emit("message", { data: JSON.stringify({ op: 10, d: { heartbeat_interval: 5_000 } }) }));
+        const originalSend = secondSocket.send.bind(secondSocket);
+        secondSocket.send = (data: string) => {
+          originalSend(data);
+          const frame = JSON.parse(data) as { op?: number };
+          if (frame.op !== 6) return;
+          resumeFrame = frame;
+          queueMicrotask(() => secondSocket?.emit("message", { data: JSON.stringify({ op: 0, t: "RESUMED", s: 4, d: {} }) }));
+        };
+        return secondSocket as never;
+      },
+    });
+    await second.start(() => undefined);
+    expect(resumeUrl).toBe("wss://gateway-us-east1-a.discord.gg/?v=10&encoding=json");
+    expect(resumeFrame).toMatchObject({ op: 6, d: { session_id: "session-1", seq: 3, token: "discord-token" } });
+    await second.stop();
   });
 });
 
@@ -784,16 +1102,33 @@ describe("Slack transport", () => {
           socket?.emit("open", {});
           socket?.emit("message", { data: JSON.stringify({ envelope_id: "env-blocked", type: "events_api", payload: { event: { type: "message", user: "U999", channel: "C123", channel_type: "channel", text: "blocked slack", ts: "99.1" } } }) });
           socket?.emit("message", { data: JSON.stringify({ envelope_id: "env-1", type: "events_api", payload: { event: { type: "message", user: "U123", channel: "C123", channel_type: "channel", text: "hello slack", ts: "100.1" } } }) });
+          socket?.emit("message", { data: JSON.stringify({ envelope_id: "env-file", type: "events_api", payload: { event: { type: "message", subtype: "file_share", user: "U123", channel: "D123", channel_type: "im", text: "caption slack", files: [{ id: "F1" }], ts: "101.1" } } }) });
+          socket?.emit("message", { data: JSON.stringify({ envelope_id: "env-action", type: "interactive", payload: { type: "block_actions", user: { id: "U123" }, channel: { id: "D123" }, message: { ts: "200.1", thread_ts: "199.1" }, actions: [{ action_id: "friday:123e4567-e89b-12d3-a456-426614174000:deny" }] } }) });
         });
         return socket as never;
       },
     });
     const seen: ChannelInboundMessage[] = [];
-    await transport.start((message) => { seen.push(message as ChannelInboundMessage); });
+    let protectedAction: unknown;
+    await transport.start((message) => {
+      if (message.protectedAction) {
+        protectedAction = { action: message.protectedAction, principal: message.principal, chatType: message.chatType };
+        return { ...message, attachments: [], classification: "approval-resolved", redactionCount: 0 };
+      }
+      seen.push(message as ChannelInboundMessage);
+    });
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(seen.map((item) => item.text)).toEqual(["hello slack"]);
+    expect(seen.map((item) => item.text)).toEqual(["hello slack", "caption slack\n[attachment received; Slack media retrieval is not enabled]"]);
+    expect(seen.every((item) => item.attachments.length === 0)).toBe(true);
     expect(socket?.sent).toContain(JSON.stringify({ envelope_id: "env-blocked" }));
     expect(socket?.sent).toContain(JSON.stringify({ envelope_id: "env-1" }));
+    expect(socket?.sent).toContain(JSON.stringify({ envelope_id: "env-file" }));
+    expect(socket?.sent).toContain(JSON.stringify({ envelope_id: "env-action" }));
+    expect(protectedAction).toEqual({
+      action: { requestId: "123e4567-e89b-12d3-a456-426614174000", decision: "deny" },
+      principal: { channel: "slack", accountId: "default", conversationId: "D123", senderId: "U123", threadId: "199.1" },
+      chatType: "thread",
+    });
     const result = await transport.send({ channel: "slack", accountId: "default", conversationId: "C123" }, "reply");
     expect(result.messageIds).toEqual(["200.1"]);
     await transport.stop();
@@ -808,7 +1143,8 @@ describe("Signal transport", () => {
       if (url.endsWith("/api/v1/events")) {
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
-            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ jsonrpc: "2.0", method: "receive", params: { account: "+15550000", envelope: { sourceNumber: "+15551234", sourceName: "Ada", timestamp: 123, dataMessage: { timestamp: 123, message: "hello signal" } } } })}\n\n`));
+            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ jsonrpc: "2.0", method: "receive", params: { account: "+15550000", envelope: { sourceNumber: "+15551234", sourceName: "Ada", timestamp: 123, dataMessage: { timestamp: 123, message: "caption signal", attachments: [{ id: "sig-media", contentType: "image/png", size: 10 }] } } } })}\n\n`));
+            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ jsonrpc: "2.0", method: "receive", params: { account: "+15550000", envelope: { sourceNumber: "+15551234", timestamp: 124, dataMessage: { timestamp: 124, message: "", attachments: [{ id: "sig-media-only", contentType: "image/png", size: 10 }] } } } })}\n\n`));
             init?.signal?.addEventListener("abort", () => controller.close(), { once: true });
           },
         });
@@ -821,7 +1157,9 @@ describe("Signal transport", () => {
     const seen: ChannelInboundMessage[] = [];
     await transport.start((message) => { seen.push(message as ChannelInboundMessage); });
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(seen.map((item) => item.text)).toContain("hello signal");
+    expect(seen.map((item) => item.text)).toContain("caption signal\n[attachment received; Signal media retrieval is not enabled]");
+    expect(seen.map((item) => item.text)).toContain("[attachment received; Signal media retrieval is not enabled]");
+    expect(seen.every((item) => item.attachments.length === 0)).toBe(true);
     const result = await transport.send({ channel: "signal", accountId: "default", conversationId: "+15551234" }, "reply");
     expect(result.messageIds).toEqual(["456"]);
     await transport.stop();
@@ -833,12 +1171,12 @@ describe("Email transport", () => {
     let polls = 0;
     const bridge = vi.fn(async (request: Record<string, unknown>) => {
       expect(request.password).toBe("mail-secret");
-      if (request.command === "status") return { ok: true, maxUid: 10 };
+      if (request.command === "status") return { ok: true, maxUid: 10, uidValidity: "1" };
       if (request.command === "poll") {
         polls += 1;
         return polls === 1
-          ? { ok: true, maxUid: 11, messages: [{ uid: 11, messageId: "<m1@example>", threadId: "<m1@example>", fromAddress: "ada@example.com", fromName: "Ada", subject: "Hi", text: "hello email", attachments: [] }] }
-          : { ok: true, maxUid: 11, messages: [] };
+          ? { ok: true, maxUid: 12, uidValidity: "1", messages: [{ uid: 11, messageId: "<m1@example>", threadId: "<m1@example>", fromAddress: "ada@example.com", fromName: "Ada", subject: "Hi", text: "caption email", attachments: [{ externalId: "mail-media", fileName: "x.png", sizeBytes: 10 }] }, { uid: 12, messageId: "<m2@example>", threadId: "<m2@example>", fromAddress: "ada@example.com", subject: "Media", text: "", attachments: [{ externalId: "mail-media-only", fileName: "x.png", sizeBytes: 10 }] }] }
+          : { ok: true, maxUid: 11, uidValidity: "1", messages: [] };
       }
       if (request.command === "send") return { ok: true, messageId: "smtp-1" };
       return { ok: false };
@@ -854,10 +1192,80 @@ describe("Email transport", () => {
     const seen: ChannelInboundMessage[] = [];
     await transport.start((message) => { seen.push(message as ChannelInboundMessage); });
     await new Promise((resolve) => setTimeout(resolve, 140));
-    expect(seen.map((item) => item.text)).toContain("hello email");
+    expect(seen.map((item) => item.text)).toContain("caption email\n[attachment received; email media retrieval is not enabled]");
+    expect(seen.map((item) => item.text)).toContain("[attachment received; email media retrieval is not enabled]");
+    expect(seen.every((item) => item.attachments.length === 0)).toBe(true);
     const result = await transport.send({ channel: "email", accountId: "default", conversationId: "ada@example.com", threadId: "<m1@example>" }, "reply");
     expect(result.messageIds).toEqual(["smtp-1"]);
     await transport.stop();
+  });
+
+  it("resumes a same-mailbox UID checkpoint across transport instances", async () => {
+    const polls: number[] = [];
+    const bridge = vi.fn(async (request: Record<string, unknown>) => {
+      if (request.command === "status") return { ok: true, maxUid: 10, uidValidity: "9" };
+      if (request.command === "poll") { polls.push(Number(request.afterUid)); return { ok: true, maxUid: 11, uidValidity: "9", messages: [] }; }
+      return { ok: true, messageId: "sent" };
+    });
+    const config = { address: "resume@example.com", passwordRef: "vault://mail/resume", imapHost: "imap.resume.example", smtpHost: "smtp.resume.example", pollIntervalMs: 100, allowedSenderIds: ["ada@example.com"] } as const;
+    const first = new EmailChannelTransport(config, secretConsumer({ "vault://mail/resume": "secret" }), { runBridge: bridge as never });
+    await first.start(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await first.stop();
+    const second = new EmailChannelTransport(config, secretConsumer({ "vault://mail/resume": "secret" }), { runBridge: bridge as never });
+    await second.start(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await second.stop();
+    expect(polls.some((value) => value >= 11)).toBe(true);
+  });
+
+  it("rewinds safely when IMAP UIDVALIDITY changes while polling", async () => {
+    const afterUids: number[] = [];
+    let polls = 0;
+    const bridge = vi.fn(async (request: Record<string, unknown>) => {
+      if (request.command === "status") return { ok: true, maxUid: 8, uidValidity: "1" };
+      if (request.command === "poll") {
+        afterUids.push(Number(request.afterUid));
+        polls += 1;
+        return { ok: true, maxUid: 2, uidValidity: "2", messages: [] };
+      }
+      return { ok: true, messageId: "sent" };
+    });
+    const transport = new EmailChannelTransport({
+      accountId: "uid-change",
+      address: "uid-change@example.com",
+      passwordRef: "vault://mail/uid-change",
+      imapHost: "imap.example.com",
+      smtpHost: "smtp.example.com",
+      pollIntervalMs: 100,
+      allowedSenderIds: ["ada@example.com"],
+    }, secretConsumer({ "vault://mail/uid-change": "secret" }), { runBridge: bridge as never });
+    await transport.start(() => undefined);
+    const deadline = Date.now() + 1_000;
+    while (polls < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    await transport.stop();
+    expect(afterUids.slice(0, 2)).toEqual([8, 0]);
+  });
+
+  it("ignores and replaces a malformed optional IMAP checkpoint", async () => {
+    const checkpoint = accountStatePath("email", "corrupt", "uid.v2.json");
+    mkdirSync(join(testHome, "channels", "email"), { recursive: true, mode: 0o700 });
+    writeFileSync(checkpoint, "{broken", { mode: 0o600 });
+    const bridge = vi.fn(async (request: Record<string, unknown>) => request.command === "status"
+      ? { ok: true, maxUid: 3, uidValidity: "7" }
+      : { ok: true, maxUid: 3, uidValidity: "7", messages: [] });
+    const transport = new EmailChannelTransport({
+      accountId: "corrupt",
+      address: "corrupt@example.com",
+      passwordRef: "vault://mail/corrupt",
+      imapHost: "imap.example.com",
+      smtpHost: "smtp.example.com",
+      pollIntervalMs: 100,
+      allowedSenderIds: ["ada@example.com"],
+    }, secretConsumer({ "vault://mail/corrupt": "secret" }), { runBridge: bridge as never });
+    await transport.start(() => undefined);
+    await transport.stop();
+    expect(JSON.parse(readFileSync(checkpoint, "utf8"))).toMatchObject({ uidValidity: "7", lastUid: 3 });
   });
 });
 
@@ -875,7 +1283,7 @@ describe("Teams transport", () => {
     const port = await reserveLoopbackPort();
     const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const jwk = publicKey.export({ format: "jwk" });
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
       if (url === "https://teams.test/openid") return new Response(JSON.stringify({ issuer: "https://api.botframework.com", jwks_uri: "https://teams.test/jwks" }), { status: 200, headers: { "content-type": "application/json" } });
       if (url === "https://teams.test/jwks") return new Response(JSON.stringify({ keys: [{ ...jwk, kid: "kid-1", alg: "RS256", use: "sig" }] }), { status: 200, headers: { "content-type": "application/json" } });
@@ -907,14 +1315,62 @@ describe("Teams transport", () => {
     const response = await fetch(`http://127.0.0.1:${port}/api/messages`, {
       method: "POST",
       headers: { authorization: `Bearer ${jwt}`, "content-type": "application/json" },
-      body: JSON.stringify({ type: "message", id: "teams-in-1", serviceUrl, timestamp: new Date().toISOString(), text: "hello teams", conversation: { id: "conv-1", conversationType: "personal" }, from: { id: "teams-user", aadObjectId: "aad-user-1", name: "Ada" }, recipient: { id: "bot" }, channelData: { tenant: { id: "tenant-1" } } }),
+      body: JSON.stringify({ type: "message", id: "teams-in-1", serviceUrl, timestamp: new Date().toISOString(), text: "hello teams", attachments: [{ contentType: "image/png", name: "image.png" }], conversation: { id: "conv-1", conversationType: "personal" }, from: { id: "teams-user", aadObjectId: "aad-user-1", name: "Ada" }, recipient: { id: "bot" }, channelData: { tenant: { id: "tenant-1" } } }),
     });
     expect(response.status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(seen.map((item) => item.text)).toContain("hello teams");
+    expect(seen.map((item) => item.text)).toContain("hello teams\n[attachment received; Teams media retrieval is not enabled]");
+    expect(seen.every((item) => item.attachments.length === 0)).toBe(true);
     const result = await transport.send({ channel: "teams", accountId: "default", conversationId: "conv-1" }, "reply");
     expect(result.messageIds).toEqual(["teams-out-1"]);
+    const action = { requestId: "123e4567-e89b-12d3-a456-426614174000" };
+    await transport.sendProtectedAction({ channel: "teams", accountId: "default", conversationId: "conv-1" }, "approval", action);
+    const adaptiveCardCall = fetchMock.mock.calls.find(([, init]) => String(init?.body).includes("AdaptiveCard"));
+    expect(JSON.parse(String(adaptiveCardCall?.[1]?.body))).toMatchObject({
+      attachments: [{ content: { actions: [
+        { data: { action: `friday:${action.requestId}:approve` } },
+        { data: { action: `friday:${action.requestId}:deny` } },
+      ] } }],
+    });
+    const callback = await fetch(`http://127.0.0.1:${port}/api/messages`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${jwt}`, "content-type": "application/json" },
+      body: JSON.stringify({ type: "message", id: "teams-action-1", serviceUrl, value: { action: `friday:${action.requestId}:deny`, requestId: action.requestId }, conversation: { id: "conv-1", conversationType: "personal" }, from: { id: "teams-user", aadObjectId: "aad-user-1", name: "Ada" }, recipient: { id: "bot" }, channelData: { tenant: { id: "tenant-1" } } }),
+    });
+    expect(callback.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(seen.find((item) => item.id === "teams-action-1")).toMatchObject({
+      principal: { conversationId: "conv-1", senderId: "aad-user-1" },
+      protectedAction: { requestId: action.requestId, decision: "deny" },
+    });
     await transport.stop();
+    const restartPort = await reserveLoopbackPort();
+    const restarted = new TeamsChannelTransport({
+      clientId: "client-1",
+      clientSecretRef: "vault://channels/teams/default/client-secret",
+      tenantId: "tenant-1",
+      listenPort: restartPort,
+      openIdMetadataUrl: "https://teams.test/openid",
+      tokenUrl: "https://teams.test/token",
+      allowedSenderIds: ["aad-user-1"],
+    }, secretConsumer({ "vault://channels/teams/default/client-secret": "teams-secret" }), { fetch: fetchMock as typeof fetch });
+    await restarted.start(() => undefined);
+    await expect(restarted.send({ channel: "teams", accountId: "default", conversationId: "conv-1" }, "after restart")).resolves.toMatchObject({ messageIds: ["teams-out-1"] });
+    await restarted.stop();
+
+    const mismatchedPort = await reserveLoopbackPort();
+    const mismatched = new TeamsChannelTransport({
+      clientId: "client-1",
+      clientSecretRef: "vault://channels/teams/default/client-secret",
+      tenantId: "tenant-2",
+      listenPort: mismatchedPort,
+      openIdMetadataUrl: "https://teams.test/openid",
+      tokenUrl: "https://teams.test/token",
+      allowedSenderIds: ["aad-user-1"],
+    }, secretConsumer({ "vault://channels/teams/default/client-secret": "teams-secret" }), { fetch: fetchMock as typeof fetch });
+    await mismatched.start(() => undefined);
+    await expect(mismatched.send({ channel: "teams", accountId: "default", conversationId: "conv-1" }, "must not reuse route")).rejects.toThrow(/no trusted serviceUrl/);
+    await mismatched.stop();
   });
 });
 
@@ -923,7 +1379,7 @@ describe("Google Chat transport", () => {
     const port = await reserveLoopbackPort();
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const serviceAccount = JSON.stringify({ client_email: "friday-chat@example.iam.gserviceaccount.com", private_key: privateKey.export({ format: "pem", type: "pkcs8" }).toString(), token_uri: "https://google.test/token" });
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
       if (url.startsWith("https://google.test/tokeninfo")) {
         const inboundToken = new URL(url).searchParams.get("id_token");
@@ -952,11 +1408,58 @@ describe("Google Chat transport", () => {
     const response = await fetch(`http://127.0.0.1:${port}/google-chat/events`, {
       method: "POST",
       headers: { authorization: "Bearer google-inbound", "content-type": "application/json" },
-      body: JSON.stringify({ type: "MESSAGE", message: { name: "spaces/AAA/messages/in-1", text: "hello chat", sender: { name: "users/123", displayName: "Ada", type: "HUMAN" }, space: { name: "spaces/AAA", type: "DM" }, thread: { name: "spaces/AAA/threads/T1" } } }),
+      body: JSON.stringify({ type: "MESSAGE", message: { name: "spaces/AAA/messages/in-1", text: "hello chat", attachment: [{ name: "spaces/AAA/messages/in-1/attachments/A1", contentType: "image/png" }], sender: { name: "users/123", displayName: "Ada", type: "HUMAN" }, space: { name: "spaces/AAA", type: "DM" }, thread: { name: "spaces/AAA/threads/T1" } } }),
     });
     expect(response.status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(seen.map((item) => item.text)).toContain("hello chat");
+    expect(seen.map((item) => item.text)).toContain("hello chat\n[attachment received; Google Chat media retrieval is not enabled]");
+    expect(seen.every((item) => item.attachments.length === 0)).toBe(true);
+    const action = { requestId: "123e4567-e89b-12d3-a456-426614174000" };
+    await transport.sendProtectedAction({ channel: "google-chat", accountId: "default", conversationId: "spaces/AAA", threadId: "spaces/AAA/threads/T1" }, "approval", action);
+    const cardCall = fetchMock.mock.calls.find(([, init]) => String(init?.body).includes("cardsV2"));
+    const cardBody = JSON.parse(String(cardCall?.[1]?.body)) as {
+      cardsV2?: Array<{
+        card?: {
+          sections?: Array<{
+            widgets?: Array<{
+              buttonList?: {
+                buttons?: Array<{
+                  onClick?: {
+                    action?: {
+                      function?: string;
+                      parameters?: Array<{ key?: string; value?: string }>;
+                    };
+                  };
+                }>;
+              };
+            }>;
+          }>;
+        };
+      }>;
+      thread?: { name?: string };
+    };
+    const cardButtons = cardBody.cardsV2?.[0]?.card?.sections?.[0]?.widgets?.[0]?.buttonList?.buttons;
+    expect(cardButtons?.map((button) => button.onClick?.action?.function)).toEqual(["fridayProtectedAction", "fridayProtectedAction"]);
+    expect(cardButtons?.[0]?.onClick?.action?.parameters).toEqual([{ key: "requestId", value: action.requestId }, { key: "decision", value: "approve" }]);
+    expect(cardBody.thread?.name).toBe("spaces/AAA/threads/T1");
+    const callback = await fetch(`http://127.0.0.1:${port}/google-chat/events`, {
+      method: "POST",
+      headers: { authorization: "Bearer google-inbound", "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "CARD_CLICKED",
+        message: { name: "spaces/AAA/messages/out-1", sender: { name: "users/bot", type: "BOT" }, space: { name: "spaces/AAA", type: "DM" } },
+        user: { name: "users/123", displayName: "Ada", type: "HUMAN" },
+        space: { name: "spaces/AAA", type: "DM" },
+        thread: { name: "spaces/AAA/threads/T1" },
+        common: { invokedFunction: "fridayProtectedAction", parameters: { requestId: action.requestId, decision: "approve" } },
+      }),
+    });
+    expect(callback.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(seen.find((item) => item.protectedAction)).toMatchObject({
+      principal: { conversationId: "spaces/AAA", senderId: "users/123", threadId: "spaces/AAA/threads/T1" },
+      protectedAction: { requestId: action.requestId, decision: "approve" },
+    });
     const result = await transport.send({ channel: "google-chat", accountId: "default", conversationId: "spaces/AAA", threadId: "spaces/AAA/threads/T1" }, "reply");
     expect(result.messageIds).toEqual(["spaces/AAA/messages/out-1"]);
     await transport.stop();
@@ -1007,6 +1510,18 @@ describe("SMS transport", () => {
     expect(response.status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(seen.map((item) => item.text)).toContain("hello sms");
+    const mediaParams = new URLSearchParams({ MessageSid: "SM-in-2", From: "+15551234", To: "+15550000", Body: "caption", NumMedia: "1", MediaUrl0: "https://media.example/file" });
+    const mediaResponse = await fetch(`http://127.0.0.1:${port}/sms`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-twilio-signature": testTwilioSignature(publicUrl, mediaParams, "twilio-secret") }, body: mediaParams });
+    expect(mediaResponse.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(seen.at(-1)?.text).toContain("SMS media retrieval is not enabled");
+    expect(seen.at(-1)?.attachments).toEqual([]);
+    const mediaOnlyParams = new URLSearchParams({ MessageSid: "SM-in-3", From: "+15551234", To: "+15550000", Body: "", NumMedia: "1", MediaUrl0: "https://media.example/file-only" });
+    const mediaOnlyResponse = await fetch(`http://127.0.0.1:${port}/sms`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-twilio-signature": testTwilioSignature(publicUrl, mediaOnlyParams, "twilio-secret") }, body: mediaOnlyParams });
+    expect(mediaOnlyResponse.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(seen.at(-1)?.text).toBe("[attachment received; SMS media retrieval is not enabled]");
+    expect(seen.at(-1)?.attachments).toEqual([]);
     const result = await transport.send({ channel: "sms", accountId: "default", conversationId: "+15551234" }, "reply");
     expect(result.messageIds).toEqual(["SM-out-1"]);
     await transport.stop();

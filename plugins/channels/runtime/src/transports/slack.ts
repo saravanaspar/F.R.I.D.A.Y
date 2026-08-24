@@ -3,6 +3,7 @@ import type {
   ChannelInboundHandler,
   ChannelPrincipal,
   ChannelSendResult,
+  ChannelProtectedAction,
   ChannelTarget,
   ChannelTransport,
   ChannelTransportStatus,
@@ -41,6 +42,11 @@ interface SlackEnvelope {
   type?: string;
   payload?: {
     event?: SlackEvent;
+    type?: string;
+    user?: { id?: string };
+    channel?: { id?: string; name?: string };
+    actions?: Array<{ action_id?: string; value?: string }>;
+    message?: { ts?: string; thread_ts?: string };
   };
 }
 
@@ -54,6 +60,7 @@ interface SlackEvent {
   text?: string;
   ts?: string;
   thread_ts?: string;
+  files?: Array<{ id?: string }>;
 }
 
 function defaultWebSocketFactory(url: string): WebSocketLike {
@@ -168,6 +175,20 @@ export class SlackChannelTransport implements ChannelTransport {
     return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze(messageIds) });
   }
 
+  async sendProtectedAction(target: ChannelTarget, text: string, action: ChannelProtectedAction): Promise<ChannelSendResult> {
+    const result = await this.#webApi<{ ok?: boolean; ts?: string }>("chat.postMessage", {
+      channel: target.conversationId,
+      text,
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: text.slice(0, 2900) } }, { type: "actions", elements: [
+        { type: "button", text: { type: "plain_text", text: action.approveLabel ?? "Approve" }, style: "primary", action_id: `friday:${action.requestId}:approve`, value: action.requestId },
+        { type: "button", text: { type: "plain_text", text: action.denyLabel ?? "Deny" }, style: "danger", action_id: `friday:${action.requestId}:deny`, value: action.requestId },
+      ] }],
+      ...(target.threadId === undefined ? {} : { thread_ts: target.threadId }),
+    });
+    if (result.ok !== true) throw new Error("Slack chat.postMessage failed");
+    return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze(result.ts ? [result.ts] : []) });
+  }
+
   async #run(signal: AbortSignal, onFirstOpen: () => void): Promise<void> {
     let first = false;
     let backoff = 500;
@@ -220,6 +241,7 @@ export class SlackChannelTransport implements ChannelTransport {
         if (envelope.type === "events_api" && envelope.payload?.event) {
           await this.#handleEvent(envelope.payload.event);
         }
+        if (envelope.type === "interactive") await this.#handleInteractive(envelope.payload);
         if (envelope.envelope_id) socket.send(JSON.stringify({ envelope_id: envelope.envelope_id }));
         if (envelope.type === "disconnect") socket.close(4000, "Slack requested reconnect");
       })().catch((error: unknown) => {
@@ -243,10 +265,10 @@ export class SlackChannelTransport implements ChannelTransport {
   }
 
   async #handleEvent(event: SlackEvent): Promise<void> {
-    if (!this.#handler || !event.channel || !event.user || !event.ts || event.bot_id || event.subtype) return;
+    if (!this.#handler || !event.channel || !event.user || !event.ts || event.bot_id || (event.subtype && event.subtype !== "file_share")) return;
     if (this.#botUserId && event.user === this.#botUserId) return;
     if (event.type !== "message" && event.type !== "app_mention") return;
-    const isDm = event.channel_type === "im";
+    const isDm = event.channel_type === "im" || event.channel.startsWith("D");
     const type = isDm ? "dm" as const : (event.thread_ts && event.thread_ts !== event.ts ? "thread" as const : "group" as const);
     const principal: ChannelPrincipal = {
       channel: this.channel,
@@ -256,10 +278,26 @@ export class SlackChannelTransport implements ChannelTransport {
       ...(event.thread_ts && event.thread_ts !== event.ts ? { threadId: event.thread_ts } : {}),
     };
     if (!channelPrincipalAllowed(principal, type, this.#config)) return;
-    const text = event.text?.trim() ?? "";
+    const hasUnsupportedAttachment = (event.files?.length ?? 0) > 0;
+    const text = [event.text?.trim(), hasUnsupportedAttachment ? "[attachment received; Slack media retrieval is not enabled]" : ""].filter(Boolean).join("\n");
     if (!text) return;
-    if (this.#config.requireMention === true && !isDm && event.type !== "app_mention" && !(this.#botUserId && text.includes(`<@${this.#botUserId}>`))) return;
+    const protectedReply = /^(?:<@!?\w+>\s*)?(?:approve|deny|cancel)\s+[A-Z0-9]{6}$/i.test(text);
+    if (this.#config.requireMention === true && !isDm && event.type !== "app_mention" && !(this.#botUserId && text.includes(`<@${this.#botUserId}>`)) && !protectedReply) return;
     await this.#handler({ id: event.ts, principal, chatType: type, text, timestamp: Number(event.ts.split(".")[0]) * 1000 || Date.now(), attachments: [] });
+  }
+
+  async #handleInteractive(payload: SlackEnvelope["payload"]): Promise<void> {
+    const action = payload?.actions?.[0];
+    const userId = payload?.user?.id;
+    const conversationId = payload?.channel?.id;
+    const match = /^friday:([0-9a-f-]{36}):(approve|deny)$/.exec(action?.action_id ?? "");
+    if (!action || !match || !userId || !conversationId || !this.#handler) return;
+    const threadId = payload?.message?.thread_ts;
+    const isDm = conversationId.startsWith("D");
+    const type = threadId ? "thread" as const : (isDm ? "dm" as const : "group" as const);
+    const principal: ChannelPrincipal = { channel: this.channel, accountId: this.accountId, conversationId, senderId: userId, ...(threadId === undefined ? {} : { threadId }) };
+    if (!channelPrincipalAllowed(principal, type, this.#config)) return;
+    await this.#handler({ id: `interactive-${match[1]}`, principal, chatType: type, text: "", timestamp: Date.now(), attachments: [], protectedAction: { requestId: match[1]!, decision: match[2] as "approve" | "deny" } });
   }
 
   async #webApi<T>(method: string, body: Record<string, unknown>): Promise<T> {

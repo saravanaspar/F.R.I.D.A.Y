@@ -103,13 +103,18 @@ def imap_status(request: dict[str, Any]) -> None:
     client = connect_imap(request)
     try:
         mailbox = clean_header(request.get("mailbox") or "INBOX", 256)
-        status, values = client.status(mailbox, "(UIDNEXT)")
+        status, values = client.status(mailbox, "(UIDNEXT UIDVALIDITY)")
         if status != "OK" or not values:
             fail("imap status failed")
         raw = values[0].decode("utf-8", "replace") if isinstance(values[0], bytes) else str(values[0])
         match = re.search(r"UIDNEXT\s+(\d+)", raw, re.I)
-        max_uid = max(0, int(match.group(1)) - 1) if match else 0
-        emit({"ok": True, "maxUid": max_uid})
+        if not match:
+            fail("imap status did not provide UIDNEXT")
+        max_uid = max(0, int(match.group(1)) - 1)
+        validity_match = re.search(r"UIDVALIDITY\s+(\d+)", raw, re.I)
+        if not validity_match:
+            fail("imap status did not provide UIDVALIDITY")
+        emit({"ok": True, "maxUid": max_uid, "uidValidity": validity_match.group(1)})
     finally:
         try:
             client.logout()
@@ -120,9 +125,17 @@ def imap_status(request: dict[str, Any]) -> None:
 def imap_poll(request: dict[str, Any]) -> None:
     client = connect_imap(request)
     try:
+        mailbox = clean_header(request.get("mailbox") or "INBOX", 256)
         after_uid = max(0, int(request.get("afterUid") or 0))
         maximum = min(20, max(1, int(request.get("maxMessages") or 8)))
         max_message_bytes = min(20 * 1024 * 1024, max(64 * 1024, int(request.get("maxMessageBytes") or 5 * 1024 * 1024)))
+        status, status_values = client.status(mailbox, "(UIDVALIDITY)")
+        if status != "OK" or not status_values:
+            fail("imap poll status failed")
+        status_raw = status_values[0].decode("utf-8", "replace") if isinstance(status_values[0], bytes) else str(status_values[0])
+        validity_match = re.search(r"UIDVALIDITY\s+(\d+)", status_raw, re.I)
+        if not validity_match:
+            fail("imap poll did not provide UIDVALIDITY")
         status, data = client.uid("search", None, f"UID {after_uid + 1}:*")
         if status != "OK":
             fail("imap search failed")
@@ -141,19 +154,22 @@ def imap_poll(request: dict[str, Any]) -> None:
             )
             size_match = re.search(r"RFC822\.SIZE\s+(\d+)", size_text, re.I)
             if size_status != "OK" or not size_match:
-                continue
+                # Do not advance beyond a message that could not be inspected.
+                # A later successful UID must not make this transient failure
+                # disappear permanently from the next poll.
+                break
             if int(size_match.group(1)) > max_message_bytes:
                 max_uid = max(max_uid, uid)
                 continue
             status, fetched = client.uid("fetch", str(uid), "(BODY.PEEK[])")
             if status != "OK" or not fetched:
-                continue
+                break
             raw = b""
             for item in fetched:
                 if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], (bytes, bytearray)):
                     raw += bytes(item[1])
             if not raw:
-                continue
+                break
             parsed = email.message_from_bytes(raw, policy=default)
             sender_name, sender_address = parseaddr(str(parsed.get("From") or ""))
             message_id = clean_header(parsed.get("Message-ID"), 512) or f"imap-uid-{uid}"
@@ -187,7 +203,7 @@ def imap_poll(request: dict[str, Any]) -> None:
                 "attachments": attachments,
             })
             max_uid = max(max_uid, uid)
-        emit({"ok": True, "maxUid": max_uid, "messages": messages})
+        emit({"ok": True, "maxUid": max_uid, "uidValidity": validity_match.group(1), "messages": messages})
     finally:
         try:
             client.logout()

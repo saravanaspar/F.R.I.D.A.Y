@@ -227,7 +227,7 @@ describe("Turn Loop", () => {
     const replies: string[] = [];
     const inbound = turn("local", async (text) => { replies.push(text); });
 
-    await runtime.submit({ ...inbound, principal: { ...inbound.principal, authority: "local", channel: "cli" } });
+    await runtime.submit({ ...inbound, principal: { ...inbound.principal, authority: "local", channel: "local-test" } });
 
     expect(permissions.localRuns()).toBe(1);
     expect(permissions.principals).toEqual([]);

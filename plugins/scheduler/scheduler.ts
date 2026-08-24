@@ -460,17 +460,21 @@ export function createSchedulerService(options: SchedulerServiceOptions = {}): S
             const tick = now();
             workerLastTickAt = tick.toISOString();
             try {
-              const results = await service.runDue({ now: tick, maxTasks: maxTasksPerTick, maxConcurrent, leaseMs });
+              const results = await service.runDue({ now: tick, maxTasks: maxTasksPerTick, maxConcurrent, leaseMs, signal: controller.signal });
               const missing = results.find((result) => result.status === "missing-executor");
               workerLastError = missing?.error;
               if (missing?.error) {
                 reportOperationalError({ component: "scheduler", operation: "defer task with missing executor", error: new Error(missing.error), severity: "warn" });
               }
             } catch (error) {
+              if (controller.signal.aborted) break;
               workerLastError = errorMessage(error);
               reportOperationalError({ component: "scheduler", operation: "run durable scheduler tick", error });
             }
-            await delay(pollIntervalMs, controller.signal);
+            if (controller.signal.aborted) break;
+            await delay(pollIntervalMs, controller.signal).catch((error: unknown) => {
+              if (!controller.signal.aborted) reportOperationalError({ component: "scheduler", operation: "wait for durable scheduler tick", error });
+            });
           }
         } finally {
           workerOptions.signal?.removeEventListener("abort", onExternalAbort);
@@ -509,8 +513,8 @@ export function createSchedulerService(options: SchedulerServiceOptions = {}): S
 
     async close() {
       if (closed) return;
-      await service.stopWorker();
       for (const controller of activeControllers.values()) controller.abort(new Error("scheduler service closed"));
+      await service.stopWorker();
       activeControllers.clear();
       database.close();
       closed = true;

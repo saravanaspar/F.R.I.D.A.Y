@@ -1,4 +1,4 @@
-# ADR-0024: Autonomous Workflow Ownership Stays Local
+# ADR-0046: Autonomous Workflow Ownership Stays Local
 
 ## Status
 

@@ -6,7 +6,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, type ChildProcess } from "node:child_process";
 import type {
-  ChannelAttachment,
   ChannelInboundHandler,
   ChannelPrincipal,
   ChannelSendResult,
@@ -247,14 +246,8 @@ export class WhatsAppChannelTransport implements ChannelTransport {
     };
     const type = message.isGroup ? "group" as const : "dm" as const;
     if (!channelPrincipalAllowed(principal, type, this.#config)) return;
-    const attachments = Object.freeze((message.attachments ?? []).map((item): ChannelAttachment => Object.freeze({
-      kind: item.kind === "image" || item.kind === "audio" || item.kind === "video" || item.kind === "document" || item.kind === "sticker" ? item.kind : "other",
-      externalId: String(item.externalId ?? message.messageId),
-      ...(item.mimeType === undefined ? {} : { mimeType: item.mimeType }),
-      ...(item.fileName === undefined ? {} : { fileName: item.fileName }),
-      ...(item.sizeBytes === undefined ? {} : { sizeBytes: item.sizeBytes }),
-    })));
-    const text = message.body?.trim() || (attachments.length > 0 ? `[${attachments[0]?.kind ?? "attachment"}]` : "");
+    const hasUnsupportedAttachment = (message.attachments?.length ?? 0) > 0;
+    const text = [message.body?.trim(), hasUnsupportedAttachment ? "[attachment received; WhatsApp media retrieval is not enabled]" : ""].filter(Boolean).join("\n");
     if (!text) return;
     await this.#handler({
       id: message.messageId,
@@ -265,7 +258,7 @@ export class WhatsAppChannelTransport implements ChannelTransport {
       ...(message.senderName === undefined ? {} : { senderName: message.senderName }),
       ...(message.chatName === undefined ? {} : { conversationName: message.chatName }),
       ...(message.quotedMessageId === undefined ? {} : { replyToMessageId: message.quotedMessageId }),
-      attachments,
+      attachments: Object.freeze([]),
     });
   }
 

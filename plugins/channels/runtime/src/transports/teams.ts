@@ -1,9 +1,10 @@
-import { createPublicKey, verify as verifySignature, type JsonWebKey } from "node:crypto";
+import { createHash, createPublicKey, verify as verifySignature, type JsonWebKey } from "node:crypto";
 import { reportOperationalError } from "@friday/operational-errors";
 import type {
   ChannelInboundHandler,
   ChannelPrincipal,
   ChannelSendResult,
+  ChannelProtectedAction,
   ChannelTarget,
   ChannelTransport,
   ChannelTransportStatus,
@@ -18,6 +19,7 @@ import {
   type ChannelAccessPolicy,
   type SecretConsumer,
 } from "./shared.js";
+import { accountStatePath, readPrivateJson, writePrivateJson } from "../state.js";
 
 export interface TeamsChannelConfig extends ChannelAccessPolicy {
   readonly accountId?: string | undefined;
@@ -42,6 +44,8 @@ interface BotFrameworkActivity {
   serviceUrl?: string;
   channelId?: string;
   text?: string;
+  value?: { action?: string; requestId?: string };
+  attachments?: Array<{ contentType?: string; name?: string }>;
   replyToId?: string;
   conversation?: { id?: string; conversationType?: string; name?: string };
   from?: { id?: string; name?: string; aadObjectId?: string; role?: string };
@@ -71,7 +75,9 @@ export class TeamsChannelTransport implements ChannelTransport {
   readonly #secrets: SecretConsumer;
   readonly #fetch: typeof fetch;
   readonly #server: LocalWebhookServer;
-  readonly #serviceUrls = new Map<string, string>();
+  readonly #serviceUrls = new Map<string, { url: string; updatedAt: number }>();
+  readonly #serviceUrlPath: string;
+  readonly #routeFingerprint: string;
   #handler: ChannelInboundHandler | undefined;
   #state: ChannelTransportStatus["state"] = "stopped";
   #detail: string | undefined;
@@ -82,6 +88,8 @@ export class TeamsChannelTransport implements ChannelTransport {
     this.#secrets = secrets;
     this.#fetch = dependencies.fetch ?? fetch;
     this.accountId = config.accountId?.trim() || "default";
+    this.#serviceUrlPath = accountStatePath("teams", this.accountId, "routes.json");
+    this.#routeFingerprint = createHash("sha256").update(`${config.clientId}\0${config.tenantId}`).digest("hex");
     if (!config.clientId.trim() || !config.tenantId.trim()) throw new Error("Teams clientId and tenantId are required");
     const metadata = requireHttpUrl(config.openIdMetadataUrl ?? "https://login.botframework.com/v1/.well-known/openidconfiguration", "Teams OpenID metadata URL");
     requireHttpUrl(config.tokenUrl ?? "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token", "Teams token URL");
@@ -115,6 +123,7 @@ export class TeamsChannelTransport implements ChannelTransport {
     this.#state = "starting";
     this.#detail = undefined;
     this.#handler = handler;
+    try { this.#readServiceUrls(); this.#pruneServiceUrls(); } catch (error) { reportOperationalError({ component: "channels.teams", operation: "load persisted service routes", error, severity: "warn" }); }
     try {
       await this.#server.start();
       this.#state = "running";
@@ -138,8 +147,10 @@ export class TeamsChannelTransport implements ChannelTransport {
   }
 
   async send(target: ChannelTarget, text: string): Promise<ChannelSendResult> {
-    const serviceUrl = this.#serviceUrls.get(target.conversationId);
-    if (!serviceUrl) throw new Error("Teams conversation has no trusted serviceUrl yet; receive a message in that conversation first");
+    this.#pruneServiceUrls();
+    const route = this.#serviceUrls.get(target.conversationId);
+    if (!route || route.updatedAt < Date.now() - 7 * 24 * 60 * 60 * 1000) { this.#serviceUrls.delete(target.conversationId); throw new Error("Teams conversation has no trusted serviceUrl yet; receive a message in that conversation first"); }
+    const serviceUrl = route.url;
     const token = await this.#accessToken();
     const ids: string[] = [];
     for (const chunk of splitChannelMessage(text, 12000)) {
@@ -155,29 +166,51 @@ export class TeamsChannelTransport implements ChannelTransport {
     return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze(ids) });
   }
 
+  async sendProtectedAction(target: ChannelTarget, text: string, action: ChannelProtectedAction): Promise<ChannelSendResult> {
+    this.#pruneServiceUrls();
+    const route = this.#serviceUrls.get(target.conversationId);
+    if (!route || route.updatedAt < Date.now() - 7 * 24 * 60 * 60 * 1000) { this.#serviceUrls.delete(target.conversationId); throw new Error("Teams conversation has no trusted serviceUrl yet; receive a message in that conversation first"); }
+    const serviceUrl = route.url;
+    const token = await this.#accessToken();
+    const response = await fetchWithTimeout(this.#fetch, `${serviceUrl.replace(/\/$/, "")}/v3/conversations/${encodeURIComponent(target.conversationId)}/activities`, {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ type: "message", text, attachments: [{ contentType: "application/vnd.microsoft.card.adaptive", content: { type: "AdaptiveCard", version: "1.4", body: [{ type: "TextBlock", text: text.slice(0, 3000), wrap: true }], actions: [{ type: "Action.Submit", title: action.approveLabel ?? "Approve", data: { action: `friday:${action.requestId}:approve`, requestId: action.requestId } }, { type: "Action.Submit", title: action.denyLabel ?? "Deny", data: { action: `friday:${action.requestId}:deny`, requestId: action.requestId } }] } }] }),
+    });
+    if (!response.ok) throw new Error(`Teams send failed with status ${response.status}`);
+    const payload = await response.json() as { id?: string };
+    return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze(payload.id ? [payload.id] : []) });
+  }
+
   async #handleActivity(activity: BotFrameworkActivity): Promise<void> {
-    if (!this.#handler || activity.type !== "message" || !activity.id || !activity.conversation?.id || !activity.from?.id) return;
+    if (!this.#handler || (activity.type !== "message" && activity.type !== "invoke") || !activity.id || !activity.conversation?.id || !activity.from?.id) return;
     if (activity.recipient?.id && activity.from.id === activity.recipient.id) return;
     if (activity.channelData?.tenant?.id && activity.channelData.tenant.id !== this.#config.tenantId) return;
     if (!activity.serviceUrl) return;
     const serviceUrl = requireHttpUrl(activity.serviceUrl, "Teams serviceUrl").toString().replace(/\/$/, "");
     const conversationId = activity.conversation.id;
+    if (conversationId.length === 0 || conversationId.length > 256) return;
     const principal: ChannelPrincipal = { channel: this.channel, accountId: this.accountId, conversationId, senderId: activity.from.aadObjectId ?? activity.from.id };
     const type = activity.conversation.conversationType === "personal" ? "dm" as const : "group" as const;
     if (!channelPrincipalAllowed(principal, type, this.#config)) return;
-    const text = activity.text?.trim() ?? "";
-    if (!text) return;
-    this.#serviceUrls.set(conversationId, serviceUrl);
+    const protectedMatch = /^friday:([0-9a-f-]{36}):(approve|deny)$/.exec(activity.value?.action ?? "");
+    const hasUnsupportedAttachment = (activity.attachments?.length ?? 0) > 0;
+    const text = [activity.text?.trim(), hasUnsupportedAttachment ? "[attachment received; Teams media retrieval is not enabled]" : ""].filter(Boolean).join("\n");
+    if (activity.type === "invoke" && !protectedMatch) return;
+    if (activity.type === "message" && !text && !protectedMatch) return;
+    this.#serviceUrls.set(conversationId, { url: serviceUrl, updatedAt: Date.now() });
+    this.#pruneServiceUrls();
+    this.#writeServiceUrl(conversationId, serviceUrl);
     await this.#handler({
       id: activity.id,
       principal,
       chatType: type,
-      text,
+      text: protectedMatch ? "" : text,
       timestamp: activity.timestamp ? Date.parse(activity.timestamp) || Date.now() : Date.now(),
       ...(activity.from.name === undefined ? {} : { senderName: activity.from.name }),
       ...(activity.conversation.name === undefined ? {} : { conversationName: activity.conversation.name }),
       ...(activity.replyToId === undefined ? {} : { replyToMessageId: activity.replyToId }),
       attachments: [],
+      ...(protectedMatch ? { protectedAction: { requestId: protectedMatch[1]!, decision: protectedMatch[2] as "approve" | "deny" } } : {}),
     });
   }
 
@@ -198,6 +231,45 @@ export class TeamsChannelTransport implements ChannelTransport {
       if (!response.ok || !payload.access_token) throw new Error("Teams access-token request failed");
       return payload.access_token;
     });
+  }
+
+  #readServiceUrls(): void {
+    const raw = readPrivateJson<{ schema?: unknown; fingerprint?: unknown; routes?: unknown }>(this.#serviceUrlPath, 256 * 1024);
+    if (!raw) return;
+    if (raw.schema !== 1 || raw.fingerprint !== this.#routeFingerprint || !raw.routes || typeof raw.routes !== "object" || Array.isArray(raw.routes)) return;
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    for (const [conversationId, entry] of Object.entries(raw.routes as Record<string, unknown>)) {
+      if (conversationId.length === 0 || conversationId.length > 256 || !entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const value = entry as { url?: unknown; updatedAt?: unknown };
+      if (typeof value.url !== "string" || typeof value.updatedAt !== "number" || !Number.isFinite(value.updatedAt) || value.updatedAt < cutoff) continue;
+      try { this.#serviceUrls.set(conversationId, { url: requireHttpUrl(value.url, "Teams persisted serviceUrl").toString().replace(/\/$/, ""), updatedAt: value.updatedAt }); } catch { /* friday-expected-control-flow: stale persisted route is ignored. */ }
+    }
+  }
+
+  #pruneServiceUrls(): void {
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    for (const [conversationId, route] of this.#serviceUrls) {
+      if (route.updatedAt < cutoff || conversationId.length === 0 || conversationId.length > 256) this.#serviceUrls.delete(conversationId);
+    }
+    if (this.#serviceUrls.size > 128) {
+      for (const [conversationId] of [...this.#serviceUrls.entries()].sort(([, a], [, b]) => b.updatedAt - a.updatedAt).slice(128)) this.#serviceUrls.delete(conversationId);
+    }
+  }
+
+  #writeServiceUrl(conversationId: string, serviceUrl: string): void {
+    const entries: Record<string, { url: string; updatedAt: number }> = {};
+    try {
+      const existing = readPrivateJson<{ schema?: unknown; fingerprint?: unknown; routes?: unknown }>(this.#serviceUrlPath, 256 * 1024);
+      if (existing?.schema === 1 && existing.fingerprint === this.#routeFingerprint && existing.routes && typeof existing.routes === "object" && !Array.isArray(existing.routes)) Object.assign(entries, existing.routes);
+    }
+    catch (error) { reportOperationalError({ component: "channels.teams", operation: "read persisted service routes", error, severity: "warn" }); }
+    entries[conversationId] = { url: serviceUrl, updatedAt: Date.now() };
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const boundedEntries = Object.fromEntries(Object.entries(entries)
+      .filter(([conversation, entry]) => conversation.length > 0 && conversation.length <= 256 && entry && typeof entry.url === "string" && typeof entry.updatedAt === "number" && Number.isFinite(entry.updatedAt) && entry.updatedAt >= cutoff)
+      .sort(([, a], [, b]) => b.updatedAt - a.updatedAt)
+      .slice(0, 128));
+    writePrivateJson(this.#serviceUrlPath, { schema: 1, fingerprint: this.#routeFingerprint, routes: boundedEntries }, 256 * 1024);
   }
 
   async #verifyJwt(token: string, serviceUrl: string | undefined): Promise<boolean> {

@@ -170,7 +170,7 @@ const alertsPlugin: FridayPlugin = definePlugin({
           mode: "full",
           workspace: process.cwd(),
           access: "write",
-          action: { id: "alerts.deliver", effect: "external-write", resource: `channel:${rule.target.channel}:${rule.target.accountId}:${rule.target.conversationId}`, network: rule.target.channel !== "cli" },
+          action: { id: "alerts.deliver", effect: "external-write", resource: `channel:${rule.target.channel}:${rule.target.accountId}:${rule.target.conversationId}`, network: true },
           reason: `deliver pre-authorized alert rule ${rule.id}`,
         });
         await channels.send(rule.target, eventMessage(event));
@@ -216,7 +216,7 @@ const alertsPlugin: FridayPlugin = definePlugin({
       await context.turn.reply(["Alert subscription plan", `Type: ${type ?? "*"}`, `Source: ${source ?? "*"}`, `Subject: ${subject ?? "*"}`, `Cooldown: ${cooldownSeconds}s`, "Destination: this conversation"].join("\n"));
       await permissions.authorize({
         mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE), workspace: process.cwd(), access: "write",
-        action: { id: "alerts.subscribe", effect: "external-write", resource: `channel:${target.channel}:${target.accountId}:${target.conversationId}`, network: target.channel !== "cli" },
+        action: { id: "alerts.subscribe", effect: "external-write", resource: `channel:${target.channel}:${target.accountId}:${target.conversationId}`, network: true },
         reason: "create channel-bound event alert subscription",
       });
       return serializeMutation(async () => {

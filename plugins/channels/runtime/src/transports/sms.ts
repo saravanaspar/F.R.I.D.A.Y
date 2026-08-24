@@ -1,7 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { reportOperationalError } from "@friday/operational-errors";
 import type {
-  ChannelAttachment,
   ChannelInboundHandler,
   ChannelPrincipal,
   ChannelSendResult,
@@ -135,21 +134,9 @@ export class SmsChannelTransport implements ChannelTransport {
     if (!id || !sender || recipient !== this.#config.fromNumber) return;
     const principal: ChannelPrincipal = { channel: this.channel, accountId: this.accountId, conversationId: sender, senderId: sender };
     if (!channelPrincipalAllowed(principal, "dm", this.#config)) return;
-    const attachments: ChannelAttachment[] = [];
     const count = Math.min(10, Math.max(0, Number(params.get("NumMedia") ?? 0) || 0));
-    for (let index = 0; index < count; index += 1) {
-      const url = params.get(`MediaUrl${index}`);
-      if (!url) continue;
-      const mimeType = params.get(`MediaContentType${index}`) ?? undefined;
-      attachments.push(Object.freeze({
-        kind: mimeType?.startsWith("image/") ? "image" : mimeType?.startsWith("audio/") ? "audio" : mimeType?.startsWith("video/") ? "video" : "document",
-        externalId: url,
-        downloadUrl: url,
-        ...(mimeType === undefined ? {} : { mimeType }),
-      }));
-    }
-    const body = text || (attachments.length > 0 ? `[${attachments[0]?.kind ?? "attachment"}]` : "");
+    const body = [text, count > 0 ? "[attachment received; SMS media retrieval is not enabled]" : ""].filter(Boolean).join("\n");
     if (!body) return;
-    await this.#handler({ id, principal, chatType: "dm", text: body, timestamp: Date.now(), attachments: Object.freeze(attachments) });
+    await this.#handler({ id, principal, chatType: "dm", text: body, timestamp: Date.now(), attachments: Object.freeze([]) });
   }
 }

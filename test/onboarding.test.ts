@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runOnboarding as runOnboardingRaw, type OnboardingOptions } from "../src/onboarding.js";
-import { updateSavedChannel } from "../plugins/channels/config.js";
+import { maybeManageChannels } from "../src/onboarding-channels.js";
+import { readSavedChannels, updateSavedChannel } from "../plugins/channels/config.js";
+import { getPermissionsStateDir, loadTrustedIdentities, upsertTrustedIdentity } from "../plugins/permissions/identity-store.js";
 import { normalizeCustomProvider, readCustomModels, upsertCustomModel } from "../plugins/runtime-settings/custom-models.js";
 import {
   getRuntimeEnvironmentPath,
@@ -27,6 +29,13 @@ afterEach(async () => {
 async function runOnboarding(options: OnboardingOptions = {}) {
   if (options.home) {
     await updateSavedChannel("whatsapp", { enabled: true, accountId: "default", allowAll: true }, options.home);
+    upsertTrustedIdentity(getPermissionsStateDir({ ...process.env, FRIDAY_HOME: options.home }), {
+      channel: "whatsapp",
+      accountId: "default",
+      senderId: "fixture-operator",
+      role: "operator",
+      label: "onboarding test operator",
+    });
   }
   return runOnboardingRaw(options);
 }
@@ -343,5 +352,74 @@ describe("FRIDAY onboarding", () => {
     await expect(readCustomModels(home)).resolves.toMatchObject([
       { provider: "custom:demo-provider", modelId: "demo-model" },
     ]);
+  });
+
+  it("requires an exact operator for preconfigured enabled channels and rejects read-only or stale identities", async () => {
+    const home = await temporaryDirectory();
+    await updateSavedChannel("whatsapp", { enabled: true, accountId: "default", allowedSenderIds: ["operator-1"] }, home);
+    const io = { isInteractive: false, question: async () => { throw new Error("unexpected prompt"); }, write: () => undefined };
+    await expect(maybeManageChannels(io, home, false, true)).rejects.toThrow(/no exact trusted identity/);
+    const stateDir = getPermissionsStateDir({ ...process.env, FRIDAY_HOME: home });
+    upsertTrustedIdentity(stateDir, { channel: "whatsapp", accountId: "default", senderId: "old-operator", role: "operator" });
+    await expect(maybeManageChannels(io, home, false, true)).rejects.toThrow(/no exact trusted identity/);
+    upsertTrustedIdentity(stateDir, { channel: "whatsapp", accountId: "default", senderId: "operator-1", role: "read-only" });
+    await expect(maybeManageChannels(io, home, false, true)).rejects.toThrow(/no exact trusted identity/);
+  });
+
+  it("accepts allow-all only when an exact trusted operator identity is already present", async () => {
+    const home = await temporaryDirectory();
+    await updateSavedChannel("whatsapp", { enabled: true, accountId: "default", allowAll: true }, home);
+    const io = { isInteractive: false, question: async () => { throw new Error("unexpected prompt"); }, write: () => undefined };
+    await expect(maybeManageChannels(io, home, false, true)).rejects.toThrow(/no exact trusted identity/);
+    upsertTrustedIdentity(getPermissionsStateDir({ ...process.env, FRIDAY_HOME: home }), { channel: "whatsapp", accountId: "default", senderId: "allow-all-operator", role: "operator" });
+    await expect(maybeManageChannels(io, home, false, true)).resolves.toBeUndefined();
+  });
+
+  it("explicitly pairs the first configured channel operator", async () => {
+    const home = await temporaryDirectory();
+    let menuVisits = 0;
+    const io = {
+      isInteractive: true,
+      select: async (input: { message: string }) => {
+        if (input.message === "Ingress channels") return menuVisits++ === 0 ? "whatsapp" : "__done__";
+        if (input.message.startsWith("whatsapp ·")) return "enable";
+        throw new Error(`unexpected selector: ${input.message}`);
+      },
+      question: async (message: string) => {
+        if (message.startsWith("FRIDAY account id")) return "default";
+        if (message.startsWith("Allowed sender IDs")) return "operator-1,reader-1";
+        if (message.startsWith("Allowed group/channel IDs")) return "";
+        if (message.startsWith("Loopback bridge port")) return "8765";
+        if (message.startsWith("Exact sender ID to pair")) return "operator-1";
+        throw new Error(`unexpected question: ${message}`);
+      },
+      confirm: async (message: string) => message.startsWith("Trust exactly whatsapp/default/operator-1"),
+      write: () => undefined,
+    };
+    await maybeManageChannels(io, home, true, true);
+    expect((await readSavedChannels(home)).channels.whatsapp).toMatchObject({ enabled: true, allowedSenderIds: ["operator-1", "reader-1"] });
+    expect(loadTrustedIdentities(getPermissionsStateDir({ ...process.env, FRIDAY_HOME: home }))).toEqual([
+      expect.objectContaining({ channel: "whatsapp", accountId: "default", senderId: "operator-1", role: "operator" }),
+    ]);
+  });
+
+  it("rolls channel configuration back when initial operator trust is declined", async () => {
+    const home = await temporaryDirectory();
+    const io = {
+      isInteractive: true,
+      select: async (input: { message: string }) => input.message === "Ingress channels" ? "whatsapp" : "enable",
+      question: async (message: string) => {
+        if (message.startsWith("FRIDAY account id")) return "default";
+        if (message.startsWith("Allowed sender IDs")) return "operator-1";
+        if (message.startsWith("Allowed group/channel IDs")) return "";
+        if (message.startsWith("Loopback bridge port")) return "8765";
+        throw new Error(`unexpected question: ${message}`);
+      },
+      confirm: async () => false,
+      write: () => undefined,
+    };
+    await expect(maybeManageChannels(io, home, true, true)).rejects.toThrow(/pairing was not confirmed/);
+    expect((await readSavedChannels(home)).channels.whatsapp).toBeUndefined();
+    expect(loadTrustedIdentities(getPermissionsStateDir({ ...process.env, FRIDAY_HOME: home }))).toEqual([]);
   });
 });

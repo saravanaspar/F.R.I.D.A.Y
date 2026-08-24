@@ -30,7 +30,7 @@ afterEach(() => {
 function testTurn(replies: string[]): InboundTurn {
   return Object.freeze({
     id: "refinement-turn",
-    principal: Object.freeze({ authority: "local", channel: "cli", accountId: "local", conversationId: "terminal", senderId: "local-user" }),
+    principal: Object.freeze({ authority: "local", channel: "local-test", accountId: "local", conversationId: "terminal", senderId: "local-user" }),
     text: "refine how you remember repeated implementation lessons",
     timestamp: Date.now(),
     reply: async (text: string) => { replies.push(text); },

@@ -179,7 +179,7 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
       if (active.backgroundSessions === 0 && active.foregroundTurns === 0) return;
       const channels = ctx.services.optional(CHANNELS_TRUSTED_CAPABILITY);
       if (!channels) {
-        throw new Error(`Restart blocked because ${active.backgroundSessions} other background session(s) and ${active.foregroundTurns} other foreground turn(s) are active and the trusted channel/CLI approval service is unavailable.`);
+        throw new Error(`Restart blocked because ${active.backgroundSessions} other background session(s) and ${active.foregroundTurns} other foreground turn(s) are active and the trusted channel approval service is unavailable.`);
       }
       const approved = await channels.requestApproval({
         principal: context.turn.principal,

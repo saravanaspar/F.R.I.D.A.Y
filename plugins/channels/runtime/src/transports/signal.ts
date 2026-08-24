@@ -186,7 +186,8 @@ export class SignalChannelTransport implements ChannelTransport {
     const type = groupId ? "group" as const : "dm" as const;
     const principal: ChannelPrincipal = { channel: this.channel, accountId: this.accountId, conversationId, senderId: sender };
     if (!channelPrincipalAllowed(principal, type, this.#config)) return;
-    const text = message.message?.trim() ?? "";
+    const hasUnsupportedAttachment = (message.attachments?.length ?? 0) > 0;
+    const text = [message.message?.trim(), hasUnsupportedAttachment ? "[attachment received; Signal media retrieval is not enabled]" : ""].filter(Boolean).join("\n");
     if (!text) return;
     await this.#handler({
       id: String(message.timestamp ?? envelope.timestamp ?? Date.now()),
@@ -195,16 +196,7 @@ export class SignalChannelTransport implements ChannelTransport {
       text,
       timestamp: message.timestamp ?? envelope.timestamp ?? Date.now(),
       ...(envelope.sourceName === undefined ? {} : { senderName: envelope.sourceName }),
-      attachments: Object.freeze((message.attachments ?? []).map((item) => Object.freeze({
-        kind: item.contentType?.startsWith("image/") ? "image" as const
-          : item.contentType?.startsWith("audio/") ? "audio" as const
-          : item.contentType?.startsWith("video/") ? "video" as const
-          : "document" as const,
-        externalId: item.id ?? String(message.timestamp ?? envelope.timestamp ?? Date.now()),
-        ...(item.contentType === undefined ? {} : { mimeType: item.contentType }),
-        ...(item.filename === undefined ? {} : { fileName: item.filename }),
-        ...(item.size === undefined ? {} : { sizeBytes: item.size }),
-      }))),
+      attachments: Object.freeze([]),
     });
   }
 }

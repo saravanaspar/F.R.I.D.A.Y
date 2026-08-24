@@ -19,7 +19,6 @@
     "preverify": "npm run build:workspaces",
     "build:workspaces": "node scripts/workspace-packages.mjs build",
     "test:workspaces": "npm run build:workspaces && node scripts/workspace-packages.mjs test",
-    "build:plugins": "npm run build:workspaces",
     "verify": "npm run check:architecture && npm run check:packaging && tsc --noEmit && npm run check:silent-failures && npm run check:models && vitest run --config vitest.config.ts && node scripts/workspace-packages.mjs test",
     "check:packaging": "node scripts/workspace-packages.mjs check && node scripts/binary-assets.mjs check",
     "build:sandbox-image": "node scripts/build-sandbox-image.mjs",

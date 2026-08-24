@@ -17,11 +17,15 @@ model arbitrary filesystem/environment mutation.
 Channels owns a pre-routing protected-interaction boundary keyed by the exact
 `(channel, accountId, conversationId, senderId, threadId)` principal. At most one
 credential/approval/prompt interaction may be pending for that principal.
-Cancellation is a separate bounded watcher for an already-running operation.
+Cancellation is a separate bounded watcher for an already-running operation and
+is checked before approval, prompt, or credential handling.
 
 - Permission approvals are sent back to the originating channel. Approval/deny
   replies are intercepted before `turn.ingress`; wrong principals cannot satisfy
-  them. Local operations retain the terminal approver.
+  them. Telegram, Discord, Slack, Microsoft Teams, and Google Chat expose native
+  authenticated approval/deny actions. Every transport retains the strict text
+  form as a fallback. Verified bot-mention prefixes and the first non-quoted
+  Email command line are normalized without making the parser semantic.
 - Secret capture is one field at a time. In opaque-token mode the next message
   must contain only the token: labels, surrounding whitespace, prose and code
   fences are rejected rather than parsed. A trusted validator may test the
@@ -32,6 +36,13 @@ Cancellation is a separate bounded watcher for an already-running operation.
   answer through an LLM.
 - Long-running operations may register an exact-principal cancel code which is
   intercepted before Routing.
+
+Active protected interactions are privately persisted as bounded records. After
+a crash or restart, approval and cancellation IDs/codes remain replay-blocked
+until expiry. A stale capture or prompt consumes and rejects one exact-principal
+reply so secret/setup input cannot leak into ordinary routing. Native callbacks
+are one-shot and stale, malformed, replayed, or wrong-principal callbacks fail
+closed.
 
 `runtime-settings` is a normal plugin. It owns typed read/update operations for
 main model, optional dedicated routing model and permission mode. The model can
@@ -47,6 +58,11 @@ runtime defaults. Custom OpenAI-compatible endpoint metadata and channel
 non-secret transport settings are persisted in their owning private stores;
 credentials are always Vault-owned.
 
+First-run channel setup explicitly pairs one exact admitted sender as an
+`operator` identity. `allowAll` does not imply operator authority. Declining the
+trust confirmation rolls the channel configuration back, and non-interactive
+first-run setup fails until a usable exact operator identity is pre-provisioned.
+
 ## Consequences
 
 Channel `ask` mode now has an actual conversational approval UX instead of
@@ -54,6 +70,10 @@ failing merely because no TTY is attached. Approval and credential replies
 cannot accidentally be classified as normal requests. Runtime changes from
 Telegram/Discord/etc. have the same validation and persistence path as
 onboarding and remain rollback-safe.
+
+The runtime has no conversational CLI transport or trusted local-ingress escape
+hatch. Terminal interaction stays limited to fixed setup, doctor, and bounded
+stopped-runtime maintenance.
 
 The interaction layer remains deliberately non-semantic: it matches exact
 pending state and fixed response forms. Natural language interpretation remains

@@ -4,6 +4,8 @@ import type {
   ChannelInboundHandler,
   ChannelPrincipal,
   ChannelSendResult,
+  ChannelProtectedAction,
+  RawChannelInboundMessage,
   ChannelTarget,
   ChannelTransport,
   ChannelTransportStatus,
@@ -37,9 +39,14 @@ interface GoogleChatEvent {
     sender?: { name?: string; displayName?: string; type?: string };
     space?: { name?: string; displayName?: string; type?: string };
     thread?: { name?: string };
+    attachment?: Array<{ name?: string; contentName?: string; contentType?: string }>;
   };
   user?: { name?: string; displayName?: string; type?: string };
   space?: { name?: string; displayName?: string; type?: string };
+  thread?: { name?: string };
+  action?: { actionMethodName?: string; parameters?: Array<{ key?: string; value?: string }> };
+  common?: { invokedFunction?: string; parameters?: Record<string, string> };
+  commonEventObject?: { invokedFunction?: string; parameters?: Record<string, string> };
 }
 
 interface ServiceAccountJson {
@@ -142,31 +149,56 @@ export class GoogleChatChannelTransport implements ChannelTransport {
     return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze(ids) });
   }
 
+  async sendProtectedAction(target: ChannelTarget, text: string, action: ChannelProtectedAction): Promise<ChannelSendResult> {
+    const space = validateSpaceName(target.conversationId);
+    const token = await this.#accessToken();
+    const response = await fetchWithTimeout(this.#fetch, `${this.#config.chatApiBaseUrl?.replace(/\/$/, "") || "https://chat.googleapis.com/v1"}/${space}/messages`, {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ text, cardsV2: [{ cardId: `friday-${action.requestId}`, card: { sections: [{ widgets: [{ buttonList: { buttons: [{ text: action.approveLabel ?? "Approve", onClick: { action: { function: "fridayProtectedAction", parameters: [{ key: "requestId", value: action.requestId }, { key: "decision", value: "approve" }] } } }, { text: action.denyLabel ?? "Deny", onClick: { action: { function: "fridayProtectedAction", parameters: [{ key: "requestId", value: action.requestId }, { key: "decision", value: "deny" }] } } }] } }] }] } }], ...(target.threadId === undefined ? {} : { thread: { name: target.threadId } }) }),
+    });
+    const payload = await response.json() as { name?: string };
+    if (!response.ok) throw new Error(`Google Chat send failed with status ${response.status}`);
+    return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze(payload.name ? [payload.name] : []) });
+  }
+
   async #handleEvent(event: GoogleChatEvent): Promise<void> {
     if (!this.#handler) return;
     const eventType = event.type ?? event.eventType;
-    if (eventType !== "MESSAGE") return;
+    if (eventType !== "MESSAGE" && eventType !== "CARD_CLICKED") return;
     const message = event.message;
     const space = message?.space ?? event.space;
-    const sender = message?.sender ?? event.user;
+    const sender = eventType === "CARD_CLICKED" ? event.user : message?.sender ?? event.user;
     if (!message?.name || !space?.name || !sender?.name || sender.type === "BOT") return;
     const conversationId = validateSpaceName(space.name);
     const isDm = space.type === "DM" || space.type === "DIRECT_MESSAGE";
-    const threadId = message.thread?.name;
+    const threadId = message.thread?.name ?? event.thread?.name;
     const type = threadId ? "thread" as const : (isDm ? "dm" as const : "group" as const);
     const principal: ChannelPrincipal = { channel: this.channel, accountId: this.accountId, conversationId, senderId: sender.name, ...(threadId === undefined ? {} : { threadId }) };
     if (!channelPrincipalAllowed(principal, type, this.#config)) return;
-    const text = (message.argumentText ?? message.text ?? "").trim();
-    if (!text) return;
+    const common = event.common ?? event.commonEventObject;
+    const currentAction = common?.invokedFunction === "fridayProtectedAction"
+      ? { requestId: common.parameters?.requestId, decision: common.parameters?.decision }
+      : undefined;
+    const legacyMatch = /^friday:([0-9a-f-]{36}):(approve|deny)$/.exec(event.action?.actionMethodName ?? "");
+    const requestId = currentAction?.requestId ?? legacyMatch?.[1];
+    const decision = currentAction?.decision ?? legacyMatch?.[2];
+    const protectedAction: RawChannelInboundMessage["protectedAction"] = requestId && /^[0-9a-f-]{36}$/.test(requestId) && (decision === "approve" || decision === "deny")
+      ? { requestId, decision }
+      : undefined;
+    const hasUnsupportedAttachment = (message.attachment?.length ?? 0) > 0;
+    const text = [(message.argumentText ?? message.text ?? "").trim(), hasUnsupportedAttachment ? "[attachment received; Google Chat media retrieval is not enabled]" : ""].filter(Boolean).join("\n");
+    if (eventType === "CARD_CLICKED" && !protectedAction) return;
+    if (eventType === "MESSAGE" && !text) return;
     await this.#handler({
       id: message.name,
       principal,
       chatType: type,
-      text,
+      text: protectedAction ? "" : text,
       timestamp: Date.now(),
       ...(sender.displayName === undefined ? {} : { senderName: sender.displayName }),
       ...(space.displayName === undefined ? {} : { conversationName: space.displayName }),
       attachments: [],
+      ...(protectedAction ? { protectedAction } : {}),
     });
   }
 

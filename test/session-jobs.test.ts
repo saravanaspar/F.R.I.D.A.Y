@@ -170,7 +170,7 @@ describe("SessionJobManager", () => {
       destinationId: "session:quiesce",
       text: "long-running job",
       timestamp: Date.now(),
-      origin: { authority: "local", channel: "cli", accountId: "local", conversationId: "cli", senderId: "operator" },
+      origin: { authority: "local", channel: "local-test", accountId: "local", conversationId: "local-test", senderId: "operator" },
       notify: async () => undefined,
       async run(signal) {
         observedSignal = signal;
@@ -252,7 +252,7 @@ describe("SessionJobManager", () => {
       destinationId: "session:pscls",
       text: "short job",
       timestamp: Date.now(),
-      origin: { authority: "local", channel: "cli", accountId: "local", conversationId: "cli", senderId: "operator" },
+      origin: { authority: "local", channel: "local-test", accountId: "local", conversationId: "local-test", senderId: "operator" },
       notify: async () => undefined,
       async run() { return { text: "done", sessionId: "pscls" }; },
     });
@@ -281,7 +281,7 @@ describe("SessionJobManager", () => {
       destinationId: "session:pscls",
       text: "short job",
       timestamp: Date.now(),
-      origin: { authority: "local", channel: "cli", accountId: "local", conversationId: "cli", senderId: "operator" },
+      origin: { authority: "local", channel: "local-test", accountId: "local", conversationId: "local-test", senderId: "operator" },
       notify: async () => undefined,
       async run() { return { text: "done", sessionId: "pscls" }; },
     });
@@ -301,7 +301,7 @@ describe("SessionJobManager", () => {
       destinationId: "session:legacy",
       text: "legacy-compatible job",
       timestamp: Date.now(),
-      origin: { authority: "local", channel: "cli", accountId: "local", conversationId: "cli", senderId: "operator" },
+      origin: { authority: "local", channel: "local-test", accountId: "local", conversationId: "local-test", senderId: "operator" },
       notify: async () => undefined,
       async run() { return { text: "done", sessionId: "legacy" }; },
     });
@@ -333,7 +333,7 @@ describe("SessionJobManager", () => {
         sessionId: "stale",
         label: "stale job",
         requestPreview: "keep working",
-        origin: { authority: "local", channel: "cli", accountId: "local", conversationId: "cli", senderId: "operator" },
+        origin: { authority: "local", channel: "local-test", accountId: "local", conversationId: "local-test", senderId: "operator" },
         status: "running",
         createdAt: "2026-01-01T00:00:00.000Z",
         updatedAt: "2026-01-01T00:00:01.000Z",
@@ -350,7 +350,7 @@ describe("SessionJobManager", () => {
       destinationId: "session:new",
       text: "must wait",
       timestamp: Date.now(),
-      origin: { authority: "local", channel: "cli", accountId: "local", conversationId: "cli", senderId: "operator" },
+      origin: { authority: "local", channel: "local-test", accountId: "local", conversationId: "local-test", senderId: "operator" },
       notify: async () => undefined,
       async run() { return { text: "unexpected" }; },
     })).rejects.toThrow(/closed/);

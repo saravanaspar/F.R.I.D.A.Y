@@ -1,7 +1,6 @@
 import type { Capability } from "../capabilities/protocol.js";
 import { defineCapability } from "../capabilities/protocol.js";
 import type {
-  ChannelInboundMessage,
   ChannelSendResult,
   ChannelTarget,
   CredentialCaptureRequest,
@@ -35,7 +34,6 @@ export interface ChannelsTrustedService {
   cancelPrompt(requestId: string): boolean;
   pendingPrompts(): readonly PendingChannelPrompt[];
   watchCancellation(request: ChannelCancellationRequest): Promise<ChannelCancellationHandle>;
-  ingestLocal(text: string, options?: { conversationId?: string; senderId?: string; threadId?: string }): Promise<ChannelInboundMessage>;
 }
 
 export const CHANNELS_TRUSTED_CAPABILITY: Capability<ChannelsTrustedService> =

@@ -48,7 +48,7 @@ function turn(id: string, text: string): InboundTurn {
     id,
     principal: {
       authority: "local",
-      channel: "cli",
+      channel: "local-test",
       accountId: "local",
       conversationId: "terminal",
       senderId: "local-user",

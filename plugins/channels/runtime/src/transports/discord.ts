@@ -1,9 +1,11 @@
 import { reportOperationalError, reportUnlessExpectedAbort } from "@friday/operational-errors";
+import { accountStatePath, readPrivateJson, removePrivateJson, writePrivateJson } from "../state.js";
 import type {
   ChannelAttachment,
   ChannelInboundHandler,
   ChannelPrincipal,
   ChannelSendResult,
+  ChannelProtectedAction,
   ChannelTarget,
   ChannelTransport,
   ChannelTransportStatus,
@@ -64,6 +66,18 @@ interface DiscordMessage {
   attachments?: Array<{ id?: string; filename?: string; content_type?: string; size?: number; url?: string }>;
 }
 
+interface DiscordInteraction {
+  id?: string;
+  token?: string;
+  type?: number;
+  data?: { custom_id?: string; component_type?: number };
+  channel_id?: string;
+  guild_id?: string;
+  member?: { user?: { id?: string; bot?: boolean } };
+  user?: { id?: string; bot?: boolean };
+  message?: { id?: string };
+}
+
 function asText(data: unknown): string | undefined {
   if (typeof data === "string") return data;
   if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf8");
@@ -111,6 +125,12 @@ export class DiscordChannelTransport implements ChannelTransport {
   #state: ChannelTransportStatus["state"] = "stopped";
   #detail: string | undefined;
   #botUserId: string | undefined;
+  #sessionId: string | undefined;
+  #resumeGateway: string | undefined;
+  #sequence: number | null = null;
+  #lastReceivedSequence: number | null = null;
+  #ingressTail: Promise<void> = Promise.resolve();
+  readonly #sessionPath: string;
 
   constructor(config: DiscordChannelConfig, secrets: SecretConsumer, dependencies: DiscordTransportDependencies = {}) {
     this.#config = config;
@@ -119,6 +139,8 @@ export class DiscordChannelTransport implements ChannelTransport {
     this.#fetch = dependencies.fetch ?? fetch;
     this.#websocketFactory = dependencies.websocketFactory ?? defaultWebSocketFactory;
     this.#mentionPatterns = Object.freeze((config.mentionPatterns ?? []).map((pattern) => new RegExp(pattern, "i")));
+    this.#sessionPath = accountStatePath("discord", this.accountId, "session.json");
+    this.#loadSession();
   }
 
   async start(handler: ChannelInboundHandler): Promise<void> {
@@ -165,6 +187,7 @@ export class DiscordChannelTransport implements ChannelTransport {
     this.#runPromise = undefined;
     this.#socket = undefined;
     this.#handler = undefined;
+    this.#ingressTail = Promise.resolve();
     this.#detail = undefined;
   }
 
@@ -194,6 +217,20 @@ export class DiscordChannelTransport implements ChannelTransport {
     });
   }
 
+  async sendProtectedAction(target: ChannelTarget, text: string, action: ChannelProtectedAction): Promise<ChannelSendResult> {
+    const result = await this.#api<{ id?: string }>(`/channels/${encodeURIComponent(target.conversationId)}/messages`, {
+      method: "POST",
+      body: {
+        content: text,
+        components: [{ type: 1, components: [
+          { type: 2, style: 3, label: action.approveLabel ?? "Approve", custom_id: `friday:${action.requestId}:approve` },
+          { type: 2, style: 4, label: action.denyLabel ?? "Deny", custom_id: `friday:${action.requestId}:deny` },
+        ] }],
+      },
+    });
+    return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze(result.id ? [result.id] : []) });
+  }
+
   async #run(signal: AbortSignal, onFirstReady: () => void): Promise<void> {
     let firstReady = false;
     let backoff = 500;
@@ -220,24 +257,25 @@ export class DiscordChannelTransport implements ChannelTransport {
   }
 
   async #connect(signal: AbortSignal, onReady: () => void): Promise<void> {
-    const gateway = this.#config.gatewayUrl?.trim() || "wss://gateway.discord.gg/?v=10&encoding=json";
+    const gateway = this.#resumeGateway ?? this.#config.gatewayUrl?.trim() ?? "wss://gateway.discord.gg/?v=10&encoding=json";
     const socket = this.#websocketFactory(gateway);
+    // A failed admission deliberately leaves #sequence at the last durable
+    // dispatch. Rewind the heartbeat cursor too, otherwise a reconnect can
+    // advertise the later, received-but-not-admitted sequence.
+    this.#lastReceivedSequence = this.#sequence;
+    this.#ingressTail = Promise.resolve();
     this.#socket = socket;
     let heartbeat: NodeJS.Timeout | undefined;
-    let sequence: number | null = null;
     let closedResolve: (() => void) | undefined;
     const closed = new Promise<void>((resolve) => { closedResolve = resolve; });
 
     const identify = async () => {
       await withSecretText(this.#secrets, this.#config.credentialRef, async (token) => {
-        socket.send(JSON.stringify({
-          op: 2,
-          d: {
-            token,
-            intents: 37377,
-            properties: { os: process.platform, browser: "friday", device: "friday" },
-          },
-        }));
+        if (this.#sessionId && this.#sequence !== null) {
+          socket.send(JSON.stringify({ op: 6, d: { token, session_id: this.#sessionId, seq: this.#sequence } }));
+        } else {
+          socket.send(JSON.stringify({ op: 2, d: { token, intents: 37377, properties: { os: process.platform, browser: "friday", device: "friday" } } }));
+        }
       });
     };
 
@@ -249,7 +287,12 @@ export class DiscordChannelTransport implements ChannelTransport {
         reportOperationalError({ component: "channels.discord", operation: "parse gateway payload", error, severity: "warn" });
         return;
       }
-      if (typeof payload.s === "number") sequence = payload.s;
+      if (payload.s !== undefined && payload.s !== null && (!Number.isSafeInteger(payload.s) || payload.s < 0)) {
+        socket.close(4000, "invalid gateway sequence");
+        return;
+      }
+      const receivedSequence = typeof payload.s === "number" ? payload.s : undefined;
+      if (receivedSequence !== undefined) this.#lastReceivedSequence = receivedSequence;
       if (payload.op === 10) {
         const interval = normalizeDiscordHeartbeatInterval(
           (payload.d as { heartbeat_interval?: unknown } | undefined)?.heartbeat_interval,
@@ -260,7 +303,7 @@ export class DiscordChannelTransport implements ChannelTransport {
         }
         if (heartbeat) clearInterval(heartbeat);
         heartbeat = setInterval(() => {
-          try { socket.send(JSON.stringify({ op: 1, d: sequence })); } catch (error) {
+          try { socket.send(JSON.stringify({ op: 1, d: this.#lastReceivedSequence })); } catch (error) {
             reportOperationalError({ component: "channels.discord", operation: "send heartbeat", error, severity: "warn" });
           }
         }, interval);
@@ -270,20 +313,66 @@ export class DiscordChannelTransport implements ChannelTransport {
         });
         return;
       }
-      if (payload.op === 7 || payload.op === 9) {
+      if (payload.op === 7) {
         socket.close(4002, "gateway reconnect");
+        return;
+      }
+      if (payload.op === 9) {
+        this.#sessionId = undefined;
+        this.#resumeGateway = undefined;
+        this.#sequence = null;
+        this.#lastReceivedSequence = null;
+        this.#clearSession();
+        socket.close(4002, "invalid session");
         return;
       }
       if (payload.op !== 0) return;
       if (payload.t === "READY") {
-        const ready = payload.d as { user?: { id?: string } } | undefined;
+        const ready = payload.d as { user?: { id?: string }; session_id?: string; resume_gateway_url?: string } | undefined;
         this.#botUserId = ready?.user?.id;
+        if (ready?.session_id) this.#sessionId = ready.session_id;
+        if (ready?.resume_gateway_url) {
+          try {
+            const candidate = new URL(ready.resume_gateway_url);
+            candidate.searchParams.set("v", "10");
+            candidate.searchParams.set("encoding", "json");
+            const value = candidate.toString();
+            this.#resumeGateway = this.#validResumeGateway(value) ? value : undefined;
+          } catch {
+            this.#resumeGateway = undefined;
+          }
+        }
+        if (receivedSequence !== undefined) this.#sequence = receivedSequence;
+        this.#persistSession(false);
+        onReady();
+        return;
+      }
+      if (payload.t === "RESUMED") {
+        if (receivedSequence !== undefined) {
+          this.#sequence = receivedSequence;
+          this.#persistSession(false);
+        }
         onReady();
         return;
       }
       if (payload.t === "MESSAGE_CREATE") {
-        void this.#handleMessage(payload.d as DiscordMessage).catch((error: unknown) => {
+        this.#ingressTail = this.#ingressTail.then(async () => {
+          await this.#deliverInbound(payload.d as DiscordMessage);
+          if (receivedSequence !== undefined) { this.#sequence = receivedSequence; this.#persistSession(true); }
+        }).catch((error: unknown) => {
           reportOperationalError({ component: "channels.discord", operation: "handle inbound message", error });
+          this.#socket?.close(4003, "durable admission failed");
+          throw error;
+        });
+      }
+      if (payload.t === "INTERACTION_CREATE") {
+        this.#ingressTail = this.#ingressTail.then(async () => {
+          await this.#handleInteraction(payload.d as DiscordInteraction);
+          if (receivedSequence !== undefined) { this.#sequence = receivedSequence; this.#persistSession(true); }
+        }).catch((error: unknown) => {
+          reportOperationalError({ component: "channels.discord", operation: "handle protected interaction", error });
+          this.#socket?.close(4003, "durable interaction admission failed");
+          throw error;
         });
       }
     };
@@ -296,6 +385,7 @@ export class DiscordChannelTransport implements ChannelTransport {
     signal.addEventListener("abort", onAbort, { once: true });
     try {
       await closed;
+      await this.#ingressTail;
     } finally {
       if (heartbeat) clearInterval(heartbeat);
       signal.removeEventListener("abort", onAbort);
@@ -305,8 +395,63 @@ export class DiscordChannelTransport implements ChannelTransport {
     }
   }
 
-  async #handleMessage(message: DiscordMessage): Promise<void> {
-    if (!this.#handler || !message.id || !message.channel_id || !message.author?.id || message.author.bot === true) return;
+  async #deliverInbound(message: DiscordMessage): Promise<void> {
+    let last: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try { await this.#handleMessage(message); return; } catch (error) {
+        last = error;
+        await delay(250 * (attempt + 1), this.#controller?.signal ?? new AbortController().signal).catch((delayError: unknown) => {
+          reportUnlessExpectedAbort({ component: "channels.discord", operation: "retry inbound admission", error: delayError }, this.#controller?.signal);
+        });
+      }
+    }
+    throw last;
+  }
+
+  #loadSession(): void {
+    try {
+      const value = readPrivateJson<{ sessionId?: unknown; resumeGateway?: unknown; sequence?: unknown; botUserId?: unknown }>(this.#sessionPath, 16 * 1024);
+      if (!value) return;
+      if (typeof value.sessionId === "string" && value.sessionId.length > 0 && value.sessionId.length <= 256
+        && typeof value.resumeGateway === "string" && value.resumeGateway.length <= 2_048 && this.#validResumeGateway(value.resumeGateway)
+        && typeof value.sequence === "number" && Number.isSafeInteger(value.sequence) && value.sequence >= 0
+        && (value.botUserId === undefined || (typeof value.botUserId === "string" && value.botUserId.length > 0 && value.botUserId.length <= 128))) {
+        this.#sessionId = value.sessionId; this.#resumeGateway = value.resumeGateway; this.#sequence = value.sequence; this.#lastReceivedSequence = value.sequence;
+        if (typeof value.botUserId === "string") this.#botUserId = value.botUserId;
+      }
+    } catch (error) {
+      reportOperationalError({ component: "channels.discord", operation: "load persisted gateway session", error, severity: "warn" });
+      this.#sessionId = undefined; this.#resumeGateway = undefined; this.#sequence = null;
+    }
+  }
+
+  #persistSession(required: boolean): void {
+    if (!this.#sessionId || !this.#resumeGateway || this.#sequence === null) return;
+    try {
+      writePrivateJson(this.#sessionPath, { sessionId: this.#sessionId, resumeGateway: this.#resumeGateway, sequence: this.#sequence, botUserId: this.#botUserId }, 16 * 1024);
+    } catch (error) {
+      reportOperationalError({ component: "channels.discord", operation: required ? "persist admitted gateway sequence" : "persist optional gateway checkpoint", error, severity: required ? "error" : "warn" });
+      if (required) throw error;
+    }
+  }
+
+  #clearSession(): void {
+    try { removePrivateJson(this.#sessionPath); } catch (error) { reportOperationalError({ component: "channels.discord", operation: "clear persisted gateway session", error, severity: "warn" }); }
+  }
+
+  #validResumeGateway(value: string): boolean {
+    try {
+      const url = new URL(value);
+      if (url.protocol !== "wss:" || url.username || url.password) return false;
+      const configured = this.#config.gatewayUrl?.trim() ? new URL(this.#config.gatewayUrl.trim()) : undefined;
+      return configured
+        ? configured.protocol === "wss:" && !configured.username && !configured.password && url.origin === configured.origin
+        : !url.port && (url.hostname === "gateway.discord.gg" || /^gateway-[a-z0-9-]+\.discord\.gg$/.test(url.hostname));
+    } catch { return false; }
+  }
+
+  async #handleMessage(message: DiscordMessage): Promise<unknown> {
+    if (!this.#handler || !message.id || !message.channel_id || !message.author?.id || message.author.bot === true) return undefined;
     if (this.#botUserId && message.author.id === this.#botUserId) return;
     const type = message.guild_id ? "group" as const : "dm" as const;
     const principal: ChannelPrincipal = {
@@ -315,9 +460,10 @@ export class DiscordChannelTransport implements ChannelTransport {
       conversationId: message.channel_id,
       senderId: message.author.id,
     };
-    if (!channelPrincipalAllowed(principal, type, this.#config)) return;
+    if (!channelPrincipalAllowed(principal, type, this.#config)) return undefined;
     const content = message.content?.trim() ?? "";
-    if (this.#config.requireMention === true && type !== "dm" && !this.#mentioned(content)) return;
+    const protectedReply = /^(?:(?:<@!?\d+>|@[\w.]+)\s+)?(?:approve|deny|cancel)\s+[A-Z0-9]{6}$/i.test(content);
+    if (this.#config.requireMention === true && type !== "dm" && !this.#mentioned(content) && !protectedReply) return undefined;
     const attachments: readonly ChannelAttachment[] = Object.freeze((message.attachments ?? []).map((item) => Object.freeze({
       kind: item.content_type?.startsWith("image/") ? "image" as const
         : item.content_type?.startsWith("audio/") ? "audio" as const
@@ -330,8 +476,8 @@ export class DiscordChannelTransport implements ChannelTransport {
       ...(item.url === undefined ? {} : { downloadUrl: item.url }),
     })));
     const text = content || (attachments.length > 0 ? `[${attachments[0]?.kind ?? "attachment"}]` : "");
-    if (!text) return;
-    await this.#handler({
+    if (!text) return undefined;
+    return await this.#handler({
       id: message.id,
       principal,
       chatType: type,
@@ -340,6 +486,25 @@ export class DiscordChannelTransport implements ChannelTransport {
       ...(message.author.global_name ?? message.author.username ? { senderName: message.author.global_name ?? message.author.username } : {}),
       ...(message.referenced_message?.id ? { replyToMessageId: message.referenced_message.id } : {}),
       attachments,
+    });
+  }
+
+  async #handleInteraction(interaction: DiscordInteraction): Promise<void> {
+    if (interaction.type !== 3 || !interaction.id || !interaction.token || !interaction.channel_id) return;
+    const data = interaction.data?.custom_id ?? "";
+    const match = /^friday:([0-9a-f-]{36}):(approve|deny)$/.exec(data);
+    const user = interaction.member?.user ?? interaction.user;
+    if (!match || !user?.id || user.bot) return;
+    const type = interaction.guild_id ? "group" as const : "dm" as const;
+    const principal: ChannelPrincipal = { channel: this.channel, accountId: this.accountId, conversationId: interaction.channel_id, senderId: user.id };
+    if (!channelPrincipalAllowed(principal, type, this.#config)) return;
+    const result = await this.#handler?.({ id: `interaction-${interaction.id}`, principal, chatType: type, text: "", timestamp: Date.now(), attachments: [], protectedAction: { requestId: match[1]!, decision: match[2] as "approve" | "deny" } });
+    const accepted = result?.classification === "approval-resolved";
+    await this.#api(`/interactions/${encodeURIComponent(interaction.id)}/${encodeURIComponent(interaction.token)}/callback`, {
+      method: "POST",
+      body: { type: 4, data: { content: accepted ? (match[2] === "approve" ? "Approved." : "Denied.") : "This action is no longer valid.", flags: 64 } },
+    }).catch((error: unknown) => {
+      reportOperationalError({ component: "channels.discord", operation: "acknowledge protected interaction", error, severity: "warn" });
     });
   }
 
@@ -375,7 +540,9 @@ export class DiscordChannelTransport implements ChannelTransport {
         ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
       });
       if (!response.ok) throw new Error(`Discord API request failed with status ${response.status}`);
-      return await response.json() as T;
+      if (response.status === 204) return undefined as T;
+      const encoded = await response.text();
+      return (encoded ? JSON.parse(encoded) : undefined) as T;
     });
   }
 }

@@ -2,7 +2,6 @@ export * from "./types.js";
 export * from "./sanitization.js";
 export * from "./hub.js";
 export * from "./transports/shared.js";
-export * from "./transports/cli.js";
 export * from "./transports/telegram.js";
 export * from "./transports/whatsapp.js";
 export * from "./transports/webhook-server.js";

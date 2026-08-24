@@ -168,7 +168,6 @@ export interface ChannelsPluginOptions {
   readonly signal?: channels.SignalChannelConfig | false | undefined;
   readonly email?: channels.EmailChannelConfig | false | undefined;
   readonly sms?: channels.SmsChannelConfig | false | undefined;
-  readonly cliAccountId?: string | undefined;
   readonly autoStart?: boolean | undefined;
 }
 
@@ -189,9 +188,6 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
         rotate: (ref, secret) => trustedVault.rotate(ref, secret),
       },
     });
-
-    const cli = new channels.CliChannelTransport(options.cliAccountId ?? "local");
-    hub.registerTransport(cli);
 
     const telegramSaved = saved.channels.telegram;
     const telegramConfig = options.telegram === undefined
@@ -381,7 +377,7 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
       await ctx.emit(TURN_INGRESS_HOOK, {
         id: message.id,
         principal: {
-          authority: message.principal.channel === "cli" ? "local" : "channel",
+          authority: "channel",
           ...message.principal,
         },
         text: message.text,
@@ -419,20 +415,6 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
       cancelPrompt: (requestId: string) => hub.cancelPrompt(requestId),
       pendingPrompts: () => hub.pendingPrompts(),
       watchCancellation: (request: Parameters<ChannelsTrustedService["watchCancellation"]>[0]) => hub.watchCancellation(request),
-      ingestLocal: (text: string, ingestOptions: Parameters<ChannelsTrustedService["ingestLocal"]>[1] = {}) => hub.ingest({
-        id: `cli-${Date.now()}`,
-        principal: {
-          channel: "cli",
-          accountId: cli.accountId,
-          conversationId: ingestOptions.conversationId ?? "terminal",
-          senderId: ingestOptions.senderId ?? "local-user",
-          ...(ingestOptions.threadId === undefined ? {} : { threadId: ingestOptions.threadId }),
-        },
-        chatType: ingestOptions.threadId ? "thread" : "dm",
-        text,
-        timestamp: Date.now(),
-        attachments: [],
-      }),
     });
 
     ctx.contribute(SCHEDULED_ACTION_CONTRIBUTION, {
@@ -460,12 +442,11 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
       },
       permission(payload) {
         const reminder = reminderPayload(payload);
-        const local = reminder.target.channel === "cli";
         return {
           id: "channels.send.scheduled",
-          effect: local ? "system-write" : "external-write",
+          effect: "external-write",
           resource: `channel:${reminder.target.channel}:${reminder.target.accountId}:${reminder.target.conversationId}`,
-          network: !local,
+          network: true,
         };
       },
       async execute(payload, execution) {

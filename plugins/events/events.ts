@@ -510,13 +510,17 @@ export function createEventsService(options: EventsServiceOptions = {}): EventsS
           while (!controller.signal.aborted) {
             workerLastTickAt = now().toISOString();
             try {
-              await service.runPending({ maxDeliveries: maxDeliveriesPerTick, maxConcurrent, leaseMs });
+              await service.runPending({ maxDeliveries: maxDeliveriesPerTick, maxConcurrent, leaseMs, signal: controller.signal });
               workerLastError = undefined;
             } catch (error) {
+              if (controller.signal.aborted) break;
               workerLastError = errorMessage(error);
               reportOperationalError({ component: "events", operation: "run durable delivery worker tick", error });
             }
-            await delay(pollIntervalMs, controller.signal);
+            if (controller.signal.aborted) break;
+            await delay(pollIntervalMs, controller.signal).catch((error: unknown) => {
+              if (!controller.signal.aborted) reportOperationalError({ component: "events", operation: "wait for durable delivery worker tick", error });
+            });
           }
         } finally {
           workerOptions.signal?.removeEventListener("abort", onExternalAbort);
@@ -555,8 +559,10 @@ export function createEventsService(options: EventsServiceOptions = {}): EventsS
 
     async close() {
       if (closed) return;
-      await service.stopWorker();
+      // Abort active handlers before waiting for the worker. The worker passes
+      // this signal into each delivery so cooperative handlers can unwind.
       for (const controller of activeControllers.values()) controller.abort(new Error("events service closed"));
+      await service.stopWorker();
       activeControllers.clear();
       subscribers.clear();
       handlers.clear();

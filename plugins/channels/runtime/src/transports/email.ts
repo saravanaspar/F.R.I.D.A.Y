@@ -1,10 +1,10 @@
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { reportOperationalError, reportUnlessExpectedAbort } from "@friday/operational-errors";
 import type {
-  ChannelAttachment,
   ChannelInboundHandler,
   ChannelPrincipal,
   ChannelSendResult,
@@ -19,6 +19,7 @@ import {
   type ChannelAccessPolicy,
   type SecretConsumer,
 } from "./shared.js";
+import { accountStatePath, readPrivateJson, writePrivateJson } from "../state.js";
 
 export interface EmailChannelConfig extends ChannelAccessPolicy {
   readonly accountId?: string | undefined;
@@ -53,6 +54,7 @@ interface EmailBridgeMessage {
 interface EmailBridgeResponse {
   ok?: boolean;
   maxUid?: number;
+  uidValidity?: string;
   messageId?: string;
   messages?: EmailBridgeMessage[];
 }
@@ -89,6 +91,9 @@ export class EmailChannelTransport implements ChannelTransport {
   #state: ChannelTransportStatus["state"] = "stopped";
   #detail: string | undefined;
   #lastUid = 0;
+  #uidValidity: string | undefined;
+  readonly #checkpointPath: string;
+  readonly #mailboxFingerprint: string;
 
   constructor(config: EmailChannelConfig, secrets: SecretConsumer, dependencies: EmailTransportDependencies = {}) {
     this.#config = config;
@@ -98,6 +103,8 @@ export class EmailChannelTransport implements ChannelTransport {
     if (!config.imapHost.trim() || !config.smtpHost.trim()) throw new Error("Email IMAP and SMTP hosts are required");
     this.#pollIntervalMs = Math.max(100, Math.min(300_000, config.pollIntervalMs ?? 15_000));
     this.#runBridge = dependencies.runBridge ?? ((request) => this.#spawnBridge(request));
+    this.#checkpointPath = accountStatePath("email", this.accountId, "uid.v2.json");
+    this.#mailboxFingerprint = createHash("sha256").update(JSON.stringify({ address: normalizeEmail(config.address), imapHost: config.imapHost.trim().toLowerCase(), imapPort: config.imapPort ?? 993, imapTls: config.imapTls !== false, mailbox: config.mailbox?.trim() || "INBOX" })).digest("hex");
   }
 
   async start(handler: ChannelInboundHandler): Promise<void> {
@@ -110,7 +117,22 @@ export class EmailChannelTransport implements ChannelTransport {
       this.#state = "error";
       throw new Error("Email IMAP startup check failed");
     }
-    this.#lastUid = Math.max(0, Number(status.maxUid ?? 0));
+    const statusMaxUid = status.maxUid;
+    if (typeof status.uidValidity !== "string" || !/^\d+$/.test(status.uidValidity) || typeof statusMaxUid !== "number" || !Number.isSafeInteger(statusMaxUid) || statusMaxUid < 0) {
+      this.#state = "error";
+      throw new Error("Email IMAP startup status is missing a valid UIDVALIDITY/maxUid");
+    }
+    let checkpoint: { uidValidity: string; lastUid: number; fingerprint: string } | undefined;
+    try { checkpoint = this.#readCheckpoint(); }
+    catch (error) { reportOperationalError({ component: "channels.email", operation: "load UID checkpoint", error, severity: "warn" }); }
+    if (status.uidValidity && checkpoint && checkpoint.uidValidity === status.uidValidity && checkpoint.fingerprint === this.#mailboxFingerprint) {
+      this.#uidValidity = checkpoint.uidValidity;
+      this.#lastUid = checkpoint.lastUid;
+    } else {
+      this.#uidValidity = status.uidValidity;
+      this.#lastUid = statusMaxUid;
+      if (this.#uidValidity) this.#writeCheckpoint();
+    }
     this.#controller = new AbortController();
     this.#state = "running";
     this.#pollPromise = this.#poll(this.#controller.signal).catch((error: unknown) => {
@@ -161,11 +183,23 @@ export class EmailChannelTransport implements ChannelTransport {
         await delay(this.#pollIntervalMs, signal);
         const result = await this.#bridge("poll", { afterUid: this.#lastUid, maxMessages: 8, maxMessageBytes: 5 * 1024 * 1024 });
         if (result.ok !== true) throw new Error("Email poll failed");
+        if (typeof result.uidValidity !== "string" || !/^\d+$/.test(result.uidValidity) || typeof result.maxUid !== "number" || !Number.isSafeInteger(result.maxUid) || result.maxUid < 0) {
+          throw new Error("Email poll status is missing a valid UIDVALIDITY/maxUid");
+        }
+        if (result.uidValidity !== this.#uidValidity) {
+          // UID namespaces are mailbox-specific. Rewind once when a mailbox is
+          // recreated so messages in the new namespace cannot be skipped.
+          this.#uidValidity = result.uidValidity;
+          this.#lastUid = 0;
+          this.#writeCheckpoint();
+          continue;
+        }
         // Advance the IMAP checkpoint only after every returned message has been
         // durably admitted (or intentionally filtered) by the channel handler. If
         // admission fails, retain the previous UID so IMAP redelivers the batch.
         for (const message of result.messages ?? []) await this.#handle(message);
-        this.#lastUid = Math.max(this.#lastUid, Number(result.maxUid ?? this.#lastUid));
+        this.#lastUid = Math.max(this.#lastUid, result.maxUid);
+        this.#writeCheckpoint();
         backoff = this.#pollIntervalMs;
       } catch (error) {
         if (signal.aborted) return;
@@ -191,17 +225,8 @@ export class EmailChannelTransport implements ChannelTransport {
     };
     const type = message.threadId && message.threadId !== message.messageId ? "thread" as const : "dm" as const;
     if (!channelPrincipalAllowed(principal, type, this.#config)) return;
-    const attachments: readonly ChannelAttachment[] = Object.freeze((message.attachments ?? []).map((item) => Object.freeze({
-      kind: item.mimeType?.startsWith("image/") ? "image" as const
-        : item.mimeType?.startsWith("audio/") ? "audio" as const
-        : item.mimeType?.startsWith("video/") ? "video" as const
-        : "document" as const,
-      externalId: item.externalId ?? message.messageId!,
-      ...(item.mimeType === undefined ? {} : { mimeType: item.mimeType }),
-      ...(item.fileName === undefined ? {} : { fileName: item.fileName }),
-      ...(item.sizeBytes === undefined ? {} : { sizeBytes: item.sizeBytes }),
-    })));
-    const text = message.text?.trim() || (attachments.length > 0 ? `[${attachments[0]?.kind ?? "attachment"}]` : "");
+    const hasUnsupportedAttachment = (message.attachments?.length ?? 0) > 0;
+    const text = [message.text?.trim(), hasUnsupportedAttachment ? "[attachment received; email media retrieval is not enabled]" : ""].filter(Boolean).join("\n");
     if (!text) return;
     const parsedDate = Date.parse(message.date ?? "");
     await this.#handler({
@@ -213,8 +238,21 @@ export class EmailChannelTransport implements ChannelTransport {
       ...(message.fromName ? { senderName: message.fromName } : {}),
       ...(message.subject ? { conversationName: message.subject } : {}),
       ...(message.inReplyTo ? { replyToMessageId: message.inReplyTo } : {}),
-      attachments,
+      attachments: Object.freeze([]),
     });
+  }
+
+  #readCheckpoint(): { uidValidity: string; lastUid: number; fingerprint: string } | undefined {
+    const parsed = readPrivateJson<{ uidValidity?: unknown; lastUid?: unknown; fingerprint?: unknown }>(this.#checkpointPath, 16 * 1024);
+    if (!parsed) return undefined;
+    const lastUid = typeof parsed.lastUid === "number" ? parsed.lastUid : -1;
+    if (!Number.isSafeInteger(lastUid) || lastUid < 0 || typeof parsed.uidValidity !== "string" || !/^\d+$/.test(parsed.uidValidity) || typeof parsed.fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(parsed.fingerprint)) throw new Error("Email UID checkpoint is malformed");
+    return { uidValidity: parsed.uidValidity, lastUid, fingerprint: parsed.fingerprint };
+  }
+
+  #writeCheckpoint(): void {
+    if (!this.#uidValidity) return;
+    writePrivateJson(this.#checkpointPath, { uidValidity: this.#uidValidity, lastUid: this.#lastUid, fingerprint: this.#mailboxFingerprint }, 16 * 1024);
   }
 
   async #bridge(command: EmailBridgeRequest["command"], extra: Record<string, unknown>): Promise<EmailBridgeResponse> {

@@ -7,6 +7,9 @@ import {
   type SavedChannelConfig,
 } from "../plugins/channels/config.js";
 import type { OnboardingIO } from "./onboarding.js";
+import { getPermissionsStateDir, loadTrustedIdentities, upsertTrustedIdentity } from "../plugins/permissions/identity-store.js";
+
+type SavedChannelsStateLike = Awaited<ReturnType<typeof readSavedChannels>>;
 
 interface VaultStoreLike {
   exists(ref: string): boolean;
@@ -111,7 +114,7 @@ async function storeSecret(
 }
 
 async function accessPolicy(io: OnboardingIO, current?: SavedChannelConfig): Promise<Pick<SavedChannelConfig, "allowAll" | "allowedSenderIds" | "allowedConversationIds">> {
-  io.write("Inbound access is default-deny. Add sender IDs now, or configure trusted identities after FRIDAY starts.\n");
+  io.write("Inbound access is default-deny. Add exact sender IDs; first-run setup will explicitly pair one as the operator.\n");
   const senders = csv(await prompt(io, "Allowed sender IDs (comma separated; blank = none)", current?.allowedSenderIds?.join(",") ?? ""));
   const conversations = csv(await prompt(io, "Allowed group/channel IDs (comma separated; blank = none)", current?.allowedConversationIds?.join(",") ?? ""));
   const allowAll = await askConfirm(io, "Allow all transport ingress?", current?.allowAll === true);
@@ -217,6 +220,32 @@ async function configureOne(
   return configured;
 }
 
+async function ensureInitialPairing(
+  id: ConfigurableChannelId,
+  config: SavedChannelConfig,
+  io: OnboardingIO,
+  home: string,
+): Promise<void> {
+  const accountId = config.accountId ?? "default";
+  const allowed = config.allowedSenderIds ?? [];
+  const allowsAll = config.allowAll === true;
+  const stateDir = getPermissionsStateDir({ ...process.env, FRIDAY_HOME: home });
+  const existing = loadTrustedIdentities(stateDir).find((identity) => identity.channel === id && identity.accountId === accountId && (allowsAll || allowed.includes(identity.senderId)));
+  if (existing?.role === "operator") return;
+  if (allowed.length === 0 && !allowsAll) throw new Error(`${id}/${accountId} requires an exact allowed sender ID before its initial operator can be paired`);
+  const initialSender = existing?.senderId ?? (allowed.length === 1 ? allowed[0]! : text(await prompt(io, "Exact sender ID to pair as initial operator", allowed[0]), "Initial operator sender ID", 256));
+  if (!allowsAll && !allowed.includes(initialSender)) throw new Error("Initial operator sender ID must be one of the allowed sender IDs");
+  if (!await askConfirm(io, `${existing ? "Upgrade" : "Trust"} exactly ${id}/${accountId}/${initialSender} as the initial operator?`, true)) throw new Error("Initial operator pairing was not confirmed; channel setup cannot safely finish");
+  upsertTrustedIdentity(stateDir, { channel: id, accountId, senderId: initialSender, role: "operator", label: `${id} initial operator` });
+  io.write(`Paired exactly ${id}/${accountId}/${initialSender} as the initial operator. Other allowed senders remain untrusted.\n`);
+}
+
+function hasUsablePairing(state: SavedChannelsStateLike, home: string): boolean {
+  const stateDir = getPermissionsStateDir({ ...process.env, FRIDAY_HOME: home });
+  const identities = loadTrustedIdentities(stateDir);
+  return Object.entries(state.channels).some(([id, config]) => config?.enabled && identities.some((identity) => identity.role === "operator" && identity.channel === id && identity.accountId === (config.accountId ?? "default") && (config.allowAll === true || (config.allowedSenderIds ?? []).includes(identity.senderId))));
+}
+
 export async function maybeManageChannels(
   io: OnboardingIO,
   home: string,
@@ -229,6 +258,9 @@ export async function maybeManageChannels(
     if (requireEnabled && configuredCount === 0) {
       throw new Error("First-run setup requires at least one enabled ingress channel; run `friday setup` interactively to configure one");
     }
+    if (requireEnabled && !hasUsablePairing(current, home)) {
+      throw new Error("Enabled channels have no exact trusted identity; run `friday setup` interactively to pair the initial operator");
+    }
     // A non-interactive invocation can validate pre-provisioned channel state but
     // cannot safely collect credentials or access policy. Never fall through to
     // the interactive channel editor just because force=true.
@@ -237,7 +269,7 @@ export async function maybeManageChannels(
   // An explicitly non-forced first run may rely on a channel that was securely
   // pre-provisioned before onboarding. The invariant is "at least one enabled
   // ingress", not "force the editor to reopen an already valid channel".
-  if (requireEnabled && configuredCount > 0 && force !== true) return;
+  if (requireEnabled && configuredCount > 0 && force !== true && hasUsablePairing(current, home)) return;
   if (!requireEnabled && force !== true && !await askConfirm(io, configuredCount ? "Manage channels now?" : "Configure an ingress channel now?", false)) return;
   const vaultModule = await import("@friday/vault");
   const environment: NodeJS.ProcessEnv = { ...process.env, FRIDAY_HOME: home };
@@ -261,10 +293,16 @@ export async function maybeManageChannels(
         ],
       });
       if (selected === "__done__") {
-        const enabled = Object.values((await readSavedChannels(home)).channels).filter((channel) => channel?.enabled).length;
+        const latest = await readSavedChannels(home);
+        const enabled = Object.values(latest.channels).filter((channel) => channel?.enabled).length;
         if (requireEnabled && enabled === 0) {
           if (io.warning) io.warning("At least one ingress channel must be enabled before setup can finish.");
           else io.write("At least one ingress channel must be enabled before setup can finish.\n");
+          continue;
+        }
+        if (requireEnabled && !hasUsablePairing(latest, home)) {
+          if (io.warning) io.warning("At least one enabled channel must have an exact paired operator before setup can finish.");
+          else io.write("At least one enabled channel must have an exact paired operator before setup can finish.\n");
           continue;
         }
         break;
@@ -280,9 +318,14 @@ export async function maybeManageChannels(
       const raw = (await io.question("Select a channel to configure [0]: ")).trim() || "0";
       const index = Number(raw);
       if (index === 0) {
-        const enabled = Object.values((await readSavedChannels(home)).channels).filter((channel) => channel?.enabled).length;
+        const latest = await readSavedChannels(home);
+        const enabled = Object.values(latest.channels).filter((channel) => channel?.enabled).length;
         if (requireEnabled && enabled === 0) {
           io.write("At least one ingress channel must be enabled before setup can finish.\n");
+          continue;
+        }
+        if (requireEnabled && !hasUsablePairing(latest, home)) {
+          io.write("At least one enabled channel must have an exact paired operator before setup can finish.\n");
           continue;
         }
         break;
@@ -291,10 +334,21 @@ export async function maybeManageChannels(
       selectedId = CHANNELS[index - 1]!.id;
     }
     if (!selectedId) throw new Error("invalid channel selection");
-    const next = await configureOne(selectedId, io, home, vault, state.channels[selectedId]);
+    const previous = state.channels[selectedId];
+    const next = await configureOne(selectedId, io, home, vault, previous);
     await updateSavedChannel(selectedId, next, home);
+    try {
+      if (next?.enabled) await ensureInitialPairing(selectedId, next, io, home);
+    } catch (error) {
+      // Do not leave a newly enabled channel without a paired identity if the
+      // explicit trust confirmation fails. Restore the prior saved config.
+      await updateSavedChannel(selectedId, previous, home);
+      throw error;
+    }
   }
-  const enabled = Object.values((await readSavedChannels(home)).channels).filter((channel) => channel?.enabled).length;
+  const finalState = await readSavedChannels(home);
+  const enabled = Object.values(finalState.channels).filter((channel) => channel?.enabled).length;
   if (requireEnabled && enabled === 0) throw new Error("At least one ingress channel must be enabled before setup can finish");
-  io.write("Channel configuration complete. Network identities still require a trusted Permissions identity before privileged actions are allowed.\n");
+  if (requireEnabled && !hasUsablePairing(finalState, home)) throw new Error("First-run setup requires at least one exact enabled operator identity");
+  io.write("Channel configuration complete. At least one enabled channel has an exact initial operator identity; newly configured channels are paired explicitly, while other allowed senders remain untrusted.\n");
 }
