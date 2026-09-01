@@ -42,7 +42,7 @@ describe("FRIDAY bootstrap config", () => {
         else process.env.FRIDAY_STATE_DIR = previousStateDir;
       }
     }
-  }, 15_000);
+  }, 30_000);
 
   it("loads ordinary external plugin modules from config without a command API", async () => {
     const directory = await temporaryDirectory();

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { reportOperationalError } from "@friday/operational-errors";
+import { reportOperationalError, sanitizeOperationalError } from "@friday/operational-errors";
 import type {
   EventConsumer,
   EventConsumerHandler,
@@ -178,7 +178,7 @@ function compatibleDuplicate(existing: EventRecord, input: EventInput, normalize
 }
 
 function errorMessage(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 2_000);
+  return sanitizeOperationalError(error).safeMessage;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -229,6 +229,10 @@ export function createEventsService(options: EventsServiceOptions = {}): EventsS
   let workerStartedAt: string | undefined;
   let workerLastTickAt: string | undefined;
   let workerLastError: string | undefined;
+  let workerLastFailureAt: string | undefined;
+  let workerDeliveryFailures = 0;
+  let workerDeadLetters = 0;
+  let publishedSinceCompaction = 0;
 
   const assertOpen = (): void => {
     if (closed) throw new Error("events service is closed");
@@ -274,7 +278,18 @@ export function createEventsService(options: EventsServiceOptions = {}): EventsS
       cancelled = combined.signal.aborted;
     } catch (error) {
       cancelled = combined.signal.aborted || isAbortError(error);
-      if (!cancelled) failure = errorMessage(error);
+      if (!cancelled) {
+        failure = errorMessage(error);
+        reportOperationalError({
+          component: "events",
+          operation: "deliver durable event to consumer",
+          operationCode: "delivery.handler-failed",
+          error,
+          attempt: claimed.delivery.attempt,
+          maxAttempts: claimed.consumer.retry.maxAttempts,
+          retryable: claimed.delivery.attempt < claimed.consumer.retry.maxAttempts,
+        });
+      }
     } finally {
       clearInterval(heartbeat);
       combined.cleanup();
@@ -357,6 +372,15 @@ export function createEventsService(options: EventsServiceOptions = {}): EventsS
         return cloneEvent(persisted.event);
       }
       const event = cloneEvent(persisted.event);
+      publishedSinceCompaction += 1;
+      if (publishedSinceCompaction >= 1_000) {
+        publishedSinceCompaction = 0;
+        try {
+          database.compact(current.toISOString());
+        } catch (error) {
+          reportOperationalError({ component: "events", operation: "compact durable event storage", operationCode: "storage.compaction-failed", error });
+        }
+      }
       for (const subscription of subscribers) {
         if (subscription.source && subscription.source !== event.source) continue;
         if (subscription.types.length > 0 && !subscription.types.includes(event.type)) continue;
@@ -500,6 +524,9 @@ export function createEventsService(options: EventsServiceOptions = {}): EventsS
       workerStartedAt = now().toISOString();
       workerLastTickAt = undefined;
       workerLastError = undefined;
+      workerLastFailureAt = undefined;
+      workerDeliveryFailures = 0;
+      workerDeadLetters = 0;
       const onExternalAbort = (): void => controller.abort(workerOptions.signal?.reason);
       if (workerOptions.signal) {
         if (workerOptions.signal.aborted) controller.abort(workerOptions.signal.reason);
@@ -510,11 +537,20 @@ export function createEventsService(options: EventsServiceOptions = {}): EventsS
           while (!controller.signal.aborted) {
             workerLastTickAt = now().toISOString();
             try {
-              await service.runPending({ maxDeliveries: maxDeliveriesPerTick, maxConcurrent, leaseMs, signal: controller.signal });
-              workerLastError = undefined;
+              const results = await service.runPending({ maxDeliveries: maxDeliveriesPerTick, maxConcurrent, leaseMs, signal: controller.signal });
+              const failures = results.filter((result) => result.status === "error" || result.status === "dead-letter");
+              workerDeliveryFailures += failures.length;
+              workerDeadLetters += failures.filter((result) => result.status === "dead-letter").length;
+              const latestFailure = failures.at(-1);
+              if (latestFailure?.error) {
+                workerLastError = latestFailure.error;
+                workerLastFailureAt = workerLastTickAt;
+              }
             } catch (error) {
               if (controller.signal.aborted) break;
               workerLastError = errorMessage(error);
+              workerLastFailureAt = workerLastTickAt;
+              workerDeliveryFailures += 1;
               reportOperationalError({ component: "events", operation: "run durable delivery worker tick", error });
             }
             if (controller.signal.aborted) break;
@@ -554,7 +590,20 @@ export function createEventsService(options: EventsServiceOptions = {}): EventsS
         ...(workerStartedAt ? { startedAt: workerStartedAt } : {}),
         ...(workerLastTickAt ? { lastTickAt: workerLastTickAt } : {}),
         ...(workerLastError ? { lastError: workerLastError } : {}),
+        ...(workerLastFailureAt ? { lastFailureAt: workerLastFailureAt } : {}),
+        deliveryFailures: workerDeliveryFailures,
+        deadLetters: workerDeadLetters,
       };
+    },
+
+    storageStatus() {
+      assertOpen();
+      return database.storageStatus();
+    },
+
+    compact() {
+      assertOpen();
+      return database.compact(now().toISOString());
     },
 
     async close() {

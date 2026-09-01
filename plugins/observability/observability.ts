@@ -161,6 +161,10 @@ export class ObservabilityRuntime implements ObservabilityService {
   #droppedLogs = 0;
   #droppedSpans = 0;
   #droppedMetrics = 0;
+  readonly #droppedMetricReasons = new Map<string, number>();
+  #lastMetricDropAt: string | undefined;
+  #lastMetricDropReason: string | undefined;
+  #metricCapacityAlerted = false;
   #droppedUsage = 0;
   #closed = false;
 
@@ -371,7 +375,7 @@ export class ObservabilityRuntime implements ObservabilityService {
         actualCostRecords: values.filter((value) => value.actualCost !== undefined).length,
         estimatedCost: values.reduce((sum, value) => sum + (value.estimatedCost ?? 0), 0),
         estimatedCostRecords: values.filter((value) => value.estimatedCost !== undefined).length,
-        currency: currencies.size === 1 ? [...currencies][0]! : currencies.size > 1 ? "mixed" : "USD",
+        currency: currencies.size === 1 ? [...currencies][0]! : currencies.size > 1 ? "mixed" : "unknown",
       };
     };
     const groups = (keyFor: (value: ModelUsageRecord) => string | undefined) => {
@@ -398,16 +402,26 @@ export class ObservabilityRuntime implements ObservabilityService {
 
   status(): ObservabilityStatus {
     this.#assertOpen();
+    const metricSeriesCount = this.#database.metricSeriesCount();
+    const metricSeriesUtilization = metricSeriesCount / this.#maxMetricSeries;
     return {
+      health: this.#droppedLogs > 0 || this.#droppedSpans > 0 || this.#droppedMetrics > 0 || this.#droppedUsage > 0 || metricSeriesUtilization >= 0.8
+        ? "degraded"
+        : "healthy",
       logCount: this.#database.logCount(),
       spanCount: this.#database.spanCount(),
-      metricSeriesCount: this.#database.metricSeriesCount(),
+      metricSeriesCount,
       maxLogRows: this.#maxLogRows,
       maxSpanRows: this.#maxSpanRows,
       maxMetricSeries: this.#maxMetricSeries,
       droppedLogs: this.#droppedLogs,
       droppedSpans: this.#droppedSpans,
       droppedMetrics: this.#droppedMetrics,
+      droppedMetricsByReason: Object.freeze(Object.fromEntries([...this.#droppedMetricReasons].sort(([left], [right]) => left.localeCompare(right)))),
+      metricSeriesUtilization,
+      metricSeriesNearCapacity: metricSeriesUtilization >= 0.8,
+      ...(this.#lastMetricDropAt === undefined ? {} : { lastMetricDropAt: this.#lastMetricDropAt }),
+      ...(this.#lastMetricDropReason === undefined ? {} : { lastMetricDropReason: this.#lastMetricDropReason }),
       usageCount: this.#database.usageCount(),
       maxUsageRows: this.#maxUsageRows,
       droppedUsage: this.#droppedUsage,
@@ -421,29 +435,48 @@ export class ObservabilityRuntime implements ObservabilityService {
   }
 
   #recordMetric(kind: ObservabilityMetricKind, name: string, value: number, labels?: ObservabilityLabels): void {
-    if (this.#closed || !METRIC_NAME.test(name) || !Number.isFinite(value)) {
-      this.#droppedMetrics += 1;
-      return;
-    }
+    if (this.#closed) return this.#dropMetric("closed");
+    if (!METRIC_NAME.test(name)) return this.#dropMetric("invalid-name");
+    if (!Number.isFinite(value)) return this.#dropMetric("non-finite-value");
     if (kind === "counter" && value < 0) {
-      this.#droppedMetrics += 1;
-      return;
+      return this.#dropMetric("negative-counter");
     }
     try {
       const normalized = normalizeLabels(labels);
       const labelsJson = canonicalLabels(normalized);
       const exists = this.#database.hasMetricSeries(name, kind, labelsJson);
       if (!exists && this.#database.metricSeriesCount() >= this.#maxMetricSeries) {
-        this.#droppedMetrics += 1;
-        return;
+        return this.#dropMetric("series-limit");
       }
       const nowIso = this.#now().toISOString();
       if (kind === "counter") this.#database.incrementCounter(name, value, labelsJson, nowIso);
       else if (kind === "gauge") this.#database.setGauge(name, value, labelsJson, nowIso);
       else this.#database.observeDistribution(name, value, labelsJson, nowIso);
+      const utilization = this.#database.metricSeriesCount() / this.#maxMetricSeries;
+      if (utilization >= 0.8 && !this.#metricCapacityAlerted) {
+        this.#metricCapacityAlerted = true;
+        this.#database.insertLog({
+          at: nowIso,
+          level: "warn",
+          component: "observability",
+          message: "Metric series capacity is above 80%",
+          fields: { metricSeriesUtilization: utilization, maxMetricSeries: this.#maxMetricSeries },
+        });
+      }
     } catch (error) {
-      this.#droppedMetrics += 1;
-      this.#reportDrop("metric", error, this.#droppedMetrics);
+      this.#dropMetric("storage-error", error);
+    }
+  }
+
+  #dropMetric(reason: string, error?: unknown): void {
+    this.#droppedMetrics += 1;
+    const reasonCount = (this.#droppedMetricReasons.get(reason) ?? 0) + 1;
+    this.#droppedMetricReasons.set(reason, reasonCount);
+    this.#lastMetricDropAt = this.#now().toISOString();
+    this.#lastMetricDropReason = reason;
+    if (error !== undefined) this.#reportDrop(`metric (${reason})`, error, reasonCount);
+    else if (reasonCount === 1 || (reasonCount & (reasonCount - 1)) === 0) {
+      process.stderr.write(`friday: observability dropped metric (${reason}, ${reasonCount})\n`);
     }
   }
 

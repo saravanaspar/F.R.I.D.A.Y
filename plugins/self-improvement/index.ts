@@ -1,7 +1,12 @@
 import { resolve } from "node:path";
 import * as selfImprovement from "@friday/self-improvement";
 import type { FridayPlugin } from "../../src/plugin.js";
-import { AGENT_TOOL_CONTRIBUTION, type AgentExtensionJsonValue } from "../turn-loop/contract.js";
+import {
+  AGENT_TOOL_CONTRIBUTION,
+  TURN_FINALIZER_CONTRIBUTION,
+  type AgentExtensionJsonValue,
+  type TurnFinalizerDescriptor,
+} from "../turn-loop/contract.js";
 import { definePlugin, type PluginContext } from "../capabilities/protocol.js";
 import { MODEL_CREDENTIALS_CAPABILITY } from "../auth/contract.js";
 import { ARTIFACTS_CAPABILITY } from "../artifacts/contract.js";
@@ -18,6 +23,7 @@ import {
   type SelfImproveRunOptions,
   type SelfImprovementContinuation,
   type SelfImprovementFeasibility,
+  type SelfImprovementPlacement,
   type SelfImprovementService,
 } from "./contract.js";
 import { createSelfImprovementRunner, getSelfImprovementMissionDir, getSelfImprovementStateRoot } from "./runner.js";
@@ -144,6 +150,52 @@ function forwardAbort(source: AbortSignal | undefined, target: AbortController):
   return () => source.removeEventListener("abort", forward);
 }
 
+function handoffFinalizer(
+  result: import("./contract.js").SelfImproveRunResult,
+  stateDir?: string,
+  takeoverTimeoutMs?: number,
+): TurnFinalizerDescriptor {
+  return Object.freeze({
+    type: "self-improvement.handoff",
+    payload: Object.freeze({
+      candidateId: result.candidateId,
+      generationId: result.generationId,
+      commit: result.commit,
+      restartRequestId: result.restartRequestId,
+      ...(stateDir === undefined ? {} : { stateDir }),
+      ...(takeoverTimeoutMs === undefined ? {} : { takeoverTimeoutMs }),
+    }),
+  });
+}
+
+function handoffPayload(value: AgentExtensionJsonValue): {
+  result: import("./contract.js").SelfImproveRunResult;
+  stateDir?: string;
+  takeoverTimeoutMs?: number;
+} {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Self-improvement handoff finalizer payload is invalid");
+  const input = value as Record<string, AgentExtensionJsonValue>;
+  for (const name of ["candidateId", "generationId", "commit", "restartRequestId"] as const) {
+    if (typeof input[name] !== "string" || !(input[name] as string).trim()) {
+      throw new Error(`Self-improvement handoff finalizer ${name} is invalid`);
+    }
+  }
+  if (input.stateDir !== undefined && typeof input.stateDir !== "string") throw new Error("Self-improvement handoff finalizer stateDir is invalid");
+  if (input.takeoverTimeoutMs !== undefined && (typeof input.takeoverTimeoutMs !== "number" || !Number.isSafeInteger(input.takeoverTimeoutMs) || input.takeoverTimeoutMs < 1)) {
+    throw new Error("Self-improvement handoff finalizer takeoverTimeoutMs is invalid");
+  }
+  return {
+    result: {
+      candidateId: input.candidateId as string,
+      generationId: input.generationId as string,
+      commit: input.commit as string,
+      restartRequestId: input.restartRequestId as string,
+    },
+    ...(typeof input.stateDir === "string" ? { stateDir: input.stateDir } : {}),
+    ...(typeof input.takeoverTimeoutMs === "number" ? { takeoverTimeoutMs: input.takeoverTimeoutMs } : {}),
+  };
+}
+
 
 const selfImprovementPlugin: FridayPlugin = definePlugin({
   id: "self-improvement",
@@ -234,42 +286,71 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
   });
   async function assessFeasibility(options: SelfImproveRunOptions): Promise<SelfImprovementFeasibility> {
     const repository = resolve(options.cwd);
+    const rejected = (
+      reason: string,
+      placement: SelfImprovementPlacement = "extend-plugin",
+      target = "unresolved",
+    ): SelfImprovementFeasibility => Object.freeze({
+      feasible: false,
+      reason,
+      objective: options.objective,
+      placement,
+      target,
+      requiresCode: false,
+    });
     try {
-      sandbox.assertAvailable();
-      const primary = await worktrees.api.inspectWorktree({ repository, directory: repository });
-      if (!primary.clean) {
-        return Object.freeze({ feasible: false, reason: "The primary checkout is dirty; self-improvement will not modify a dirty baseline.", objective: options.objective });
-      }
       const model = modelService.api.getModel(options.provider as never, options.model as never);
       if (!model) {
-        return Object.freeze({ feasible: false, reason: `The configured implementation model ${options.provider}/${options.model} is not installed.`, objective: options.objective });
+        return rejected(`The configured implementation model ${options.provider}/${options.model} is not installed.`);
       }
+      const installedActions = ctx.collect(SYSTEM_ACTION_CONTRIBUTION).map((action) => action.id).sort().slice(0, 256);
+      const installedTools = ctx.collect(AGENT_TOOL_CONTRIBUTION).map((tool) => tool.name).sort().slice(0, 256);
       const credential = await ctx.services.optional(MODEL_CREDENTIALS_CAPABILITY)?.getApiKey(options.provider);
       const response = await modelService.api.completeSimple(
         model as never,
         {
           systemPrompt: [
             "You are FRIDAY's software capability feasibility reviewer.",
-            "Decide whether the requested capability is realistically implementable by editing and testing the current FRIDAY repository with its existing sandbox/worktree/self-improvement machinery.",
-            "Return one JSON object only: {feasible:boolean, reason:string, objective:string}.",
+            "First decide placement; code generation is not the default.",
+            "Choose exactly one placement: reuse-existing when an installed action/tool already solves it; extend-plugin when an existing plugin owns the domain; mcp when an external MCP integration is the right boundary; new-plugin only for a genuinely distinct durable domain; host only for framework-neutral boot/orchestration/lifecycle/security invariants.",
+            "Return one JSON object only: {feasible:boolean, reason:string, objective:string, placement:string, target:string, requiresCode:boolean}.",
             "Do not claim feasibility if the request fundamentally requires unavailable hardware, inaccessible private systems, or an impossible external guarantee.",
-            "If it is an ordinary software feature that can be implemented locally, mark it feasible and turn it into a concise implementation objective.",
+            "For reuse-existing or mcp, requiresCode must be false and objective must explain the existing action/tool or MCP route to use. For extend-plugin, new-plugin, or host, requiresCode must be true and objective must name the selected target and tests.",
+            "Prefer reuse-existing, then extension of the closest owner. Never choose a new plugin merely because a feature was requested.",
           ].join("\n"),
-          messages: [{ role: "user", content: JSON.stringify({ requestedCapability: options.objective, repository }), timestamp: Date.now() }],
+          messages: [{ role: "user", content: JSON.stringify({ requestedCapability: options.objective, repository, installedActions, installedTools }), timestamp: Date.now() }],
         },
         { temperature: 0, maxTokens: 256, ...(credential ? { apiKey: credential } : {}) },
       );
       if (response.stopReason === "error" || response.stopReason === "aborted") {
-        return Object.freeze({ feasible: false, reason: `Feasibility analysis could not run: ${response.errorMessage || response.stopReason}`, objective: options.objective });
+        return rejected(`Feasibility analysis could not run: ${response.errorMessage || response.stopReason}`);
       }
       const text = response.content.filter((part): part is { type: "text"; text: string } => part.type === "text").map((part) => part.text).join("\n");
       const parsed = modelService.api.parseJsonWithRepair<Record<string, unknown>>(text);
       const feasible = parsed.feasible === true;
       const reason = typeof parsed.reason === "string" && parsed.reason.trim() ? parsed.reason.trim().slice(0, 2_000) : (feasible ? "The requested capability can be implemented in the current repository." : "The requested capability is not feasible with the current environment.");
-      const objective = typeof parsed.objective === "string" && parsed.objective.trim() ? parsed.objective.trim().slice(0, 8_192) : options.objective;
-      return Object.freeze({ feasible, reason, objective });
+      const placements = new Set<SelfImprovementPlacement>(["reuse-existing", "extend-plugin", "mcp", "new-plugin", "host"]);
+      const placement = typeof parsed.placement === "string" && placements.has(parsed.placement as SelfImprovementPlacement)
+        ? parsed.placement as SelfImprovementPlacement
+        : "extend-plugin";
+      const target = typeof parsed.target === "string" && parsed.target.trim()
+        ? parsed.target.trim().slice(0, 240)
+        : placement === "extend-plugin" ? "closest-existing-owner" : placement;
+      const requiresCode = feasible && placement !== "reuse-existing" && placement !== "mcp";
+      const requestedObjective = typeof parsed.objective === "string" && parsed.objective.trim() ? parsed.objective.trim().slice(0, 8_192) : options.objective;
+      const objective = requiresCode
+        ? [`Placement: ${placement}.`, `Target: ${target}.`, requestedObjective].join("\n")
+        : requestedObjective;
+      if (requiresCode) {
+        sandbox.assertAvailable();
+        const primary = await worktrees.api.inspectWorktree({ repository, directory: repository });
+        if (!primary.clean) {
+          return rejected("The primary checkout is dirty; self-improvement will not modify a dirty baseline.", placement, target);
+        }
+      }
+      return Object.freeze({ feasible, reason, objective, placement, target, requiresCode });
     } catch (error) {
-      return Object.freeze({ feasible: false, reason: error instanceof Error ? error.message : String(error), objective: options.objective });
+      return rejected(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -313,6 +394,7 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
       const feasibility = await assessFeasibility(options);
       if (!feasibility.feasible) return Object.freeze({ feasibility });
       await hooks.onFeasible(feasibility);
+      if (!feasibility.requiresCode) return Object.freeze({ feasibility });
       await hooks.authorize(feasibility);
       const result = await runSelfImprove({ ...options, objective: feasibility.objective });
       return Object.freeze({ feasibility, result });
@@ -338,6 +420,19 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
     },
   });
   ctx.services.provide(SELF_IMPROVEMENT_CAPABILITY, service);
+  ctx.contribute(TURN_FINALIZER_CONTRIBUTION, {
+    type: "self-improvement.handoff",
+    async finalize(payload, finalizerContext) {
+      const parsed = handoffPayload(payload);
+      await service.finalizeHandoff(parsed.result, {
+        ...(parsed.stateDir === undefined ? {} : { stateDir: parsed.stateDir }),
+        ...(parsed.takeoverTimeoutMs === undefined ? {} : { takeoverTimeoutMs: parsed.takeoverTimeoutMs }),
+        ...(finalizerContext.signal === undefined ? {} : { signal: finalizerContext.signal }),
+        beforeHandoff: () => confirmRestartWithActiveWork(ctx, finalizerContext.turn, undefined, "Self-improvement handoff recovery"),
+      });
+      process.kill(process.pid, "SIGTERM");
+    },
+  });
 
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
     id: "self-improvement.run",
@@ -427,7 +522,7 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
             beforeHandoff: () => confirmRestartWithActiveWork(ctx, context.turn, context.jobId, "Self-improvement handoff"),
           });
           process.kill(process.pid, "SIGTERM");
-        });
+        }, handoffFinalizer(result, stateDir, takeoverTimeoutMs));
         return result;
       } finally {
         detachTurnAbort();
@@ -440,12 +535,12 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
     id: "self-improvement-capability-ensure",
     name: "capability_ensure",
-    label: "Build a missing FRIDAY capability",
+    label: "Resolve a missing FRIDAY capability",
     description: [
       "Use only when the user's original objective is blocked because FRIDAY itself lacks a reusable software capability such as a connector, transport, protocol integration, or host primitive.",
       "Do not use for ordinary coding in the user's repository, one-off scripts, missing project dependencies, or work that existing tools/Skills can perform.",
-      "The host feasibility-checks the gap, asks authorization, implements it in an isolated worktree, runs strict deterministic gates, promotes only a verified generation, preserves the original channel request and attachments, restarts FRIDAY, then automatically resumes that original request.",
-      "A successful tool result means the prerequisite capability is ready for verified takeover; it does not mean the user's original objective is finished.",
+      "The host first chooses among reusing an installed capability, extending its owning plugin, using MCP, creating a distinct plugin, or changing framework-neutral host orchestration.",
+      "Code changes require explicit authorization, an isolated worktree, strict deterministic gates, verified promotion, restart, and automatic resumption of the original channel request. Reuse/MCP placement does not generate code.",
     ].join(" "),
     parameters: {
       type: "object",
@@ -462,9 +557,9 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
       const feature = systemString(input as Readonly<SystemJsonObject>, "feature", { required: true, maximum: 240 })!;
       const requestedImplementationObjective = systemString({ objective: input.implementationObjective } as Readonly<SystemJsonObject>, "objective", { required: true, maximum: 8_192 })!;
       const implementationObjective = [
-        `Build the missing reusable FRIDAY capability: ${feature}.`,
+        `Resolve the missing reusable FRIDAY capability: ${feature}.`,
         requestedImplementationObjective,
-        "Implementation requirements: keep the feature plugin-owned and expose explicit capability/contribution boundaries rather than hidden src/ domain logic; add deterministic feature, failure, security, unconfigured-startup, and lifecycle-cleanup tests; preserve existing architecture boundaries; never weaken unrelated tests or gates; use trusted credential/Vault/OAuth flows for secrets and user authorization; the new plugin must activate safely without credentials and expose an explicit unconfigured/auth-required state so OAuth, pairing, or credential capture can happen only after the verified successor is running; make configuration/status discoverable through the appropriate plugin surface; and ensure the resulting capability can be used by the original resumed channel request after verified restart.",
+        "Placement requirements: reuse an installed capability first; otherwise extend the closest owning plugin; choose MCP for an external tool protocol; create a new plugin only for a distinct durable domain; use src/ only for framework-neutral host orchestration/lifecycle/security. Add deterministic feature, failure, security, unconfigured-startup, lifecycle-cleanup, and breaking-point tests without weakening unrelated gates. Keep secrets in trusted credential/Vault/OAuth paths and require explicit user authorization before code changes.",
       ].join("\n\n");
       const repository = configuredSelfRepository();
       const provider = process.env.FRIDAY_MODEL_PROVIDER?.trim();
@@ -515,7 +610,9 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
           continuation,
         }, {
           async onFeasible(feasibility) {
-            await agentContext.turn!.reply(`FRIDAY is missing ${feature}. I verified that I can add it safely, so I can build the prerequisite and then resume your original request.\n\n${feasibility.reason}`);
+            await agentContext.turn!.reply(feasibility.requiresCode
+              ? `FRIDAY is missing ${feature}. Placement: ${feasibility.placement} (${feasibility.target}). I can implement that prerequisite after authorization, then resume your original request.\n\n${feasibility.reason}`
+              : `FRIDAY does not need to generate code for ${feature}. Placement: ${feasibility.placement} (${feasibility.target}).\n\n${feasibility.reason}`);
           },
           async authorize() {
             await permissions.authorize({
@@ -531,14 +628,25 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
           },
         });
         if (!ensured.result) {
-          return { output: { feasible: false, feature, reason: ensured.feasibility.reason } as unknown as AgentExtensionJsonValue, isError: true };
+          return {
+            output: {
+              feasible: ensured.feasibility.feasible,
+              feature,
+              placement: ensured.feasibility.placement,
+              target: ensured.feasibility.target,
+              requiresCode: ensured.feasibility.requiresCode,
+              reason: ensured.feasibility.reason,
+              nextStep: ensured.feasibility.objective,
+            } as unknown as AgentExtensionJsonValue,
+            ...(ensured.feasibility.feasible ? {} : { isError: true }),
+          };
         }
         agentContext.deferAfterReply(async () => {
           await service.finalizeHandoff(ensured.result!, {
             beforeHandoff: () => confirmRestartWithActiveWork(ctx, agentContext.turn!, agentContext.jobId, `Installing ${feature}`),
           });
           process.kill(process.pid, "SIGTERM");
-        });
+        }, handoffFinalizer(ensured.result!));
         return {
           output: {
             feasible: true,
@@ -557,21 +665,26 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
 
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
     id: "self-improvement.ensure-capability",
-    label: "Build a missing capability",
-    description: "Analyze whether a missing FRIDAY software capability is feasible. Only when feasible, explain that it can be built, request authorization, self-improve, restart, and resume the original channel request.",
+    label: "Resolve a missing capability",
+    description: "Choose reuse, existing-plugin extension, MCP, distinct new plugin, or framework-neutral host placement. Generate code only after feasibility and explicit authorization.",
     parameters: Object.freeze({
       type: "object",
       properties: { feature: { type: "string" }, objective: { type: "string" }, repository: { type: "string" } },
       required: ["feature", "objective"],
       additionalProperties: false,
     }),
+    permission() {
+      // Feasibility is read-only. The implementation path performs a second,
+      // explicit system-write/network authorization only after feasibility passes.
+      return { id: "self-improvement.feasibility", effect: "private-read", resource: "self-improvement:feasibility", network: false };
+    },
     async execute(input, context) {
       const feature = systemString(input, "feature", { required: true, maximum: 240 })!;
       const requestedObjective = systemString(input, "objective", { required: true, maximum: 8_192 })!;
       const implementationObjective = [
-        `Build the missing reusable FRIDAY capability: ${feature}.`,
+        `Resolve the missing reusable FRIDAY capability: ${feature}.`,
         requestedObjective,
-        "Implementation requirements: keep the feature plugin-owned with explicit boundaries; add deterministic feature/failure/security/unconfigured-startup/lifecycle tests; preserve architecture guards; never weaken unrelated gates; keep secrets in trusted credential/Vault/OAuth paths; activate safely without credentials and expose an unconfigured/auth-required state so authorization happens only after the verified successor is running; and make the capability usable by the resumed original request after verified restart.",
+        "Placement requirements: reuse an installed capability first; otherwise extend the closest owner; use MCP for external tool protocols; create a new plugin only for a distinct durable domain; use src/ only for framework-neutral host orchestration/lifecycle/security. Add deterministic feature/failure/security/unconfigured-startup/lifecycle and breaking-point tests; preserve architecture guards; never weaken unrelated gates; keep secrets in trusted credential/Vault/OAuth paths; and require explicit user authorization before code changes.",
       ].join("\n\n");
       const repository = systemString(input, "repository", { maximum: 4_096 }) ?? configuredSelfRepository();
       const provider = process.env.FRIDAY_MODEL_PROVIDER?.trim();
@@ -616,7 +729,9 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
       try {
         const ensured = await service.ensureCapability({ ...base, ...(continuation === undefined ? {} : { continuation }) }, {
           async onFeasible(feasibility) {
-            await context.turn.reply(`${feature} is not available yet. I checked feasibility and can build it safely, then resume the original request.\n\n${feasibility.reason}`);
+            await context.turn.reply(feasibility.requiresCode
+              ? `${feature} needs a code change. Placement: ${feasibility.placement} (${feasibility.target}). After authorization I can implement it and resume the original request.\n\n${feasibility.reason}`
+              : `${feature} can be resolved without generating code. Placement: ${feasibility.placement} (${feasibility.target}).\n\n${feasibility.reason}`);
           },
           async authorize() {
             await permissions.authorize({
@@ -634,13 +749,21 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
             }
           },
         });
-        if (!ensured.result) return { feasible: false, feature, reason: ensured.feasibility.reason };
+        if (!ensured.result) return {
+          feasible: ensured.feasibility.feasible,
+          feature,
+          placement: ensured.feasibility.placement,
+          target: ensured.feasibility.target,
+          requiresCode: ensured.feasibility.requiresCode,
+          reason: ensured.feasibility.reason,
+          nextStep: ensured.feasibility.objective,
+        };
         context.deferAfterReply(async () => {
           await service.finalizeHandoff(ensured.result!, {
             beforeHandoff: () => confirmRestartWithActiveWork(ctx, context.turn, context.jobId, `Installing ${feature}`),
           });
           process.kill(process.pid, "SIGTERM");
-        });
+        }, handoffFinalizer(ensured.result!));
         return { feasible: true, feature, reason: ensured.feasibility.reason, generationId: ensured.result.generationId, message: `${feature} was implemented and the verified successor is ready. The original request will resume automatically after this reply.` };
       } finally {
         detachTurnAbort();
@@ -656,6 +779,9 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
     label: "Self-improvement status",
     description: "Show the active self-improvement operation and the latest durable mission records.",
     parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+    permission() {
+      return { id: "self-improvement.status", effect: "global-operational-read", resource: "self-improvement:status", network: false };
+    },
     execute() {
       return { active: service.activeRun() ?? null, missions: service.missions().slice(0, 10) };
     },
@@ -670,6 +796,9 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
       properties: { limit: { type: "integer", minimum: 1, maximum: 100 } },
       additionalProperties: false,
     }),
+    permission() {
+      return { id: "self-improvement.history", effect: "global-operational-read", resource: "self-improvement:history", network: false };
+    },
     execute(input) {
       const limit = systemPositiveInteger(input, "limit") ?? 10;
       if (limit > 100) throw new Error("limit must be <= 100");

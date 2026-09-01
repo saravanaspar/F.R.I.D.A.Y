@@ -102,14 +102,23 @@ const observabilityPlugin: FridayPlugin = definePlugin({
       message: `Operational failure: ${event.operation}`,
       fields: {
         operation: event.operation,
+        operationCode: event.operationCode,
+        outcome: event.outcome,
+        retryable: event.retryable,
+        errorClass: event.errorClass,
+        errorFingerprint: event.errorFingerprint,
         errorName: event.errorName,
         errorMessage: event.errorMessage,
-        ...(event.errorCode === undefined ? {} : { errorCode: event.errorCode }),
+        errorCode: event.errorCode,
+        ...(event.attempt === undefined ? {} : { attempt: event.attempt }),
+        ...(event.maxAttempts === undefined ? {} : { maxAttempts: event.maxAttempts }),
+        ...(event.durationMs === undefined ? {} : { durationMs: event.durationMs }),
+        ...(event.correlationId === undefined ? {} : { correlationId: event.correlationId }),
       },
     });
     observability.increment("friday.operational_failures.total", 1, {
       component: event.component,
-      operation: event.operation,
+      operation: event.operationCode,
       severity: event.severity,
     });
   });
@@ -159,6 +168,9 @@ const observabilityPlugin: FridayPlugin = definePlugin({
       },
       additionalProperties: false,
     }),
+    permission() {
+      return { id: "observability.logs", effect: "global-operational-read", resource: "observability:logs", network: false };
+    },
     execute(input) {
       const level = optionalLogLevel(input);
       const component = optionalString(input, "component");
@@ -177,6 +189,9 @@ const observabilityPlugin: FridayPlugin = definePlugin({
     label: "Model token and cost usage",
     description: "Summarize provider-reported tokens, cache hit rate, actual provider/billing cost when available, separate catalog estimates, and attribution by agent/subagent, model, and background job. Use this for natural-language usage questions from any connected channel.",
     parameters: Object.freeze({ type: "object", properties: USAGE_QUERY_PROPERTIES, additionalProperties: false }),
+    permission() {
+      return { id: "observability.usage", effect: "global-operational-read", resource: "observability:usage", network: false };
+    },
     execute(input) {
       if (!observability.usageSummary) {
         throw new Error("The active observability provider does not support usage summaries.");
@@ -193,6 +208,9 @@ const observabilityPlugin: FridayPlugin = definePlugin({
       properties: { ...USAGE_QUERY_PROPERTIES, limit: { type: "integer", minimum: 1, maximum: 500 } },
       additionalProperties: false,
     }),
+    permission() {
+      return { id: "observability.usage-records", effect: "global-operational-read", resource: "observability:usage-records", network: false };
+    },
     execute(input) {
       if (!observability.usage) {
         throw new Error("The active observability provider does not support usage records.");
@@ -209,6 +227,9 @@ const observabilityPlugin: FridayPlugin = definePlugin({
       properties: { name: { type: "string" } },
       additionalProperties: false,
     }),
+    permission() {
+      return { id: "observability.metrics", effect: "global-operational-read", resource: "observability:metrics", network: false };
+    },
     execute(input) {
       return observability.metrics(optionalString(input, "name"));
     },
@@ -228,6 +249,9 @@ const observabilityPlugin: FridayPlugin = definePlugin({
       },
       additionalProperties: false,
     }),
+    permission() {
+      return { id: "observability.spans", effect: "global-operational-read", resource: "observability:spans", network: false };
+    },
     execute(input) {
       const traceId = optionalString(input, "traceId");
       const component = optionalString(input, "component");

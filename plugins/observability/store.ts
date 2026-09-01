@@ -218,9 +218,12 @@ function initializeSchema(db: DatabaseSync): void {
 
 function configureDatabase(db: DatabaseSync): void {
   db.exec("PRAGMA foreign_keys = ON");
+  db.exec("PRAGMA busy_timeout = 5000");
   db.exec("PRAGMA synchronous = FULL");
   db.exec("PRAGMA journal_mode = WAL");
   initializeSchema(db);
+  const integrity = db.prepare("PRAGMA quick_check").get() as Record<string, unknown> | undefined;
+  if (integrity?.quick_check !== "ok") throw new Error(`Observability database quick_check failed: ${String(integrity?.quick_check)}`);
 }
 
 export function getObservabilityStateDir(environment: NodeJS.ProcessEnv = process.env): string {

@@ -63,7 +63,10 @@ export interface ScheduledTask {
   missedRunPolicy: MissedRunPolicy;
   maxCatchUpRuns: number;
   retry: ScheduledRetryPolicy;
+  /** Failed executor attempts, including attempts that will be retried. */
   consecutiveFailures: number;
+  /** Fully exhausted scheduled occurrences; resets only after a successful occurrence. */
+  consecutiveFailedOccurrences: number;
   retryScheduledFor?: string | undefined;
   lastRun?: ScheduledRunRecord | undefined;
   lease?: ScheduledTaskLease | undefined;
@@ -81,6 +84,7 @@ export interface SchedulerRunResult {
   taskId: string;
   status: "success" | "error" | "cancelled" | "missing-executor";
   error?: string | undefined;
+  occurrenceExhausted?: boolean | undefined;
 }
 
 export interface SchedulerRunOptions {
@@ -109,6 +113,9 @@ export interface SchedulerWorkerStatus {
   startedAt?: string | undefined;
   lastTickAt?: string | undefined;
   lastError?: string | undefined;
+  lastFailureAt?: string | undefined;
+  attemptFailures: number;
+  failedOccurrences: number;
 }
 
 export interface SchedulerService {
@@ -160,7 +167,8 @@ export interface ScheduledActionContribution {
   readonly description: string;
   readonly parameters: Readonly<JsonObject>;
   prepare(input: Readonly<JsonObject>, context: ScheduledActionPrepareContext): JsonValue;
-  permission?(payload: JsonValue, context: ScheduledActionPrepareContext): PermissionAction | undefined;
+  /** Every scheduled effect must be authorized before its durable payload is admitted. */
+  permission(payload: JsonValue, context: ScheduledActionPrepareContext): PermissionAction;
   execute(payload: JsonValue, context: ScheduledActionExecutionContext): void | Promise<void>;
 }
 

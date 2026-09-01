@@ -50,11 +50,18 @@ export function createSchedulerPlugin(options: SchedulerPluginOptions = {}): Fri
     ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
       id: "scheduler",
       label: "Scheduler",
-      snapshot: () => ({
-        worker: scheduler.workerStatus(),
-        taskCount: scheduler.list().length,
-        enabledTaskCount: scheduler.list().filter((task) => task.enabled).length,
-      }),
+      snapshot: () => {
+        const worker = scheduler.workerStatus();
+        const tasks = scheduler.list();
+        const failedOccurrences = tasks.reduce((total, task) => total + task.consecutiveFailedOccurrences, 0);
+        return {
+          health: !worker.running || worker.lastError || failedOccurrences > 0 ? "degraded" : "healthy",
+          worker,
+          taskCount: tasks.length,
+          enabledTaskCount: tasks.filter((task) => task.enabled).length,
+          failedOccurrences,
+        };
+      },
     });
     ctx.effect(() => scheduler.close());
 

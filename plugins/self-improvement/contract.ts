@@ -15,10 +15,15 @@ export interface SelfImprovementContinuation {
   readonly attachments?: readonly TurnAttachment[] | undefined;
 }
 
+export type SelfImprovementPlacement = "reuse-existing" | "extend-plugin" | "mcp" | "new-plugin" | "host";
+
 export interface SelfImprovementFeasibility {
   readonly feasible: boolean;
   readonly reason: string;
   readonly objective: string;
+  readonly placement: SelfImprovementPlacement;
+  readonly target: string;
+  readonly requiresCode: boolean;
 }
 
 export interface SelfImproveRunOptions extends Omit<AutonomousRunOptions, "additionalSystemPrompt"> {

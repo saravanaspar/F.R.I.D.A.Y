@@ -1,8 +1,8 @@
 import type { ModelCredentialService } from "../auth/contract.js";
 import type { ModelService } from "../model/contract.js";
-import type { PermissionsService } from "../permissions/contract.js";
+import { permissionEffectAccess, type PermissionsService } from "../permissions/contract.js";
 import type { RoutingDecision } from "../routing/contract.js";
-import type { TurnExecutionContext, TurnExecutionResult, TurnExecutor } from "../turn-loop/contract.js";
+import type { TurnExecutionContext, TurnExecutionResult, TurnExecutor, TurnFinalizerDescriptor } from "../turn-loop/contract.js";
 import type {
   SystemActionContribution,
   SystemJsonObject,
@@ -99,11 +99,26 @@ function normalizePlan(value: unknown): SystemTurnPlan {
 }
 
 function selectedModel(environment: NodeJS.ProcessEnv = process.env): { provider: string; modelId: string } {
-  const provider = environment.FRIDAY_SYSTEM_PROVIDER?.trim() || environment.FRIDAY_MODEL_PROVIDER?.trim();
-  const modelId = environment.FRIDAY_SYSTEM_MODEL_ID?.trim() || environment.FRIDAY_MODEL_ID?.trim();
+  const systemProvider = environment.FRIDAY_SYSTEM_PROVIDER?.trim();
+  const systemModelId = environment.FRIDAY_SYSTEM_MODEL_ID?.trim();
+  if (Boolean(systemProvider) !== Boolean(systemModelId)) {
+    throw new Error("System model selection requires both FRIDAY_SYSTEM_PROVIDER and FRIDAY_SYSTEM_MODEL_ID");
+  }
+  const routingProvider = environment.FRIDAY_ROUTING_PROVIDER?.trim();
+  const routingModelId = environment.FRIDAY_ROUTING_MODEL_ID?.trim();
+  if (Boolean(routingProvider) !== Boolean(routingModelId)) {
+    throw new Error("Routing model selection requires both FRIDAY_ROUTING_PROVIDER and FRIDAY_ROUTING_MODEL_ID");
+  }
+  const mainProvider = environment.FRIDAY_MODEL_PROVIDER?.trim();
+  const mainModelId = environment.FRIDAY_MODEL_ID?.trim();
+  if (Boolean(mainProvider) !== Boolean(mainModelId)) {
+    throw new Error("Main model selection requires both FRIDAY_MODEL_PROVIDER and FRIDAY_MODEL_ID");
+  }
+  const provider = systemProvider || routingProvider || mainProvider;
+  const modelId = systemModelId || routingModelId || mainModelId;
   if (!provider || !modelId) {
     throw new Error(
-      "System model selection is required: set FRIDAY_SYSTEM_PROVIDER/FRIDAY_SYSTEM_MODEL_ID or FRIDAY_MODEL_PROVIDER/FRIDAY_MODEL_ID",
+      "System model selection is required: configure a System, Routing, or main model provider/model pair",
     );
   }
   return { provider, modelId };
@@ -119,6 +134,8 @@ function plannerSystemPrompt(): string {
     "For questions specifically asking what work/tasks/jobs are currently running, choose session.jobs.list when that action is available.",
     "For requests to stop/cancel background project work, choose session.jobs.cancel; the action itself performs deterministic disambiguation and confirmation.",
     "For requests to show a session/job transcript or recent prompts/answers/progress, choose session.transcript when available.",
+    "For requests to create persistent conditional whenever/if-then/before-action/after-action/before-handover behavior, choose conditional-hooks.create when available and preserve the user's condition and instruction generically. Do not invent a condition-specific action or silently choose an invocation count.",
+    "For requests to inspect or remove those rules, choose conditional-hooks.list or conditional-hooks.remove when available.",
     "If the user explicitly asks FRIDAY to add/build a software capability that no installed action can currently perform, and self-improvement.ensure-capability is available, choose that action with a concise feature name and implementation objective. That action performs feasibility analysis before messaging, authorization, or code changes.",
     "For other requests that do not match an installed action choose system.actions so the user can see the supported control surface.",
     "Also return presentation=raw unless the user explicitly asks to analyze, explain, diagnose, interpret, or summarize the action result; then return presentation=analyze.",
@@ -199,6 +216,9 @@ function actionMap(actions: readonly SystemActionContribution[]): Map<string, Sy
   for (const action of actions) {
     const id = nonEmptyString(action.id, "system action id");
     if (result.has(id)) throw new Error(`Duplicate system action contribution: ${id}`);
+    if (typeof action.permission !== "function") {
+      throw new Error(`System action ${id} has no explicit permission declaration`);
+    }
     result.set(id, action);
   }
   return result;
@@ -239,18 +259,20 @@ export function createSystemTurnExecutor(options: SystemTurnExecutorOptions): Tu
       });
       const action = actionMap(actions).get(plan.actionId);
       if (!action) throw new Error(`System plan selected an unavailable action: ${plan.actionId}`);
-      const permission = action.permission?.(plan.input);
-      if (permission) {
-        await options.permissions.authorize({
-          mode: options.permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
-          workspace: process.cwd(),
-          access: permission.effect === "workspace-read" || permission.effect === "external-read" ? "read" : "write",
-          action: permission,
-          reason: `system action ${action.id}`,
-        });
+      const permission = action.permission(plan.input);
+      if (!permission || typeof permission !== "object") {
+        throw new Error(`System action ${action.id} returned no permission declaration`);
       }
+      await options.permissions.authorize({
+        mode: options.permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+        workspace: process.cwd(),
+        access: permissionEffectAccess(permission.effect),
+        action: permission,
+        reason: `system action ${action.id}`,
+      });
       context.signal?.throwIfAborted();
       const afterReply: Array<() => void | Promise<void>> = [];
+      const afterReplyFinalizers: TurnFinalizerDescriptor[] = [];
       const afterFailure: Array<(error: unknown) => void | Promise<void>> = [];
       let failureFinalized = false;
       const finalizeFailure = async (error: unknown): Promise<void> => {
@@ -274,9 +296,10 @@ export function createSystemTurnExecutor(options: SystemTurnExecutorOptions): Tu
           turn: context.turn,
           ...(context.jobId === undefined ? {} : { jobId: context.jobId }),
           ...(context.decision.destination.kind === "session" ? { destinationId: context.decision.destination.id } : {}),
-          deferAfterReply(callback) {
+          deferAfterReply(callback, durable) {
             if (typeof callback !== "function") throw new Error("after-reply finalizer must be a function");
             afterReply.push(callback);
+            if (durable) afterReplyFinalizers.push(durable);
           },
           deferOnFailure(callback) {
             if (typeof callback !== "function") throw new Error("failure finalizer must be a function");
@@ -301,6 +324,12 @@ export function createSystemTurnExecutor(options: SystemTurnExecutorOptions): Tu
               for (const callback of afterReply) await callback();
             },
           }),
+          ...(afterReplyFinalizers.length === 0 ? {} : {
+            afterReplyFinalizers: Object.freeze(afterReplyFinalizers.map((entry) => Object.freeze({
+              type: entry.type,
+              payload: structuredClone(entry.payload),
+            }))),
+          }),
           ...(afterFailure.length === 0 ? {} : { afterFailure: finalizeFailure }),
         });
       } catch (error) {
@@ -319,6 +348,9 @@ export function createSystemStatusAction(
     label: "FRIDAY status",
     description: "Show current status snapshots contributed by installed FRIDAY plugins.",
     parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+    permission() {
+      return { id: "system.status", effect: "global-operational-read", resource: "system:status", network: false } as const;
+    },
     async execute() {
       const seen = new Set<string>();
       const sections: Record<string, SystemJsonValue> = {};
@@ -344,6 +376,9 @@ export function createSystemActionsAction(
     label: "FRIDAY system actions",
     description: "List the explicit system/status/configuration actions currently installed.",
     parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+    permission() {
+      return { id: "system.actions", effect: "public-read", resource: "system:actions", network: false } as const;
+    },
     execute() {
       return [...actionMap(actions()).values()]
         .filter((action) => action.id !== "system.actions")

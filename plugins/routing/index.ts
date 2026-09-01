@@ -9,9 +9,10 @@ import { definePlugin } from "../capabilities/protocol.js";
 import { EVENTS_CAPABILITY } from "../events/contract.js";
 import { MEMORY_CAPABILITY, type MemoryService } from "../memory/contract.js";
 import { MODEL_CAPABILITY, type ModelService } from "../model/contract.js";
+import { ownerScopeAllows, principalScope, principalStateRoot, samePrincipalOrigin } from "../principal-scope.js";
 import { SESSION_JOBS_CAPABILITY, type SessionJobsService } from "../session-jobs/contract.js";
 import { SESSIONS_CAPABILITY, type SessionsService } from "../sessions/contract.js";
-import { ROUTING_CAPABILITY } from "./contract.js";
+import { ROUTING_CAPABILITY, type RoutingPrincipal } from "./contract.js";
 import {
   createRoutingService,
   type RoutingClassifier,
@@ -51,10 +52,12 @@ function sessionLabel(session: { id: string; cwd: string; name?: string | undefi
 }
 
 function createSessionCandidateProvider(sessions: SessionsService, sessionJobs: () => SessionJobsService | undefined) {
-  return async (query: string): Promise<readonly RoutingSessionCandidate[]> => {
-    const all = await sessions.api.SessionManager.listAll(undefined, join(stateRoot(), "sessions"));
+  return async ({ query, principal }: { readonly query: string; readonly principal: RoutingPrincipal }): Promise<readonly RoutingSessionCandidate[]> => {
+    const all = (await sessions.api.SessionManager.listAll(undefined, join(stateRoot(), "sessions")))
+      .filter((session) => ownerScopeAllows(session.ownerScope, principal));
     const activeBySession = new Map<string, ReturnType<SessionJobsService["list"]>[number][]>();
     for (const job of sessionJobs()?.list({ activeOnly: true, limit: 100 }) ?? []) {
+      if (!samePrincipalOrigin(job.origin, principal)) continue;
       if (!job.sessionId) continue;
       const list = activeBySession.get(job.sessionId) ?? [];
       list.push(job);
@@ -94,8 +97,8 @@ function createSessionCandidateProvider(sessions: SessionsService, sessionJobs: 
 }
 
 function createMemorySearch(memory: MemoryService) {
-  return async (query: string): Promise<readonly RoutingMemoryHint[]> => {
-    const root = stateRoot();
+  return async ({ query, principal }: { readonly query: string; readonly principal: RoutingPrincipal }): Promise<readonly RoutingMemoryHint[]> => {
+    const root = principalStateRoot(stateRoot(), principal);
     const stateDir = memory.api.getGlobalMemoryStateDir(root);
     const databasePath = memory.api.getMemoryStatePath(stateDir);
     if (!existsSync(databasePath) || !query.trim()) return Object.freeze([]);
@@ -162,14 +165,15 @@ function eventOccurredAt(timestamp: number): string {
   return Number.isNaN(candidate.getTime()) ? new Date().toISOString() : candidate.toISOString();
 }
 
-function routeEventKey(message: { id: string; principal: { channel: string; accountId: string; conversationId: string; threadId?: string | undefined } }): string {
+function routeEventKey(message: { id: string; principal: RoutingPrincipal }): string {
   return createHash("sha256").update(JSON.stringify([
-    message.principal.channel,
-    message.principal.accountId,
-    message.principal.conversationId,
-    message.principal.threadId ?? "",
+    principalScope(message.principal),
     message.id,
   ])).digest("hex");
+}
+
+function destinationEventKey(kind: string, id: string): string {
+  return createHash("sha256").update(JSON.stringify([kind, id])).digest("hex").slice(0, 32);
 }
 
 const routingPlugin: FridayPlugin = definePlugin({ id: "routing", requires: [EVENTS_CAPABILITY, MEMORY_CAPABILITY, MODEL_CAPABILITY, SESSIONS_CAPABILITY], optional: [MODEL_CREDENTIALS_CAPABILITY, SESSION_JOBS_CAPABILITY], provides: [ROUTING_CAPABILITY] }, (ctx) => {
@@ -190,15 +194,12 @@ const routingPlugin: FridayPlugin = definePlugin({ id: "routing", requires: [EVE
         dedupeKey: `routed:${routeEventKey(message)}`,
         occurredAt: eventOccurredAt(message.timestamp),
         data: {
-          messageId: message.id,
-          principal: {
-            channel: message.principal.channel,
-            accountId: message.principal.accountId,
-            conversationId: message.principal.conversationId,
-            senderId: message.principal.senderId,
-            ...(message.principal.threadId === undefined ? {} : { threadId: message.principal.threadId }),
+          messageKey: routeEventKey(message).slice(0, 32),
+          ownerScope: principalScope(message.principal),
+          destination: {
+            kind: decision.destination.kind,
+            key: destinationEventKey(decision.destination.kind, decision.destination.id),
           },
-          destination: { kind: decision.destination.kind, id: decision.destination.id },
           execution: { profile: decision.execution.profile },
           confidence: decision.confidence,
         },
@@ -213,14 +214,8 @@ const routingPlugin: FridayPlugin = definePlugin({ id: "routing", requires: [EVE
           dedupeKey: `failed:${routeEventKey(message)}`,
           occurredAt: eventOccurredAt(message.timestamp),
           data: {
-            messageId: message.id,
-            principal: {
-              channel: message.principal.channel,
-              accountId: message.principal.accountId,
-              conversationId: message.principal.conversationId,
-              senderId: message.principal.senderId,
-              ...(message.principal.threadId === undefined ? {} : { threadId: message.principal.threadId }),
-            },
+            messageKey: routeEventKey(message).slice(0, 32),
+            ownerScope: principalScope(message.principal),
             reason: "classification-failed",
           },
         });

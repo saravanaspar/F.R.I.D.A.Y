@@ -73,6 +73,10 @@ function initialize(db: DatabaseSync): void {
     );
   `);
   db.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+  const integrity = db.prepare("PRAGMA quick_check").get() as { quick_check?: unknown } | undefined;
+  if (integrity?.quick_check !== "ok") {
+    throw new Error(`Session-jobs database quick_check failed: ${String(integrity?.quick_check)}`);
+  }
 }
 
 function rowText(row: Record<string, unknown>, field: string): string {
@@ -170,7 +174,8 @@ export class SessionJobStore<T extends StoredSessionJob> {
       for (const record of records) {
         const payload = JSON.stringify(record);
         if (Buffer.byteLength(payload) > MAX_PAYLOAD_BYTES) throw new Error(`Session-job payload is too large: ${record.id}`);
-        upsert.run(record.id, record.createdAt, record.updatedAt, this.#options.isActive(record.status) ? 1 : 0, payload);
+        const result = upsert.run(record.id, record.createdAt, record.updatedAt, this.#options.isActive(record.status) ? 1 : 0, payload);
+        if (Number(result.changes) !== 1) throw new Error(`Session-job save affected ${String(result.changes)} rows for ${record.id}`);
       }
       const active = Number((this.#db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE active = 1").get() as { count: number }).count);
       if (active > this.#options.maxActiveRecords) {
@@ -224,9 +229,11 @@ export class SessionJobStore<T extends StoredSessionJob> {
     try {
       const insert = this.#db.prepare("INSERT INTO jobs(id, created_at, updated_at, active, payload_json) VALUES (?, ?, ?, ?, ?)");
       for (const record of legacy) {
-        insert.run(record.id, record.createdAt, record.updatedAt, this.#options.isActive(record.status) ? 1 : 0, JSON.stringify(record));
+        const result = insert.run(record.id, record.createdAt, record.updatedAt, this.#options.isActive(record.status) ? 1 : 0, JSON.stringify(record));
+        if (Number(result.changes) !== 1) throw new Error(`Legacy session-job insertion affected ${String(result.changes)} rows for ${record.id}`);
       }
-      this.#db.prepare("INSERT INTO metadata(key, value) VALUES ('legacy-v1-migrated', '1')").run();
+      const marker = this.#db.prepare("INSERT INTO metadata(key, value) VALUES ('legacy-v1-migrated', '1')").run();
+      if (Number(marker.changes) !== 1) throw new Error("Legacy session-jobs migration marker was not persisted exactly once");
       this.#db.exec("COMMIT");
     } catch (error) {
       try { this.#db.exec("ROLLBACK"); } catch (rollbackError) {

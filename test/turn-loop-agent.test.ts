@@ -13,6 +13,7 @@ import memoryPlugin from "../plugins/memory/index.js";
 import { MEMORY_CAPABILITY } from "../plugins/memory/contract.js";
 import type { ObservabilityService } from "../plugins/observability/contract.js";
 import { MODEL_CAPABILITY, type ModelService } from "../plugins/model/contract.js";
+import { principalStateRoot } from "../plugins/principal-scope.js";
 import promptsPlugin from "../plugins/prompts/index.js";
 import { PROMPTS_CAPABILITY } from "../plugins/prompts/contract.js";
 import sessionResourcesPlugin from "../plugins/session-resources/index.js";
@@ -56,6 +57,19 @@ function turn(id: string, text: string): InboundTurn {
     text,
     timestamp: Date.now(),
     async reply() {},
+  };
+}
+
+function channelTurn(id: string, text: string, senderId: string): InboundTurn {
+  return {
+    ...turn(id, text),
+    principal: {
+      authority: "channel",
+      channel: "telegram",
+      accountId: "main",
+      conversationId: "shared-chat",
+      senderId,
+    },
   };
 }
 
@@ -160,6 +174,97 @@ describe("Turn Loop agent executor", () => {
       expect(transcript).toContain("same session answer");
       expect(transcript).toContain("resume first");
       expect(transcript).toContain("reopened answer");
+    } finally {
+      await executor.dispose();
+      faux.unregister();
+    }
+  });
+
+  it("re-authorizes a routed session against the exact principal even while its runtime is cached", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "faux";
+    process.env.FRIDAY_MODEL_ID = "faux-1";
+    const stateDir = tempRoot();
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(sessionsPlugin);
+    await friday.activatePlugin(promptsPlugin);
+    await friday.activatePlugin(modelPlugin);
+    await friday.activatePlugin(agentPlugin);
+    const models = requireCapability(MODEL_CAPABILITY);
+    const faux = models.api.registerFauxProvider({ provider: "faux" });
+    const executor = createAgentTurnExecutor({
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: withTestModel(models, faux),
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions: requireCapability(SESSIONS_CAPABILITY),
+      tools: { api: {}, createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService,
+    }, { stateDir, maxCachedSessions: 2 });
+
+    try {
+      faux.setResponses([models.api.fauxAssistantMessage("alice private answer")]);
+      const created = await executor.execute({
+        turn: channelTurn("owner-1", "create my private session", "alice"),
+        decision: decision("session:new"),
+      });
+      await expect(executor.execute({
+        turn: channelTurn("owner-2", "open Alice's cached session", "bob"),
+        decision: decision(`session:${created.sessionId!}`),
+      })).rejects.toThrow(/Permission policy denied session access/);
+      expect(faux.state.callCount).toBe(1);
+    } finally {
+      await executor.dispose();
+      faux.unregister();
+    }
+  });
+
+  it("injects only the current principal's global memory into model context", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "faux";
+    process.env.FRIDAY_MODEL_ID = "faux-1";
+    const stateDir = tempRoot();
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(sessionsPlugin);
+    await friday.activatePlugin(memoryPlugin);
+    await friday.activatePlugin(promptsPlugin);
+    await friday.activatePlugin(modelPlugin);
+    await friday.activatePlugin(agentPlugin);
+    const models = requireCapability(MODEL_CAPABILITY);
+    const memory = requireCapability(MEMORY_CAPABILITY);
+    const aliceTurn = channelTurn("memory-alice", "What is my private launch phrase?", "alice");
+    const aliceMemory = new memory.api.MemoryStore({
+      stateDir: memory.api.getGlobalMemoryStateDir(principalStateRoot(stateDir, aliceTurn.principal)),
+      scope: "global",
+      embeddingProvider: null,
+    });
+    aliceMemory.create("memory", { id: "launch", title: "Private launch phrase", content: "Alice-only nebula launch phrase." });
+    aliceMemory.close();
+    const faux = models.api.registerFauxProvider({ provider: "faux" });
+    const contexts: string[] = [];
+    faux.setResponses([
+      (context) => { contexts.push(JSON.stringify(context.messages)); return models.api.fauxAssistantMessage("alice answer"); },
+      (context) => { contexts.push(JSON.stringify(context.messages)); return models.api.fauxAssistantMessage("bob answer"); },
+    ]);
+    const executor = createAgentTurnExecutor({
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: withTestModel(models, faux),
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions: requireCapability(SESSIONS_CAPABILITY),
+      tools: { api: {}, createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService,
+      optional: { memory: () => memory },
+    }, { stateDir, maxCachedSessions: 2 });
+
+    try {
+      await executor.execute({ turn: aliceTurn, decision: decision("session:new") });
+      await executor.execute({
+        turn: channelTurn("memory-bob", "What is Alice's private launch phrase?", "bob"),
+        decision: decision("session:new"),
+      });
+      expect(contexts[0]).toContain("Alice-only nebula launch phrase");
+      expect(contexts[1]).not.toContain("Alice-only nebula launch phrase");
     } finally {
       await executor.dispose();
       faux.unregister();

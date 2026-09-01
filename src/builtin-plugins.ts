@@ -9,6 +9,7 @@ import auth from "../plugins/auth/index.js";
 import autonomy from "../plugins/autonomy/index.js";
 import channels from "../plugins/channels/index.js";
 import compaction from "../plugins/compaction/index.js";
+import conditionalHooks from "../plugins/conditional-hooks/index.js";
 import evaluation from "../plugins/evaluation/index.js";
 import events from "../plugins/events/index.js";
 import execution from "../plugins/execution/index.js";
@@ -51,6 +52,7 @@ export const BUILTIN_PLUGINS: ReadonlyMap<string, FridayPlugin> = new Map([
   ["./plugins/autonomy/index.ts", autonomy],
   ["./plugins/channels/index.ts", channels],
   ["./plugins/compaction/index.ts", compaction],
+  ["./plugins/conditional-hooks/index.ts", conditionalHooks],
   ["./plugins/evaluation/index.ts", evaluation],
   ["./plugins/events/index.ts", events],
   ["./plugins/execution/index.ts", execution],

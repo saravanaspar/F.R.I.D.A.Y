@@ -89,15 +89,21 @@ export function createEventsPlugin(options: EventsPluginOptions = {}): FridayPlu
     ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
       id: "events",
       label: "Events",
-      snapshot: () => ({
-        worker: events.workerStatus(),
-        consumerCount: events.consumers().length,
-      }),
+      snapshot: () => {
+        const worker = events.workerStatus();
+        const storage = events.storageStatus();
+        return {
+          health: worker.lastError || storage.deadLetterCount > 0 ? "degraded" : "healthy",
+          worker,
+          storage,
+          consumerCount: events.consumers().length,
+        };
+      },
     });
     ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
       id: "events.replay",
       label: "Event replay",
-      description: "Read a bounded slice of the immutable FRIDAY event log.",
+      description: "Read a bounded metadata-only slice of the immutable FRIDAY event log. Private event payloads are never returned by this global operational action.",
       parameters: Object.freeze({
         type: "object",
         properties: {
@@ -110,6 +116,9 @@ export function createEventsPlugin(options: EventsPluginOptions = {}): FridayPlu
         },
         additionalProperties: false,
       }),
+      permission() {
+        return { id: "events.replay", effect: "global-operational-read", resource: "events:log", network: false };
+      },
       execute(input) {
         const afterSequence = optionalInteger(input, "afterSequence", 0);
         const beforeSequence = optionalInteger(input, "beforeSequence", 0);
@@ -124,7 +133,21 @@ export function createEventsPlugin(options: EventsPluginOptions = {}): FridayPlu
           ...(source === undefined ? {} : { source }),
           ...(limit === undefined ? {} : { limit }),
           ...(order === undefined ? {} : { order }),
-        });
+        }).map((event) => ({
+          sequence: event.sequence,
+          id: event.id,
+          type: event.type,
+          source: event.source,
+          occurredAt: event.occurredAt,
+          publishedAt: event.publishedAt,
+          dataBytes: Buffer.byteLength(JSON.stringify(event.data)),
+          dataKeys: event.data && typeof event.data === "object" && !Array.isArray(event.data)
+            ? Object.keys(event.data).sort().slice(0, 64)
+            : [],
+          metadataKeys: Object.keys(event.metadata).sort().slice(0, 64),
+          ...(event.correlationId === undefined ? {} : { correlationId: event.correlationId }),
+          ...(event.causationId === undefined ? {} : { causationId: event.causationId }),
+        }));
       },
     });
     ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
@@ -132,6 +155,9 @@ export function createEventsPlugin(options: EventsPluginOptions = {}): FridayPlu
       label: "Event consumers",
       description: "List durable FRIDAY event consumers and their cursors.",
       parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+      permission() {
+        return { id: "events.consumers", effect: "global-operational-read", resource: "events:consumers", network: false };
+      },
       execute: () => events.consumers(),
     });
     ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
@@ -148,6 +174,9 @@ export function createEventsPlugin(options: EventsPluginOptions = {}): FridayPlu
         },
         additionalProperties: false,
       }),
+      permission() {
+        return { id: "events.delivery-history", effect: "global-operational-read", resource: "events:deliveries", network: false };
+      },
       execute(input) {
         const consumerId = optionalString(input, "consumerId");
         const eventId = optionalString(input, "eventId");
@@ -159,6 +188,18 @@ export function createEventsPlugin(options: EventsPluginOptions = {}): FridayPlu
           ...(status === undefined ? {} : { status }),
           ...(limit === undefined ? {} : { limit }),
         });
+      },
+    });
+    ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+      id: "events.compact",
+      label: "Compact event storage",
+      description: "Apply bounded event retention without deleting any event still needed by a durable consumer.",
+      parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+      permission() {
+        return { id: "events.compact", effect: "system-write", resource: "events:storage", network: false };
+      },
+      execute() {
+        return events.compact();
       },
     });
 

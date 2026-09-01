@@ -94,7 +94,16 @@ describe("Observability", () => {
     expect(observability.metrics("request.duration_ms")).toEqual([
       expect.objectContaining({ kind: "distribution", count: 2, sum: 60, min: 20, max: 40, average: 30 }),
     ]);
-    expect(observability.status()).toMatchObject({ metricSeriesCount: 3, droppedMetrics: 1 });
+    expect(observability.status()).toMatchObject({
+      health: "degraded",
+      metricSeriesCount: 3,
+      maxMetricSeries: 3,
+      droppedMetrics: 1,
+      droppedMetricsByReason: { "series-limit": 1 },
+      metricSeriesUtilization: 1,
+      metricSeriesNearCapacity: true,
+      lastMetricDropReason: "series-limit",
+    });
 
     observability.close();
     observability = createObservabilityService({ stateDir, maxMetricSeries: 3 });

@@ -17,7 +17,7 @@ import { PluginTestHost } from "./helpers/plugin-host.js";
 
 afterEach(() => uninstallCapabilityRegistry());
 
-async function assemble(options: { clean: boolean; feasible?: boolean }) {
+async function assemble(options: { clean: boolean; feasible?: boolean; placement?: "reuse-existing" | "extend-plugin" | "mcp" | "new-plugin" | "host" }) {
   const order: string[] = [];
   const friday = new PluginTestHost();
   await friday.activatePlugin(capabilitiesPlugin);
@@ -34,7 +34,14 @@ async function assemble(options: { clean: boolean; feasible?: boolean }) {
       getModel: () => ({ provider: "test", id: "model" }),
       async completeSimple() {
         order.push("feasibility-model");
-        return { content: [{ type: "text", text: JSON.stringify({ feasible: options.feasible ?? true, reason: "ordinary software change", objective: "implement the missing feature safely" }) }], stopReason: "stop" };
+        return { content: [{ type: "text", text: JSON.stringify({
+          feasible: options.feasible ?? true,
+          reason: "placement reviewed",
+          objective: options.placement === "reuse-existing" ? "use installed action demo.read" : "implement the missing feature safely",
+          placement: options.placement ?? "extend-plugin",
+          target: options.placement === "reuse-existing" ? "demo.read" : "plugins/mcp",
+          requiresCode: options.placement !== "reuse-existing",
+        }) }], stopReason: "stop" };
       },
       parseJsonWithRepair: (text: string) => JSON.parse(text),
     },
@@ -66,7 +73,7 @@ describe("self-improvement feasibility gate", () => {
       .rejects.toThrow(/originating user turn/);
   });
 
-  it("stops before model analysis, user messaging, authorization, or build when the baseline is not feasible", async () => {
+  it("stops before user messaging, authorization, or build when a code placement has a dirty baseline", async () => {
     const { service, order } = await assemble({ clean: false });
     let messaged = false;
     let authorized = false;
@@ -77,7 +84,7 @@ describe("self-improvement feasibility gate", () => {
     expect(result.feasibility.feasible).toBe(false);
     expect(messaged).toBe(false);
     expect(authorized).toBe(false);
-    expect(order).toEqual(["sandbox-check", "baseline-check"]);
+    expect(order).toEqual(["feasibility-model", "sandbox-check", "baseline-check"]);
     expect(order).not.toContain("BUILD-STARTED");
   });
 
@@ -87,7 +94,24 @@ describe("self-improvement feasibility gate", () => {
       onFeasible(feasibility) { expect(feasibility.feasible).toBe(true); order.push("user-message"); },
       authorize() { order.push("authorization"); throw new Error("operator denied"); },
     })).rejects.toThrow("operator denied");
-    expect(order).toEqual(["sandbox-check", "baseline-check", "feasibility-model", "user-message", "authorization"]);
+    expect(order).toEqual(["feasibility-model", "sandbox-check", "baseline-check", "user-message", "authorization"]);
+    expect(order).not.toContain("BUILD-STARTED");
+  });
+
+  it("chooses reuse before code generation and skips authorization/build for an installed capability", async () => {
+    const { service, order } = await assemble({ clean: false, placement: "reuse-existing" });
+    let authorized = false;
+    const result = await service.ensureCapability(request, {
+      onFeasible(feasibility) {
+        expect(feasibility).toMatchObject({ placement: "reuse-existing", target: "demo.read", requiresCode: false });
+        order.push("reuse-message");
+      },
+      authorize() { authorized = true; },
+    });
+    expect(result.result).toBeUndefined();
+    expect(result.feasibility.objective).toBe("use installed action demo.read");
+    expect(authorized).toBe(false);
+    expect(order).toEqual(["feasibility-model", "reuse-message"]);
     expect(order).not.toContain("BUILD-STARTED");
   });
 });

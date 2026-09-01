@@ -1,5 +1,5 @@
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync } from "node:fs";
-import { reportOperationalError } from "@friday/operational-errors";
+import { reportOperationalError, sanitizeOperationalError } from "@friday/operational-errors";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -16,7 +16,7 @@ import { normalizeTimestamp, normalizeTimeZone, parseCronExpression } from "./cr
 
 export const SCHEDULER_DATABASE_FILE_NAME = "scheduler.sqlite";
 export const LEGACY_SCHEDULER_STATE_FILE_NAME = "scheduler_state.json";
-const DATABASE_SCHEMA_VERSION = 1;
+const DATABASE_SCHEMA_VERSION = 2;
 
 interface SchedulerDatabaseOptions {
   stateDir: string;
@@ -34,6 +34,13 @@ interface CompletionUpdate {
   nextRunAt: string;
   retryScheduledFor?: string | undefined;
   consecutiveFailures: number;
+  consecutiveFailedOccurrences: number;
+}
+
+function assertExactlyOneChange(result: { readonly changes: number | bigint }, operation: string): void {
+  if (Number(result.changes) !== 1) {
+    throw new Error(`${operation} affected ${String(result.changes)} rows; expected exactly one`);
+  }
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {
@@ -167,7 +174,8 @@ function rowToTask(row: Record<string, unknown>, lastRun?: ScheduledRunRecord): 
   if (enabled !== 0 && enabled !== 1) throw new Error("scheduler database enabled is invalid");
   const maxCatchUpRuns = rowInteger(row, "max_catch_up_runs");
   const consecutiveFailures = rowInteger(row, "consecutive_failures");
-  if (maxCatchUpRuns < 1 || consecutiveFailures < 0) throw new Error("scheduler database task counters are invalid");
+  const consecutiveFailedOccurrences = rowInteger(row, "consecutive_failed_occurrences");
+  if (maxCatchUpRuns < 1 || consecutiveFailures < 0 || consecutiveFailedOccurrences < 0) throw new Error("scheduler database task counters are invalid");
   const retryScheduledFor = rowOptionalString(row, "retry_scheduled_for");
   return {
     id: rowString(row, "id"),
@@ -183,6 +191,7 @@ function rowToTask(row: Record<string, unknown>, lastRun?: ScheduledRunRecord): 
     maxCatchUpRuns,
     retry: parseRetryJson(rowString(row, "retry_json")),
     consecutiveFailures,
+    consecutiveFailedOccurrences,
     ...(retryScheduledFor ? { retryScheduledFor: normalizeTimestamp(retryScheduledFor, "task.retryScheduledFor") } : {}),
     ...(lastRun ? { lastRun } : {}),
     ...(rowToLease(row) ? { lease: rowToLease(row)! } : {}),
@@ -208,6 +217,7 @@ function initializeSchema(db: DatabaseSync): void {
       max_catch_up_runs INTEGER NOT NULL,
       retry_json TEXT NOT NULL,
       consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      consecutive_failed_occurrences INTEGER NOT NULL DEFAULT 0,
       retry_scheduled_for TEXT,
       lease_id TEXT,
       lease_claimed_at TEXT,
@@ -236,6 +246,12 @@ function initializeSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS scheduler_runs_idempotency_idx
       ON scheduler_runs(idempotency_key, sequence DESC);
   `);
+  if (version < 2) {
+    const columns = db.prepare("PRAGMA table_info(scheduler_tasks)").all() as Array<{ name?: unknown }>;
+    if (!columns.some((column) => column.name === "consecutive_failed_occurrences")) {
+      db.exec("ALTER TABLE scheduler_tasks ADD COLUMN consecutive_failed_occurrences INTEGER NOT NULL DEFAULT 0");
+    }
+  }
   if (version < DATABASE_SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
 }
 
@@ -245,6 +261,8 @@ function configureDatabase(db: DatabaseSync): void {
   db.exec("PRAGMA synchronous = FULL");
   db.exec("PRAGMA journal_mode = WAL");
   initializeSchema(db);
+  const integrity = db.prepare("PRAGMA quick_check").get() as Record<string, unknown> | undefined;
+  if (integrity?.quick_check !== "ok") throw new Error(`Scheduler database quick_check failed: ${String(integrity?.quick_check)}`);
 }
 
 function defaultRetry(): ScheduledRetryPolicy {
@@ -257,7 +275,7 @@ function loadLegacyTasks(path: string): ScheduledTask[] {
   try {
     parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
   } catch (error) {
-    throw new Error(`Unable to parse scheduler state: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Unable to parse scheduler state: ${sanitizeOperationalError(error).safeMessage}`);
   }
   const root = objectRecord(parsed);
   const tasks = objectRecord(root?.tasks);
@@ -299,6 +317,7 @@ function loadLegacyTasks(path: string): ScheduledTask[] {
       maxCatchUpRuns: 10,
       retry: defaultRetry(),
       consecutiveFailures: 0,
+      consecutiveFailedOccurrences: 0,
     });
   }
   return result;
@@ -401,7 +420,8 @@ export class SchedulerDatabase {
 
   cancelTask(id: string, updatedAt: string): ScheduledTask | undefined {
     this.#assertOpen();
-    this.#db.prepare("UPDATE scheduler_tasks SET enabled = 0, updated_at = ? WHERE id = ?").run(updatedAt, id);
+    const result = this.#db.prepare("UPDATE scheduler_tasks SET enabled = 0, updated_at = ? WHERE id = ?").run(updatedAt, id);
+    if (Number(result.changes) > 1) throw new Error("scheduler task cancellation affected multiple rows");
     return this.getTask(id);
   }
 
@@ -424,12 +444,13 @@ export class SchedulerDatabase {
     originalScheduledFor?: string,
   ): void {
     this.#assertOpen();
-    this.#db.prepare(`
+    const result = this.#db.prepare(`
       UPDATE scheduler_tasks
       SET next_run_at = ?, enabled = ?, updated_at = ?,
           retry_scheduled_for = COALESCE(retry_scheduled_for, ?)
       WHERE id = ? AND (lease_id IS NULL OR lease_expires_at <= ?)
     `).run(nextRunAt, enabled ? 1 : 0, updatedAt, originalScheduledFor ?? null, id, updatedAt);
+    assertExactlyOneChange(result, "scheduler missed-task update");
   }
 
   claimTask(id: string, nowIso: string, leaseMs: number, leaseId: string, runId: string): { task: ScheduledTask; run: ScheduledRunRecord } | undefined {
@@ -442,11 +463,12 @@ export class SchedulerDatabase {
       if (task.lease && task.lease.expiresAt > nowIso) return undefined;
 
       if (task.lease) {
-        this.#db.prepare(`
+        const abandoned = this.#db.prepare(`
           UPDATE scheduler_runs
           SET status = 'abandoned', completed_at = ?, error = COALESCE(error, 'execution lease expired before completion')
           WHERE task_id = ? AND lease_id = ? AND status = 'running'
         `).run(nowIso, id, task.lease.id);
+        assertExactlyOneChange(abandoned, "scheduler expired-run abandonment");
       }
 
       const scheduledFor = task.retryScheduledFor ?? task.nextRunAt;
@@ -457,16 +479,18 @@ export class SchedulerDatabase {
       const attempt = rowInteger(attemptRow, "max_attempt") + 1;
       const expiresAt = new Date(Date.parse(nowIso) + leaseMs).toISOString();
       const idempotencyKey = `scheduler:${id}:${scheduledFor}`;
-      this.#db.prepare(`
+      const leaseUpdate = this.#db.prepare(`
         UPDATE scheduler_tasks
         SET lease_id = ?, lease_claimed_at = ?, lease_expires_at = ?, updated_at = ?
         WHERE id = ?
       `).run(leaseId, nowIso, expiresAt, nowIso, id);
-      this.#db.prepare(`
+      assertExactlyOneChange(leaseUpdate, "scheduler task claim");
+      const runInsert = this.#db.prepare(`
         INSERT INTO scheduler_runs(
           run_id, task_id, scheduled_for, idempotency_key, attempt, lease_id, started_at, status
         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running')
       `).run(runId, id, scheduledFor, idempotencyKey, attempt, leaseId, nowIso);
+      assertExactlyOneChange(runInsert, "scheduler run insertion");
       const claimed = this.getTask(id)!;
       const run: ScheduledRunRecord = {
         runId,
@@ -500,15 +524,16 @@ export class SchedulerDatabase {
       const persisted = rowToTask(row);
       if (persisted.lease?.id !== update.leaseId) throw new Error(`Scheduled task lease changed while executing: ${update.taskId}`);
       const effectiveEnabled = persisted.enabled && update.enabled;
-      this.#db.prepare(`
+      const runUpdate = this.#db.prepare(`
         UPDATE scheduler_runs
         SET completed_at = ?, status = ?, error = ?
         WHERE run_id = ? AND lease_id = ? AND status = 'running'
       `).run(update.completedAt, update.status, update.error ?? null, update.runId, update.leaseId);
-      this.#db.prepare(`
+      assertExactlyOneChange(runUpdate, "scheduler run completion");
+      const taskUpdate = this.#db.prepare(`
         UPDATE scheduler_tasks
         SET enabled = ?, next_run_at = ?, updated_at = ?,
-            consecutive_failures = ?, retry_scheduled_for = ?,
+            consecutive_failures = ?, consecutive_failed_occurrences = ?, retry_scheduled_for = ?,
             lease_id = NULL, lease_claimed_at = NULL, lease_expires_at = NULL
         WHERE id = ? AND lease_id = ?
       `).run(
@@ -516,10 +541,12 @@ export class SchedulerDatabase {
         update.nextRunAt,
         update.completedAt,
         update.consecutiveFailures,
+        update.consecutiveFailedOccurrences,
         update.retryScheduledFor ?? null,
         update.taskId,
         update.leaseId,
       );
+      assertExactlyOneChange(taskUpdate, "scheduler task completion");
       return this.getTask(update.taskId)!;
     });
   }
@@ -534,17 +561,21 @@ export class SchedulerDatabase {
       for (const row of expired) {
         const taskId = rowString(row, "id");
         const leaseId = rowString(row, "lease_id");
-        this.#db.prepare(`
+        const runUpdate = this.#db.prepare(`
           UPDATE scheduler_runs
           SET status = 'abandoned', completed_at = ?, error = COALESCE(error, 'execution lease expired before completion')
           WHERE task_id = ? AND lease_id = ? AND status = 'running'
         `).run(nowIso, taskId, leaseId);
+        assertExactlyOneChange(runUpdate, "scheduler expired-run recovery");
       }
-      this.#db.prepare(`
+      const taskUpdate = this.#db.prepare(`
         UPDATE scheduler_tasks
         SET lease_id = NULL, lease_claimed_at = NULL, lease_expires_at = NULL
         WHERE lease_id IS NOT NULL AND lease_expires_at <= ?
       `).run(nowIso);
+      if (Number(taskUpdate.changes) !== expired.length) {
+        throw new Error(`scheduler expired-lease recovery affected ${String(taskUpdate.changes)} rows; expected ${expired.length}`);
+      }
       return expired.length;
     });
   }
@@ -562,8 +593,8 @@ export class SchedulerDatabase {
       INSERT INTO scheduler_tasks(
         id, name, task_type, payload_json, schedule_json, enabled, next_run_at,
         created_at, updated_at, missed_run_policy, max_catch_up_runs, retry_json,
-        consecutive_failures, retry_scheduled_for, lease_id, lease_claimed_at, lease_expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        consecutive_failures, consecutive_failed_occurrences, retry_scheduled_for, lease_id, lease_claimed_at, lease_expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       task.id,
       task.name,
@@ -578,6 +609,7 @@ export class SchedulerDatabase {
       task.maxCatchUpRuns,
       JSON.stringify(task.retry),
       task.consecutiveFailures,
+      task.consecutiveFailedOccurrences,
       task.retryScheduledFor ?? null,
       task.lease?.id ?? null,
       task.lease?.claimedAt ?? null,

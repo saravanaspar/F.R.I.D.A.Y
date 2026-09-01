@@ -1,9 +1,10 @@
 import type { Capability } from "../capabilities/protocol.js";
 import { defineCapability } from "../capabilities/protocol.js";
-import type { ChannelInboundMessage, ChannelTransportStatus } from "@friday/channels";
+import type { ChannelHubStatus, ChannelInboundMessage, ChannelTransportStatus } from "@friday/channels";
 
 export interface ChannelsService {
   list(): readonly ChannelTransportStatus[];
+  status(): ChannelHubStatus;
   subscribe(listener: (message: ChannelInboundMessage) => void | Promise<void>): () => void;
 }
 

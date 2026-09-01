@@ -25,10 +25,12 @@ import {
   AGENT_PROMPT_SECTION_CONTRIBUTION,
   AGENT_TOOL_CONTRIBUTION,
   TURN_EXECUTOR_CONTRIBUTION,
+  TURN_FINALIZER_CONTRIBUTION,
   TURN_INGRESS_HOOK,
   TURN_LOOP_CAPABILITY,
 } from "./contract.js";
 import { createTurnRuntime } from "./turn-loop.js";
+import { SqliteTurnReplyOutbox } from "./reply-outbox.js";
 
 const turnLoopPlugin: FridayPlugin = definePlugin({
   id: "turn-loop",
@@ -79,6 +81,8 @@ const turnLoopPlugin: FridayPlugin = definePlugin({
   ctx.effect(() => executor.dispose());
   ctx.contribute(TURN_EXECUTOR_CONTRIBUTION, executor);
 
+  const replyOutbox = new SqliteTurnReplyOutbox();
+  ctx.effect(() => replyOutbox.close());
   const runtime = createTurnRuntime({
     routing: ctx.services.require(ROUTING_CAPABILITY),
     permissions: ctx.services.require(PERMISSIONS_TRUSTED_CAPABILITY),
@@ -86,6 +90,8 @@ const turnLoopPlugin: FridayPlugin = definePlugin({
     executors: () => ctx.collect(TURN_EXECUTOR_CONTRIBUTION),
     observability: () => ctx.services.optional(OBSERVABILITY_CAPABILITY),
     sessionJobs: () => ctx.services.optional(SESSION_JOBS_CAPABILITY),
+    replyOutbox,
+    finalizers: () => ctx.collect(TURN_FINALIZER_CONTRIBUTION),
   });
   ctx.services.provide(TURN_LOOP_CAPABILITY, runtime);
   ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {

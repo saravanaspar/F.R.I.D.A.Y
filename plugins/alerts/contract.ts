@@ -3,6 +3,8 @@ import { defineCapability } from "../capabilities/protocol.js";
 
 export interface AlertRule {
   readonly id: string;
+  /** Exact opaque creator scope. Missing legacy ownership is local-only. */
+  readonly ownerScope?: string | undefined;
   readonly type?: string | undefined;
   readonly source?: string | undefined;
   readonly subject?: string | undefined;

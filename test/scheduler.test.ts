@@ -125,6 +125,26 @@ describe("scheduler plugin", () => {
     expect(service.history({ limit: 10 }).map((run) => run.status)).toEqual(["success", "success"]);
   });
 
+  it("does not move completion or the next occurrence backward when the wall clock regresses", async () => {
+    const stateDir = await tempDir();
+    const due = new Date("2026-08-18T12:00:00.000Z");
+    let wallClock = due;
+    const service = scheduler({ stateDir, now: () => wallClock, idFactory: sequenceFactory("clock") });
+    service.schedule({
+      id: "clock-regression",
+      taskType: "test.clock",
+      schedule: { kind: "interval", everyMs: 60_000, startAt: due.toISOString() },
+    });
+    service.registerExecutor("test.clock", async () => {
+      wallClock = new Date("2026-08-18T11:00:00.000Z");
+    });
+
+    await expect(service.runDue({ now: due })).resolves.toEqual([{ taskId: "clock-regression", status: "success" }]);
+
+    expect(service.history({ taskId: "clock-regression" })[0]?.completedAt).toBe(due.toISOString());
+    expect(service.get("clock-regression")?.nextRunAt).toBe("2026-08-18T12:01:00.000Z");
+  });
+
   it("does not claim a due task until its executor exists", async () => {
     const stateDir = await tempDir();
     const current = new Date("2026-08-18T12:00:00.000Z");
@@ -182,14 +202,15 @@ describe("scheduler plugin", () => {
     });
 
     await expect(service.runDue({ now: new Date("2026-08-18T12:00:00.000Z") })).resolves.toEqual([
-      { taskId: "retry", status: "error", error: "temporary failure" },
+      { taskId: "retry", status: "error", error: "temporary failure", occurrenceExhausted: false },
     ]);
+    expect(service.get("retry")).toMatchObject({ consecutiveFailures: 1, consecutiveFailedOccurrences: 0 });
     expect(service.get("retry")?.nextRunAt).toBe("2026-08-18T12:00:31.000Z");
     expect(service.get("retry")?.retryScheduledFor).toBe("2026-08-18T12:00:00.000Z");
 
     current = new Date("2026-08-18T12:00:31.000Z");
     await service.runDue({ now: current });
-    expect(service.get("retry")?.enabled).toBe(false);
+    expect(service.get("retry")).toMatchObject({ enabled: false, consecutiveFailures: 2, consecutiveFailedOccurrences: 1 });
     const history = service.history({ taskId: "retry" });
     expect(history.map((run) => run.attempt)).toEqual([2, 1]);
     expect(new Set(history.map((run) => run.idempotencyKey)).size).toBe(1);
@@ -270,6 +291,32 @@ describe("scheduler plugin", () => {
     expect(calls).toBe(0);
     expect(service.get("skip-old")?.nextRunAt).toBe("2026-08-18T12:00:06.000Z");
     expect(service.workerStatus().running).toBe(false);
+  });
+
+  it("reports worker attempt failures separately from exhausted occurrences", async () => {
+    const stateDir = await tempDir();
+    const current = new Date("2026-08-18T12:00:00.000Z");
+    const service = scheduler({ stateDir, now: () => current, idFactory: sequenceFactory("health") });
+    service.schedule({
+      id: "health-failure",
+      taskType: "test.health-failure",
+      schedule: { kind: "once", at: current.toISOString() },
+      retry: { maxAttempts: 1, initialDelayMs: 1, multiplier: 1, maxDelayMs: 1 },
+    });
+    service.registerExecutor("test.health-failure", async () => { throw new Error("token=worker-secret"); });
+
+    service.startWorker({ pollIntervalMs: 5, leaseMs: 300 });
+    await waitFor(() => service.workerStatus().failedOccurrences === 1);
+    const status = service.workerStatus();
+    expect(status).toMatchObject({
+      running: true,
+      attemptFailures: 1,
+      failedOccurrences: 1,
+      lastError: "token=[REDACTED]",
+    });
+    expect(status.lastFailureAt).toBeDefined();
+    expect(service.history({ taskId: "health-failure" })[0]?.error).toBe("token=[REDACTED]");
+    await service.stopWorker();
   });
 
   it("aborts a cooperative active task before close waits for the worker", async () => {
@@ -409,5 +456,11 @@ describe("scheduler plugin", () => {
 
     expect(() => createSchedulerService({ stateDir })).toThrow(/Unable to parse scheduler state/);
     expect(await readFile(path, "utf8")).toBe("{broken");
+  });
+
+  it("fails closed when the scheduler database is corrupt", async () => {
+    const stateDir = await tempDir();
+    await writeFile(getSchedulerDatabasePath(stateDir), "not-a-sqlite-database", { mode: 0o600 });
+    expect(() => createSchedulerService({ stateDir })).toThrow();
   });
 });

@@ -37,6 +37,20 @@ function testTurn(replies: string[]): InboundTurn {
   });
 }
 
+function channelTurn(senderId: string, replies: string[] = []): InboundTurn {
+  return Object.freeze({
+    ...testTurn(replies),
+    id: `refinement-${senderId}`,
+    principal: Object.freeze({
+      authority: "channel" as const,
+      channel: "telegram",
+      accountId: "main",
+      conversationId: "shared-chat",
+      senderId,
+    }),
+  });
+}
+
 async function activateRoot() {
   const home = mkdtempSync(join(tmpdir(), "friday-refinement-root-test-")); dirs.push(home); chmodSync(home, 0o700); process.env.FRIDAY_HOME = home;
   process.env.FRIDAY_MODEL_PROVIDER = "test";
@@ -120,6 +134,19 @@ describe("refinement plugin", () => {
     reopened.close();
     const after = await history.execute({ limit: 10 }, context) as readonly { rollbackOf?: string }[];
     expect(after[0]?.rollbackOf).toBe(applied.id);
+  });
+
+  it("partitions refinement memory and history by exact channel principal", async () => {
+    await activateRoot();
+    const actions = collectContributions(SYSTEM_ACTION_CONTRIBUTION);
+    const apply = actions.find((action) => action.id === "refinement.apply")!;
+    const history = actions.find((action) => action.id === "refinement.history")!;
+    const alice = { turn: channelTurn("alice"), deferAfterReply: () => undefined };
+    const bob = { turn: channelTurn("bob"), deferAfterReply: () => undefined };
+
+    const applied = await apply.execute({}, alice) as { id: string };
+    expect(history.execute({}, alice)).toEqual([expect.objectContaining({ id: applied.id })]);
+    expect(history.execute({}, bob)).toEqual([]);
   });
 
   it("fails closed if the persistent refinement-history directory permissions become broad", async () => {

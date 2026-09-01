@@ -45,10 +45,10 @@ async function assemble() {
   return { home, handler: () => handler!, sent, authorizations, service: requireCapability(ALERTS_CAPABILITY) };
 }
 
-function turn(replies: string[]): InboundTurn {
+function turn(replies: string[], senderId = "user-7"): InboundTurn {
   return Object.freeze({
     id: "turn-1",
-    principal: Object.freeze({ authority: "channel", channel: "telegram", accountId: "main", conversationId: "chat-9", senderId: "user-7" }),
+    principal: Object.freeze({ authority: "channel", channel: "telegram", accountId: "main", conversationId: "chat-9", senderId }),
     text: "alert me on audit failures",
     timestamp: Date.now(),
     reply: async (text: string) => { replies.push(text); },
@@ -93,5 +93,22 @@ describe("Alerts", () => {
 
     expect(service.rules()).toHaveLength(2);
     expect(service.rules().map((rule) => rule.type ?? rule.source).sort()).toEqual(["audit.first", "routing.second"]);
+  });
+
+  it("keeps list and removal scoped to the exact creator even inside one shared chat", async () => {
+    const { service } = await assemble();
+    const actions = collectContributions(SYSTEM_ACTION_CONTRIBUTION);
+    const subscribe = actions.find((action) => action.id === "alerts.subscribe")!;
+    const list = actions.find((action) => action.id === "alerts.list")!;
+    const remove = actions.find((action) => action.id === "alerts.remove")!;
+    const aliceContext = { turn: turn([], "alice"), deferAfterReply: () => undefined };
+    const bobContext = { turn: turn([], "bob"), deferAfterReply: () => undefined };
+    const created = await subscribe.execute({ type: "alice.private" }, aliceContext) as { id: string };
+
+    expect(list.execute({}, bobContext)).toEqual([]);
+    await expect(remove.execute({ id: created.id }, bobContext)).resolves.toEqual({ removed: false });
+    expect(service.rules()).toHaveLength(1);
+    expect(list.execute({}, aliceContext)).toEqual([expect.objectContaining({ id: created.id })]);
+    await expect(remove.execute({ id: created.id }, aliceContext)).resolves.toEqual({ removed: true });
   });
 });

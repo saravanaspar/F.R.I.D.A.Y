@@ -6,6 +6,7 @@ import type { FridayPlugin } from "../../src/plugin.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { AGENT_TOOL_CONTRIBUTION, type AgentExtensionJsonValue } from "../turn-loop/contract.js";
 import { PERMISSIONS_CAPABILITY } from "../permissions/contract.js";
+import { ownerStateRoot, principalScope } from "../principal-scope.js";
 import { SYSTEM_ACTION_CONTRIBUTION, type SystemJsonObject } from "../system/contract.js";
 import { MEMORY_CAPABILITY, type MemoryService } from "./contract.js";
 
@@ -25,9 +26,9 @@ function contextValue(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
-function withGlobalStore<T>(operation: (store: InstanceType<typeof memory.MemoryStore>) => T): T {
+function withGlobalStore<T>(ownerScope: string | undefined, operation: (store: InstanceType<typeof memory.MemoryStore>) => T): T {
   const store = new memory.MemoryStore({
-    stateDir: memory.getGlobalMemoryStateDir(rootDir()),
+    stateDir: memory.getGlobalMemoryStateDir(ownerStateRoot(rootDir(), ownerScope)),
     scope: "global",
     embeddingProvider: null,
   });
@@ -41,10 +42,11 @@ function withGlobalStore<T>(operation: (store: InstanceType<typeof memory.Memory
 function withScopedStore<T>(
   scope: "global" | "local",
   sessionArtifactDir: string | undefined,
+  ownerScope: string | undefined,
   operation: (store: InstanceType<typeof memory.MemoryStore>) => T,
 ): T {
   const stateDir = scope === "global"
-    ? memory.getGlobalMemoryStateDir(rootDir())
+    ? memory.getGlobalMemoryStateDir(ownerStateRoot(rootDir(), ownerScope))
     : memory.getLocalMemoryStateDir(sessionArtifactDir);
   if (!stateDir) throw new Error("Local memory requires a persistent session");
   const store = new memory.MemoryStore({ stateDir, scope, embeddingProvider: null });
@@ -150,12 +152,12 @@ const memoryPlugin: FridayPlugin = definePlugin({
     async execute(input, _signal, executionContext) {
       const query = stringValue(input.query, "query")!;
       const limit = typeof input.limit === "number" ? input.limit : 8;
-      const global = withGlobalStore((store) => ({
+      const global = withGlobalStore(executionContext?.ownerScope, (store) => ({
         notes: store.search(query, { kinds: ["memory"], limit }),
         relations: store.queryRelations({ query, limit }),
       }));
       const local = executionContext?.sessionArtifactDir
-        ? withScopedStore("local", executionContext.sessionArtifactDir, (store) => ({
+        ? withScopedStore("local", executionContext.sessionArtifactDir, executionContext.ownerScope, (store) => ({
             notes: store.search(query, { kinds: ["memory"], limit: Math.min(limit, 6) }),
             relations: store.queryRelations({ query, limit: Math.min(limit, 6) }),
           }))
@@ -193,7 +195,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
         action: { id: "memory.remember", effect: "system-write", resource: `memory:${scope}:${path}`, network: false },
         reason: `remember durable ${scope} note: ${title}`,
       });
-      const entry = withScopedStore(scope, executionContext?.sessionArtifactDir, (store) => store.upsert("memory", {
+      const entry = withScopedStore(scope, executionContext?.sessionArtifactDir, executionContext?.ownerScope, (store) => store.upsert("memory", {
         title,
         content,
         path,
@@ -232,7 +234,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
         action: { id: "memory.forget", effect: "system-write", resource: `memory:${scope}:${id}`, network: false },
         reason: `forget saved ${kind} ${id}`,
       });
-      const deleted = withScopedStore(scope, executionContext?.sessionArtifactDir, (store) => kind === "note"
+      const deleted = withScopedStore(scope, executionContext?.sessionArtifactDir, executionContext?.ownerScope, (store) => kind === "note"
         ? store.delete("memory", id)
         : store.deleteRelation(id));
       return { output: { id, kind, scope, deleted } };
@@ -270,7 +272,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
         action: { id: "memory.relation.remember", effect: "system-write", resource: `memory:${scope}:graph`, network: false },
         reason: "remember a durable knowledge relation",
       });
-      const relation = withScopedStore(scope, executionContext?.sessionArtifactDir, (store) => store.observeRelation({
+      const relation = withScopedStore(scope, executionContext?.sessionArtifactDir, executionContext?.ownerScope, (store) => store.observeRelation({
         subject,
         predicate,
         object,
@@ -300,7 +302,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
         action: { id: "memory.project-docs.index", effect: "system-write", resource: `memory:project:${key}`, network: false },
         reason: `index bounded Markdown knowledge for project ${key}`,
       });
-      const result = withGlobalStore((store) => {
+      const result = withGlobalStore(executionContext.ownerScope, (store) => {
         const manifestId = `project_${createHash("sha256").update(`${key}\0manifest`).digest("hex").slice(0, 24)}`;
         const previousManifest = store.get("memory", manifestId);
         const previousFilesRaw = previousManifest?.metadata.files;
@@ -402,10 +404,13 @@ const memoryPlugin: FridayPlugin = definePlugin({
       properties: { query: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 100 } },
       additionalProperties: false,
     }),
-    execute(input) {
+    permission() {
+      return { id: "memory.preferences", effect: "private-read", resource: "memory:preferences", network: false };
+    },
+    execute(input, context) {
       const query = stringValue(input.query, "query", false);
       const limit = typeof input.limit === "number" ? input.limit : 20;
-      return withGlobalStore((store) => store.queryRelations({ ...(query === undefined ? {} : { query }), limit }));
+      return withGlobalStore(principalScope(context.turn.principal), (store) => store.queryRelations({ ...(query === undefined ? {} : { query }), limit }));
     },
   });
 
@@ -425,9 +430,9 @@ const memoryPlugin: FridayPlugin = definePlugin({
     permission() {
       return { id: "memory.preference.remember", effect: "system-write", resource: "memory:preferences", network: false };
     },
-    execute(input: Readonly<SystemJsonObject>) {
+    execute(input: Readonly<SystemJsonObject>, context) {
       const relationContext = safeMemoryContext(input.context);
-      return withGlobalStore((store) => store.observeRelation({
+      return withGlobalStore(principalScope(context.turn.principal), (store) => store.observeRelation({
         subject: memoryText(input.subject, "subject", 512),
         predicate: memoryText(input.predicate, "predicate", 128),
         object: memoryText(input.object, "object", 512),
@@ -451,9 +456,9 @@ const memoryPlugin: FridayPlugin = definePlugin({
       const id = stringValue(input.id, "id")!;
       return { id: "memory.preference.forget", effect: "system-write", resource: `memory:relation:${id}`, network: false };
     },
-    execute(input) {
+    execute(input, context) {
       const id = stringValue(input.id, "id")!;
-      return { id, deleted: withGlobalStore((store) => store.deleteRelation(id)) };
+      return { id, deleted: withGlobalStore(principalScope(context.turn.principal), (store) => store.deleteRelation(id)) };
     },
   });
 });

@@ -113,6 +113,35 @@ describe("SessionJobManager", () => {
     expect(reopened.list({ limit: 10 }).filter((job) => job.status === "completed")).toHaveLength(3);
   });
 
+  it("redacts failures and removes the full request from terminal durable records", async () => {
+    const root = await tempDir();
+    const stateDir = join(root, "jobs");
+    const requestText = `${"perform bounded work ".repeat(30)}FULL-REQUEST-TAIL-MUST-NOT-PERSIST`;
+    const manager = await SessionJobManager.open({ stateDir, idFactory: () => "job-terminal" });
+    managers.push(manager);
+    const job = await manager.start({
+      destinationId: "session:terminal",
+      text: requestText,
+      timestamp: Date.now(),
+      origin: { authority: "local", channel: "local-test", accountId: "local", conversationId: "local-test", senderId: "operator" },
+      notify: async () => undefined,
+      async run() { throw new Error("token=session-job-secret"); },
+    });
+    await waitUntil(() => manager.get(job.id)?.status === "error", "terminal job failure");
+    expect(manager.get(job.id)?.error).toBe("token=[REDACTED]");
+    await manager.close();
+    managers.splice(managers.indexOf(manager), 1);
+
+    const database = new DatabaseSync(join(stateDir, "jobs.sqlite"));
+    const row = database.prepare("SELECT payload_json FROM jobs WHERE id = ?").get(job.id) as { payload_json: string } | undefined;
+    database.close();
+    expect(row).toBeDefined();
+    const payload = JSON.parse(row!.payload_json) as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("requestText");
+    expect(row!.payload_json).not.toContain("FULL-REQUEST-TAIL-MUST-NOT-PERSIST");
+    expect(row!.payload_json).not.toContain("session-job-secret");
+  });
+
   it("tracks retry progress, resolves similar natural-language selectors, and cancels only the exact job", async () => {
     const root = await tempDir();
     let sequence = 0;
@@ -270,6 +299,14 @@ describe("SessionJobManager", () => {
     database.close();
 
     await expect(SessionJobManager.open({ stateDir })).rejects.toThrow(/metadata disagrees with payload/);
+  });
+
+  it("fails closed when the session-jobs database is corrupt", async () => {
+    const root = await tempDir();
+    const stateDir = join(root, "jobs");
+    await mkdir(stateDir, { recursive: true, mode: 0o700 });
+    await writeFile(join(stateDir, "jobs.sqlite"), "not-a-sqlite-database", { mode: 0o600 });
+    await expect(SessionJobManager.open({ stateDir })).rejects.toThrow();
   });
 
   it("fails closed on broad persisted job-state permissions", async () => {

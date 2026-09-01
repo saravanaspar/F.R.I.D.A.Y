@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -30,6 +30,11 @@ export interface PodmanSandboxOptions {
   probe?: ((image: string) => PodmanProbeResult) | undefined;
   networkMode?: SandboxNetworkMode | undefined;
   limits?: Partial<SandboxResourceLimits> | undefined;
+  /** Injectable command runner/process probe for deterministic lifecycle tests. */
+  run?: ((command: string, args: readonly string[]) => SpawnSyncReturns<string>) | undefined;
+  processIdentity?: ((pid: number) => string | undefined) | undefined;
+  processAlive?: ((pid: number) => boolean | undefined) | undefined;
+  runtimePid?: number | undefined;
   onExecution?: ((event: Readonly<{
     kind: "shell" | "process" | "kernel";
     workspace: string;
@@ -145,6 +150,32 @@ function managedOwnerLabel(): string {
   return createHash("sha256").update(home).digest("hex").slice(0, 24);
 }
 
+function linuxProcessIdentity(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const closing = stat.lastIndexOf(")");
+    if (closing < 0) return undefined;
+    const fieldsAfterCommand = stat.slice(closing + 2).trim().split(/\s+/);
+    const startTicks = fieldsAfterCommand[19];
+    if (!startTicks || !/^\d+$/.test(startTicks)) return undefined;
+    const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    if (!/^[a-f0-9-]{16,64}$/i.test(bootId)) return undefined;
+    return createHash("sha256").update(`${bootId}:${startTicks}`).digest("hex").slice(0, 32);
+  } catch {
+    return undefined;
+  }
+}
+
+function linuxProcessAlive(pid: number): boolean | undefined {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return false;
+    return undefined;
+  }
+}
+
 function canonical(path: string): string {
   const resolved = resolve(path);
   return existsSync(resolved) ? realpathSync(resolved) : resolved;
@@ -255,6 +286,14 @@ export function createPodmanSandboxService(options: PodmanSandboxOptions = {}): 
   let cachedProbeAt = 0;
   const effectiveNetworkMode = networkMode(options);
   const limits = resourceLimits(options);
+  const run = options.run ?? ((command: string, args: readonly string[]) => spawnSync(command, [...args], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }) as SpawnSyncReturns<string>);
+  const processIdentity = options.processIdentity ?? linuxProcessIdentity;
+  const processAlive = options.processAlive ?? linuxProcessAlive;
+  const runtimePid = options.runtimePid ?? process.pid;
+  const runtimeIdentity = processIdentity(runtimePid);
   const networkArguments = (requested: boolean): string[] =>
     effectiveNetworkMode === "requested" && !requested
       ? ["--http-proxy=false", "--network=none"]
@@ -426,6 +465,8 @@ export function createPodmanSandboxService(options: PodmanSandboxOptions = {}): 
         `--label=io.friday.owner=${managedOwner}`,
         `--label=io.friday.process=${request.managed.id}`,
         `--label=io.friday.run=${request.managed.runId}`,
+        `--label=io.friday.runtime-pid=${runtimePid}`,
+        `--label=io.friday.runtime-start=${runtimeIdentity ?? "unverifiable"}`,
       ];
       const args = [
         "run",
@@ -460,20 +501,17 @@ export function createPodmanSandboxService(options: PodmanSandboxOptions = {}): 
       if (!status.available) throw new Error(status.reason ?? "Podman is unavailable during managed-process cleanup");
       const normalizedId = id.trim();
       managedContainerName(normalizedId);
-      const listed = spawnSync("podman", [
+      const listed = run("podman", [
         "ps", "-aq",
         "--filter", "label=io.friday.managed=true",
         "--filter", `label=io.friday.owner=${managedOwner}`,
         "--filter", `label=io.friday.process=${normalizedId}`,
-      ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      ]);
       if (listed.error) throw new Error(`Unable to inspect managed Podman process ${normalizedId}: ${listed.error.message}`);
       if (listed.status !== 0) throw new Error(`Unable to inspect managed Podman process ${normalizedId}: ${(listed.stderr || "podman ps failed").trim()}`);
       const ids = listed.stdout.trim().split(/\s+/).filter(Boolean);
       if (ids.length === 0) return;
-      const removed = spawnSync("podman", ["rm", "-f", ...ids], {
-        encoding: "utf8",
-        stdio: ["ignore", "ignore", "pipe"],
-      });
+      const removed = run("podman", ["rm", "-f", ...ids]);
       if (removed.error) throw new Error(`Unable to remove managed Podman process ${normalizedId}: ${removed.error.message}`);
       if (removed.status !== 0) throw new Error(`Unable to remove managed Podman process ${normalizedId}: ${(removed.stderr || "podman rm failed").trim()}`);
     },
@@ -481,20 +519,36 @@ export function createPodmanSandboxService(options: PodmanSandboxOptions = {}): 
     cleanupStaleManagedProcesses() {
       const status = availability();
       if (!status.available) return;
-      const listed = spawnSync("podman", [
+      const listed = run("podman", [
         "ps", "-aq",
         "--filter", "label=io.friday.managed=true",
         "--filter", `label=io.friday.owner=${managedOwner}`,
-      ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      ]);
       if (listed.error) throw new Error(`Unable to inspect stale FRIDAY Podman processes: ${listed.error.message}`);
       if (listed.status !== 0) throw new Error(`Unable to inspect stale FRIDAY Podman processes: ${(listed.stderr || "podman ps failed").trim()}`);
       if (!listed.stdout?.trim()) return;
       const ids = listed.stdout.trim().split(/\s+/).filter(Boolean);
       if (ids.length === 0) return;
-      const removed = spawnSync("podman", ["rm", "-f", ...ids], {
-        encoding: "utf8",
-        stdio: ["ignore", "ignore", "pipe"],
+      const inspected = run("podman", [
+        "inspect",
+        "--format", "{{.Id}}\t{{index .Config.Labels \"io.friday.runtime-pid\"}}\t{{index .Config.Labels \"io.friday.runtime-start\"}}",
+        ...ids,
+      ]);
+      if (inspected.error) throw new Error(`Unable to inspect stale FRIDAY Podman ownership: ${inspected.error.message}`);
+      if (inspected.status !== 0) throw new Error(`Unable to inspect stale FRIDAY Podman ownership: ${(inspected.stderr || "podman inspect failed").trim()}`);
+      const staleIds = inspected.stdout.split(/\r?\n/).flatMap((line) => {
+        if (!line.trim()) return [];
+        const [id, rawPid, expectedIdentity] = line.split("\t");
+        const pid = Number(rawPid);
+        if (!id || !Number.isSafeInteger(pid) || pid < 1 || !expectedIdentity || expectedIdentity === "unverifiable") return [];
+        const actualIdentity = processIdentity(pid);
+        if (actualIdentity !== undefined) return actualIdentity === expectedIdentity ? [] : [id];
+        // An unreadable /proc entry is not proof that its process is dead. Only
+        // remove when signal-0 proves ESRCH; permission/transient failures stay.
+        return processAlive(pid) === false ? [id] : [];
       });
+      if (staleIds.length === 0) return;
+      const removed = run("podman", ["rm", "-f", ...staleIds]);
       if (removed.error) throw new Error(`Unable to remove stale FRIDAY Podman processes: ${removed.error.message}`);
       if (removed.status !== 0) throw new Error(`Unable to remove stale FRIDAY Podman processes: ${(removed.stderr || "podman rm failed").trim()}`);
     },

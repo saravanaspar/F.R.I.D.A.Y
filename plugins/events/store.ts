@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { reportOperationalError } from "@friday/operational-errors";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -13,6 +13,8 @@ import type {
   EventRecord,
   EventReplayOptions,
   EventRetryPolicy,
+  EventStorageStatus,
+  EventCompactionResult,
 } from "./contract.js";
 
 export const EVENTS_DATABASE_FILE_NAME = "events.sqlite";
@@ -46,6 +48,12 @@ export interface CompleteDeliveryUpdate {
   status: "success" | "error" | "cancelled" | "dead-letter";
   error?: string | undefined;
   retryNotBefore?: string | undefined;
+}
+
+function assertExactlyOneChange(result: { readonly changes: number | bigint }, operation: string): void {
+  if (Number(result.changes) !== 1) {
+    throw new Error(`${operation} affected ${String(result.changes)} rows; expected exactly one`);
+  }
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {
@@ -271,6 +279,8 @@ function configureDatabase(db: DatabaseSync): void {
   db.exec("PRAGMA synchronous = FULL");
   db.exec("PRAGMA journal_mode = WAL");
   initializeSchema(db);
+  const integrity = db.prepare("PRAGMA quick_check").get() as Record<string, unknown> | undefined;
+  if (integrity?.quick_check !== "ok") throw new Error(`Events database quick_check failed: ${String(integrity?.quick_check)}`);
 }
 
 export function getEventsStateDir(environment: NodeJS.ProcessEnv = process.env): string {
@@ -396,16 +406,18 @@ export class EventsDatabase {
         if (JSON.stringify(existing.types) !== JSON.stringify(input.types)) {
           throw new Error(`Event consumer type filter is immutable once created: ${input.id}`);
         }
-        this.#db.prepare(`
+        const retryUpdate = this.#db.prepare(`
           UPDATE event_consumers SET retry_json = ?, updated_at = ? WHERE id = ?
         `).run(JSON.stringify(input.retry), input.nowIso, input.id);
+        assertExactlyOneChange(retryUpdate, "event consumer retry-policy update");
         return this.getConsumer(input.id)!;
       }
       const cursorSequence = input.startAt === "latest" ? this.latestSequence() : 0;
-      this.#db.prepare(`
+      const consumerInsert = this.#db.prepare(`
         INSERT INTO event_consumers(id, types_json, cursor_sequence, retry_json, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
       `).run(input.id, JSON.stringify(input.types), cursorSequence, JSON.stringify(input.retry), input.nowIso, input.nowIso);
+      assertExactlyOneChange(consumerInsert, "event consumer insertion");
       return this.getConsumer(input.id)!;
     });
   }
@@ -431,11 +443,12 @@ export class EventsDatabase {
       if (afterSequence > consumer.cursorSequence) {
         throw new Error(`Event consumer can only rewind to an earlier sequence: ${id}`);
       }
-      this.#db.prepare(`
+      const consumerUpdate = this.#db.prepare(`
         UPDATE event_consumers
         SET cursor_sequence = ?, retry_not_before = NULL, updated_at = ?
         WHERE id = ?
       `).run(afterSequence, updatedAt, id);
+      assertExactlyOneChange(consumerUpdate, "event consumer rewind");
       return this.getConsumer(id)!;
     });
   }
@@ -448,17 +461,19 @@ export class EventsDatabase {
       let consumer = rowToConsumer(row);
       if (consumer.lease) {
         if (consumer.lease.expiresAt > nowIso) return undefined;
-        this.#db.prepare(`
+        const deliveryUpdate = this.#db.prepare(`
           UPDATE event_deliveries
           SET status = 'abandoned', completed_at = ?, error = COALESCE(error, 'delivery lease expired before completion')
           WHERE consumer_id = ? AND lease_id = ? AND status = 'running'
         `).run(nowIso, consumerId, consumer.lease.id);
-        this.#db.prepare(`
+        assertExactlyOneChange(deliveryUpdate, "event expired-delivery abandonment");
+        const consumerUpdate = this.#db.prepare(`
           UPDATE event_consumers
           SET lease_id = NULL, lease_event_sequence = NULL, lease_claimed_at = NULL, lease_expires_at = NULL,
               retry_not_before = NULL, updated_at = ?
           WHERE id = ? AND lease_id = ?
         `).run(nowIso, consumerId, consumer.lease.id);
+        assertExactlyOneChange(consumerUpdate, "event expired-consumer recovery");
         consumer = this.getConsumer(consumerId)!;
       }
       if (consumer.retryNotBefore && consumer.retryNotBefore > nowIso) return undefined;
@@ -472,17 +487,19 @@ export class EventsDatabase {
       const attempt = rowInteger(attemptRow, "max_attempt") + 1;
       const expiresAt = new Date(Date.parse(nowIso) + leaseMs).toISOString();
       const idempotencyKey = `events:${consumerId}:${event.id}`;
-      this.#db.prepare(`
+      const consumerUpdate = this.#db.prepare(`
         UPDATE event_consumers
         SET lease_id = ?, lease_event_sequence = ?, lease_claimed_at = ?, lease_expires_at = ?, updated_at = ?
         WHERE id = ?
       `).run(leaseId, event.sequence, nowIso, expiresAt, nowIso, consumerId);
-      this.#db.prepare(`
+      assertExactlyOneChange(consumerUpdate, "event consumer claim");
+      const deliveryInsert = this.#db.prepare(`
         INSERT INTO event_deliveries(
           delivery_id, consumer_id, event_id, event_sequence, idempotency_key,
           attempt, lease_id, started_at, status
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running')
       `).run(deliveryId, consumerId, event.id, event.sequence, idempotencyKey, attempt, leaseId, nowIso);
+      assertExactlyOneChange(deliveryInsert, "event delivery insertion");
       const claimedConsumer = this.getConsumer(consumerId)!;
       return {
         consumer: claimedConsumer,
@@ -521,13 +538,14 @@ export class EventsDatabase {
       if (consumer.lease?.id !== update.leaseId || consumer.lease.eventSequence !== update.eventSequence) {
         throw new Error(`Event consumer lease changed while delivering: ${update.consumerId}`);
       }
-      this.#db.prepare(`
+      const deliveryUpdate = this.#db.prepare(`
         UPDATE event_deliveries
         SET completed_at = ?, status = ?, error = ?
         WHERE delivery_id = ? AND lease_id = ? AND status = 'running'
       `).run(update.completedAt, update.status, update.error ?? null, update.deliveryId, update.leaseId);
+      assertExactlyOneChange(deliveryUpdate, "event delivery completion");
       const advance = update.status === "success" || update.status === "dead-letter";
-      this.#db.prepare(`
+      const consumerUpdate = this.#db.prepare(`
         UPDATE event_consumers
         SET cursor_sequence = CASE WHEN ? = 1 THEN MAX(cursor_sequence, ?) ELSE cursor_sequence END,
             retry_not_before = ?,
@@ -542,6 +560,7 @@ export class EventsDatabase {
         update.consumerId,
         update.leaseId,
       );
+      assertExactlyOneChange(consumerUpdate, "event consumer completion");
       return this.getConsumer(update.consumerId)!;
     });
   }
@@ -572,6 +591,64 @@ export class EventsDatabase {
       SELECT * FROM event_deliveries ${where} ORDER BY sequence DESC LIMIT ?
     `).all(...args, options.limit) as Record<string, unknown>[];
     return rows.map(rowToDelivery);
+  }
+
+  storageStatus(): EventStorageStatus {
+    this.#assertOpen();
+    const counts = this.#db.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM events) AS event_count,
+        (SELECT COUNT(*) FROM event_deliveries) AS delivery_count,
+        (SELECT COUNT(*) FROM event_deliveries WHERE status = 'dead-letter') AS dead_letter_count,
+        (SELECT COALESCE(MIN(cursor_sequence), (SELECT COALESCE(MAX(sequence), 0) FROM events)) FROM event_consumers) AS minimum_cursor,
+        (SELECT COALESCE(MAX(sequence), 0) FROM events) AS latest_sequence,
+        (SELECT MIN(published_at) FROM events) AS oldest_published_at
+    `).get() as Record<string, unknown>;
+    const size = (path: string): number => existsSync(path) ? statSync(path).size : 0;
+    const oldest = rowOptionalString(counts, "oldest_published_at");
+    return {
+      eventCount: rowInteger(counts, "event_count"),
+      deliveryCount: rowInteger(counts, "delivery_count"),
+      deadLetterCount: rowInteger(counts, "dead_letter_count"),
+      databaseBytes: size(this.path),
+      walBytes: size(`${this.path}-wal`),
+      minimumConsumerCursor: rowInteger(counts, "minimum_cursor"),
+      latestSequence: rowInteger(counts, "latest_sequence"),
+      ...(oldest === undefined ? {} : { oldestPublishedAt: oldest }),
+    };
+  }
+
+  /** Bounded retention that never deletes events still needed by a consumer. */
+  compact(nowIso: string, retentionDays = 30, maxEvents = 100_000, safetyWindow = 1_000): EventCompactionResult {
+    this.#assertOpen();
+    const before = this.storageStatus();
+    const safeSequence = Math.max(0, before.minimumConsumerCursor - safetyWindow);
+    if (safeSequence === 0 || before.eventCount === 0) {
+      return { deletedEvents: 0, deletedDeliveries: 0, storage: before };
+    }
+    const retentionCutoff = new Date(Date.parse(nowIso) - retentionDays * 86_400_000).toISOString();
+    const ageRow = this.#db.prepare(`
+      SELECT COALESCE(MAX(sequence), 0) AS cutoff
+      FROM events WHERE sequence <= ? AND published_at < ?
+    `).get(safeSequence, retentionCutoff) as Record<string, unknown>;
+    let deleteThrough = rowInteger(ageRow, "cutoff");
+    const excess = Math.max(0, before.eventCount - maxEvents);
+    if (excess > 0) {
+      const capRow = this.#db.prepare(`
+        SELECT COALESCE(MAX(sequence), 0) AS cutoff FROM (
+          SELECT sequence FROM events WHERE sequence <= ? ORDER BY sequence ASC LIMIT ?
+        )
+      `).get(safeSequence, excess) as Record<string, unknown>;
+      deleteThrough = Math.max(deleteThrough, rowInteger(capRow, "cutoff"));
+    }
+    if (deleteThrough === 0) return { deletedEvents: 0, deletedDeliveries: 0, storage: before };
+    const deleted = this.#transaction(() => {
+      const deliveries = this.#db.prepare("DELETE FROM event_deliveries WHERE event_sequence <= ?").run(deleteThrough);
+      const events = this.#db.prepare("DELETE FROM events WHERE sequence <= ?").run(deleteThrough);
+      return { deletedEvents: Number(events.changes), deletedDeliveries: Number(deliveries.changes) };
+    });
+    this.#db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+    return { ...deleted, storage: this.storageStatus() };
   }
 
   latestSequence(): number {

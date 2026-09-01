@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
+import type { ModelService } from "../plugins/model/contract.js";
 import type { PermissionsService } from "../plugins/permissions/contract.js";
 import type { SystemActionContribution } from "../plugins/system/contract.js";
 import {
   createSystemActionsAction,
+  createSystemModelPlanner,
   createSystemStatusAction,
   createSystemTurnExecutor,
 } from "../plugins/system/executor.js";
@@ -51,6 +53,56 @@ function actionContext() {
 }
 
 describe("system turn executor", () => {
+  it("uses the cheap routing model for action planning unless a System model is explicitly configured", async () => {
+    const names = [
+      "FRIDAY_MODEL_PROVIDER",
+      "FRIDAY_MODEL_ID",
+      "FRIDAY_ROUTING_PROVIDER",
+      "FRIDAY_ROUTING_MODEL_ID",
+      "FRIDAY_SYSTEM_PROVIDER",
+      "FRIDAY_SYSTEM_MODEL_ID",
+    ] as const;
+    const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    const selected: Array<{ provider: string; id: string }> = [];
+    const models = {
+      api: {
+        getModel(provider: string, id: string) {
+          selected.push({ provider, id });
+          return { provider, id };
+        },
+        async completeSimple() {
+          return {
+            content: [{ type: "text", text: JSON.stringify({ actionId: "system.actions", input: {} }) }],
+            stopReason: "stop",
+          };
+        },
+        parseJsonWithRepair(value: string) { return JSON.parse(value) as unknown; },
+      },
+    } as unknown as ModelService;
+    try {
+      process.env.FRIDAY_MODEL_PROVIDER = "main-provider";
+      process.env.FRIDAY_MODEL_ID = "expensive-coding-model";
+      process.env.FRIDAY_ROUTING_PROVIDER = "routing-provider";
+      process.env.FRIDAY_ROUTING_MODEL_ID = "cheap-router";
+      delete process.env.FRIDAY_SYSTEM_PROVIDER;
+      delete process.env.FRIDAY_SYSTEM_MODEL_ID;
+
+      await createSystemModelPlanner(models)({ text: "create a conditional hook", actions: [] });
+      expect(selected).toEqual([{ provider: "routing-provider", id: "cheap-router" }]);
+
+      process.env.FRIDAY_SYSTEM_PROVIDER = "system-provider";
+      process.env.FRIDAY_SYSTEM_MODEL_ID = "dedicated-system-model";
+      await createSystemModelPlanner(models)({ text: "show status", actions: [] });
+      expect(selected.at(-1)).toEqual({ provider: "system-provider", id: "dedicated-system-model" });
+    } finally {
+      for (const name of names) {
+        const value = previous[name];
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
   it("selects only contributed actions and authorizes host-declared system mutations", async () => {
     const authorized: string[] = [];
     const executed: unknown[] = [];
@@ -107,6 +159,7 @@ describe("system turn executor", () => {
       label: "Observability logs",
       description: "Read logs",
       parameters: { type: "object", properties: { limit: { type: "integer" } } },
+      permission: () => ({ id: "observability.logs", effect: "global-operational-read", resource: "observability:logs", network: false }),
       execute(input) {
         seenInputs.push(input);
         const limit = Number(input.limit ?? 10);
@@ -144,6 +197,7 @@ describe("system turn executor", () => {
       label: "same",
       description: "same",
       parameters: {},
+      permission: () => ({ id: "same", effect: "global-operational-read", resource: "test", network: false }),
       execute: () => null,
     };
     const unknown = createSystemTurnExecutor({
@@ -159,6 +213,20 @@ describe("system turn executor", () => {
       planner: async () => ({ actionId: "same", input: {} }),
     });
     await expect(duplicate.execute(context())).rejects.toThrow("Duplicate system action contribution");
+
+    const missingPermission = createSystemTurnExecutor({
+      permissions: permissions([]),
+      actions: () => [{ ...base, permission: undefined } as unknown as SystemActionContribution],
+      planner: async () => ({ actionId: "same", input: {} }),
+    });
+    await expect(missingPermission.execute(context())).rejects.toThrow("no explicit permission declaration");
+
+    const emptyPermission = createSystemTurnExecutor({
+      permissions: permissions([]),
+      actions: () => [{ ...base, permission: () => undefined } as unknown as SystemActionContribution],
+      planner: async () => ({ actionId: "same", input: {} }),
+    });
+    await expect(emptyPermission.execute(context())).rejects.toThrow("returned no permission declaration");
   });
 
   it("runs registered compensation for presentation and downstream delivery failures exactly once", async () => {
@@ -168,6 +236,7 @@ describe("system turn executor", () => {
       label: "Restart",
       description: "Launch a replacement",
       parameters: {},
+      permission: () => ({ id: "restart", effect: "system-write", resource: "test", network: false }),
       execute(_input, executionContext) {
         executionContext.deferOnFailure?.((error) => { failures.push((error as Error).message); });
         return { launched: true };

@@ -93,6 +93,9 @@ export function createPermissionsPlugin(options: PermissionsPluginOptions = {}):
       label: "Trusted identities",
       description: "List the exact channel identities trusted by FRIDAY and their roles.",
       parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+      permission() {
+        return { id: "permissions.identities", effect: "global-operational-read", resource: "permissions:identities", network: false };
+      },
       execute: () => controller.trusted.identities() as unknown as SystemJsonValue,
     });
     ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {

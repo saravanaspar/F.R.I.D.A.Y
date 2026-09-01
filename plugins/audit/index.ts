@@ -68,6 +68,9 @@ export function createAuditPlugin(options: AuditPluginOptions = {}): FridayPlugi
       label: "Verify audit ledger",
       description: "Verify the complete tamper-evident Audit ledger and authenticated head anchor.",
       parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+      permission() {
+        return { id: "audit.verify", effect: "global-operational-read", resource: "audit:integrity", network: false };
+      },
       execute: () => controller.audit.verify(),
     });
     ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
@@ -88,6 +91,9 @@ export function createAuditPlugin(options: AuditPluginOptions = {}): FridayPlugi
         },
         additionalProperties: false,
       }),
+      permission() {
+        return { id: "audit.records", effect: "global-operational-read", resource: "audit:records", network: false };
+      },
       execute(input) {
         const order = optionalString(input, "order", 4);
         if (order !== undefined && order !== "asc" && order !== "desc") {

@@ -140,6 +140,26 @@ export interface EventWorkerStatus {
   startedAt?: string | undefined;
   lastTickAt?: string | undefined;
   lastError?: string | undefined;
+  lastFailureAt?: string | undefined;
+  deliveryFailures: number;
+  deadLetters: number;
+}
+
+export interface EventStorageStatus {
+  eventCount: number;
+  deliveryCount: number;
+  deadLetterCount: number;
+  databaseBytes: number;
+  walBytes: number;
+  minimumConsumerCursor: number;
+  latestSequence: number;
+  oldestPublishedAt?: string | undefined;
+}
+
+export interface EventCompactionResult {
+  deletedEvents: number;
+  deletedDeliveries: number;
+  storage: EventStorageStatus;
 }
 
 export interface EventsService {
@@ -156,6 +176,8 @@ export interface EventsService {
   startWorker(options?: EventWorkerOptions): void;
   stopWorker(): Promise<void>;
   workerStatus(): EventWorkerStatus;
+  storageStatus(): EventStorageStatus;
+  compact(): EventCompactionResult;
   close(): Promise<void>;
 }
 

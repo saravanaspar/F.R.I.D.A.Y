@@ -13,6 +13,7 @@ function message(id: string, text: string, conversationId = "chat-1", senderId =
     text,
     timestamp: 1_776_000_000_000 + Number(id.replace(/\D/g, "") || 0),
     principal: {
+      authority: "channel",
       channel: "telegram",
       accountId: "default",
       conversationId,
@@ -222,6 +223,27 @@ describe("routing plugin", () => {
     await expect(routing.route(message("m4", "four"), { signal: controller.signal })).rejects.toThrow("Routing aborted");
     expect(classifierCalls).toBe(3);
   });
+
+  it("does not share ephemeral routing context between senders in the same chat", async () => {
+    const prompts: Array<{ recentContext?: unknown[] }> = [];
+    const routing = createRoutingService({
+      classify: async (request) => {
+        prompts.push(JSON.parse(request.userPrompt) as { recentContext?: unknown[] });
+        return validTransientDecision();
+      },
+      sessions: async () => [],
+      memory: async () => [],
+    });
+
+    await routing.route(message("alice-1", "Alice private context", "shared-chat", "alice"));
+    await routing.route(message("bob-1", "Bob asks separately", "shared-chat", "bob"));
+
+    expect(prompts[0]?.recentContext).toEqual([]);
+    expect(prompts[1]?.recentContext).toEqual([]);
+    expect(routing.recentContext(message("x", "", "shared-chat", "alice").principal)).toHaveLength(1);
+    expect(routing.recentContext(message("x", "", "shared-chat", "bob").principal)).toHaveLength(1);
+  });
+
   it("routes concrete commitments and explicit reminders to scheduler without spending a classifier call", async () => {
     let classifierCalls = 0;
     let sessionSearches = 0;

@@ -135,6 +135,10 @@ const skillsPlugin: FridayPlugin = definePlugin({
       },
       additionalProperties: false,
     }),
+    permission() {
+      // installSkills owns the source-specific plan and mutation authorization.
+      return { id: "skills.install.inspect", effect: "private-read", resource: "skills:install-request", network: false };
+    },
     async execute(input, context) {
       const attachmentIndex = input.attachmentIndex;
       if (attachmentIndex !== undefined && (!Number.isSafeInteger(attachmentIndex) || (attachmentIndex as number) < 0)) {

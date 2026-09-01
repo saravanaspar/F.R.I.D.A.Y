@@ -113,6 +113,41 @@ export interface ChannelTransportStatus {
   readonly accountId: string;
   readonly state: ChannelLifecycleState;
   readonly detail?: string | undefined;
+  readonly health?: "up" | "degraded" | "down" | undefined;
+  readonly lastInboundAt?: string | undefined;
+  readonly lastOutboundAt?: string | undefined;
+  readonly lastFailureAt?: string | undefined;
+  readonly retryCount?: number | undefined;
+  readonly inboundFailures?: number | undefined;
+  readonly outboundFailures?: number | undefined;
+  readonly authFailures?: number | undefined;
+  readonly networkFailures?: number | undefined;
+  readonly backlog?: number | undefined;
+}
+
+export interface ChannelHubStatus {
+  readonly health: "healthy" | "degraded" | "unconfigured";
+  readonly configured: number;
+  readonly up: number;
+  readonly degraded: number;
+  readonly down: number;
+  readonly lastInboundAt?: string | undefined;
+  readonly lastOutboundAt?: string | undefined;
+  readonly lastFailureAt?: string | undefined;
+  readonly retryCount: number;
+  readonly inboundFailures: number;
+  readonly outboundFailures: number;
+  readonly authFailures: number;
+  readonly networkFailures: number;
+  readonly backlog: number;
+  readonly pending: {
+    readonly credentialCaptures: number;
+    readonly approvals: number;
+    readonly prompts: number;
+    readonly cancellations: number;
+    readonly failedIngressAwaitingRetry: number;
+  };
+  readonly transports: readonly ChannelTransportStatus[];
 }
 
 export type ChannelInboundHandler = (message: RawChannelInboundMessage) => void | ChannelInboundMessage | Promise<void | ChannelInboundMessage>;

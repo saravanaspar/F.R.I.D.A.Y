@@ -2,12 +2,18 @@ import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { EventsService } from "../plugins/events/contract.js";
+import capabilitiesPlugin from "../plugins/capabilities/index.js";
+import { collectContributions, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
+import { EVENTS_CAPABILITY, type EventsService } from "../plugins/events/contract.js";
+import { createEventsPlugin } from "../plugins/events/index.js";
 import { createEventsService, type EventsServiceOptions } from "../plugins/events/events.js";
 import { getEventsDatabasePath } from "../plugins/events/store.js";
+import { SYSTEM_ACTION_CONTRIBUTION } from "../plugins/system/contract.js";
+import { PluginTestHost } from "./helpers/plugin-host.js";
 
 const temporaryDirectories: string[] = [];
 const services: EventsService[] = [];
+const originalStateDir = process.env.FRIDAY_STATE_DIR;
 
 async function tempDir(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "friday-events-"));
@@ -35,6 +41,9 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
 }
 
 afterEach(async () => {
+  uninstallCapabilityRegistry();
+  if (originalStateDir === undefined) delete process.env.FRIDAY_STATE_DIR;
+  else process.env.FRIDAY_STATE_DIR = originalStateDir;
   await Promise.all(services.splice(0).map((service) => service.close()));
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
@@ -202,6 +211,86 @@ describe("events plugin", () => {
     ]);
     expect(service.consumer("consumer")?.cursorSequence).toBe(2);
     expect(service.deliveryHistory({ status: "dead-letter" })).toHaveLength(1);
+  });
+
+  it("surfaces durable worker failures and dead letters in health state", async () => {
+    const stateDir = await tempDir();
+    const service = events({ stateDir, idFactory: sequenceFactory("health") });
+    service.publish({ id: "poison", type: "test.health", source: "test", data: null });
+    service.registerConsumer({
+      id: "health-consumer",
+      types: ["test.health"],
+      startAt: "beginning",
+      retry: { maxAttempts: 1, initialDelayMs: 1, multiplier: 1, maxDelayMs: 1 },
+    }, async () => { throw new Error("token=event-worker-secret"); });
+
+    service.startWorker({ pollIntervalMs: 5, leaseMs: 300 });
+    await waitFor(() => service.workerStatus().deadLetters === 1);
+    expect(service.workerStatus()).toMatchObject({
+      running: true,
+      deliveryFailures: 1,
+      deadLetters: 1,
+      lastError: "token=[REDACTED]",
+    });
+    expect(service.storageStatus()).toMatchObject({ deadLetterCount: 1, deliveryCount: 1 });
+    expect(service.deliveryHistory({ consumerId: "health-consumer" })[0]?.error).toBe("token=[REDACTED]");
+    await service.stopWorker();
+  });
+
+  it("compacts old events only behind the slowest durable consumer safety window", async () => {
+    const stateDir = await tempDir();
+    let current = new Date("2026-01-01T00:00:00.000Z");
+    const service = events({ stateDir, now: () => current, idFactory: sequenceFactory("retained") });
+    for (let index = 1; index <= 1_005; index += 1) {
+      service.publish({ id: `event-${index}`, type: "test.retention", source: "test", data: { index } });
+    }
+    service.registerConsumer({ id: "slow-consumer" }, async () => undefined);
+    service.rewindConsumer("slow-consumer", 1_003);
+    current = new Date("2026-03-15T00:00:00.000Z");
+
+    const compacted = service.compact();
+    expect(compacted).toMatchObject({
+      deletedEvents: 3,
+      deletedDeliveries: 0,
+      storage: {
+        eventCount: 1_002,
+        minimumConsumerCursor: 1_003,
+        latestSequence: 1_005,
+      },
+    });
+    expect(compacted.storage.databaseBytes).toBeGreaterThan(0);
+    expect(service.get("event-3")).toBeUndefined();
+    expect(service.get("event-4")).toBeDefined();
+  });
+
+  it("keeps the global replay action metadata-only", async () => {
+    const stateDir = await tempDir();
+    process.env.FRIDAY_STATE_DIR = stateDir;
+    const host = new PluginTestHost();
+    await host.activatePlugin(capabilitiesPlugin);
+    await host.activatePlugin(createEventsPlugin(), { defer: true });
+    await host.completePluginBootstrap();
+    requireCapability(EVENTS_CAPABILITY).publish({
+      id: "private-event",
+      type: "test.private",
+      source: "test",
+      data: { secret: "do-not-return", visibleShape: true },
+      metadata: { credential: "also-private" },
+    });
+    const replay = collectContributions(SYSTEM_ACTION_CONTRIBUTION).find((action) => action.id === "events.replay")!;
+
+    const result = await replay.execute({}, undefined as never) as readonly Record<string, unknown>[];
+    expect(replay.permission({})).toMatchObject({ effect: "global-operational-read" });
+    expect(result).toEqual([expect.objectContaining({
+      id: "private-event",
+      dataKeys: ["secret", "visibleShape"],
+      metadataKeys: ["credential"],
+    })]);
+    expect(result[0]).not.toHaveProperty("data");
+    expect(result[0]).not.toHaveProperty("metadata");
+    expect(JSON.stringify(result)).not.toContain("do-not-return");
+    expect(JSON.stringify(result)).not.toContain("also-private");
+    await host.dispose();
   });
 
   it("prevents two processes from claiming the same consumer event", async () => {

@@ -7,7 +7,11 @@ import { AGENT_TOOL_CONTRIBUTION } from "../plugins/turn-loop/contract.js";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { collectContributions, definePlugin, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import integrationsPlugin from "../plugins/integrations/index.js";
-import { PERMISSIONS_CAPABILITY, type PermissionsService } from "../plugins/permissions/contract.js";
+import {
+  PERMISSIONS_CAPABILITY,
+  type PermissionRequest,
+  type PermissionsService,
+} from "../plugins/permissions/contract.js";
 import type { IntegrationAdapter } from "../plugins/integrations/contract.js";
 import { createIntegrationsService } from "../plugins/integrations/integrations.js";
 import { getIntegrationsStatePath } from "../plugins/integrations/store.js";
@@ -44,9 +48,13 @@ describe("integrations plugin", () => {
   it("contributes safe Agent tools without depending on the Agent or Turn Loop", async () => {
     const previousState = process.env.FRIDAY_STATE_DIR;
     process.env.FRIDAY_STATE_DIR = await tempDir();
+    const authorizations: PermissionRequest[] = [];
     const permissions: PermissionsService = {
       normalizeMode: () => "auto",
-      async authorize() { return { allowed: true, approvedBy: "policy" }; },
+      async authorize(request) {
+        authorizations.push(request);
+        return { allowed: true, approvedBy: "policy" };
+      },
       assertWorkspacePath: (_workspace, path) => path,
     };
     const permissionProvider = definePlugin(
@@ -58,9 +66,31 @@ describe("integrations plugin", () => {
       await friday.activatePlugin(capabilitiesPlugin);
       await friday.activatePlugin(permissionProvider);
       await friday.activatePlugin(integrationsPlugin);
-      expect(collectContributions(AGENT_TOOL_CONTRIBUTION).map((tool) => tool.name).sort()).toEqual([
+      const tools = collectContributions(AGENT_TOOL_CONTRIBUTION);
+      expect(tools.map((tool) => tool.name).sort()).toEqual([
         "integrations_connections",
         "integrations_invoke",
+      ]);
+      await expect(tools.find((tool) => tool.name === "integrations_connections")!.execute({})).resolves.toEqual({
+        output: [],
+      });
+      await expect(tools.find((tool) => tool.name === "integrations_invoke")!.execute({
+        connectionId: "missing",
+        actionId: "read",
+      })).rejects.toThrow(/Unknown integration connection/);
+      expect(authorizations.map((request) => request.action)).toEqual([
+        {
+          id: "integrations.connections.read",
+          effect: "global-operational-read",
+          resource: "integrations:connections",
+          network: false,
+        },
+        {
+          id: "integrations.connections.read",
+          effect: "global-operational-read",
+          resource: "integrations:connections",
+          network: false,
+        },
       ]);
     } finally {
       if (previousState === undefined) delete process.env.FRIDAY_STATE_DIR;

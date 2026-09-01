@@ -12,8 +12,11 @@ import {
 	appendFileSync,
 	chmodSync,
 	chownSync,
+	closeSync,
 	existsSync,
+	fsyncSync,
 	mkdirSync,
+	openSync,
 	readdirSync,
 	readFileSync,
 	realpathSync,
@@ -33,7 +36,7 @@ import {
 	createCustomMessage,
 } from "./session-messages.js";
 
-export const CURRENT_SESSION_VERSION = 3;
+export const CURRENT_SESSION_VERSION = 4;
 const SESSION_LIST_SEARCH_TEXT_MAX_CHARS = 64 * 1024;
 const SESSION_LIST_PARSE_MAX_LINE_CHARS = 1024 * 1024;
 const SESSION_LIST_LARGE_MESSAGE_PREVIEW_MAX_CHARS = 256;
@@ -84,6 +87,24 @@ function ensurePrivateSessionFile(path: string): void {
 	chmodSync(path, 0o600);
 }
 
+function syncFile(path: string): void {
+	const descriptor = openSync(path, "r");
+	try {
+		fsyncSync(descriptor);
+	} finally {
+		closeSync(descriptor);
+	}
+}
+
+function syncDirectory(path: string): void {
+	const descriptor = openSync(path, "r");
+	try {
+		fsyncSync(descriptor);
+	} finally {
+		closeSync(descriptor);
+	}
+}
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -91,11 +112,14 @@ export interface SessionHeader {
 	timestamp: string;
 	cwd: string;
 	parentSession?: string;
+	/** Opaque host-owned principal key. Missing legacy ownership is local-only. */
+	ownerScope?: string;
 }
 
 export interface NewSessionOptions {
 	id?: string;
 	parentSession?: string;
+	ownerScope?: string;
 }
 
 export type SessionPersistListener = (sessionFile: string) => void;
@@ -258,6 +282,8 @@ export interface SessionContext {
 export interface SessionInfo {
 	path: string;
 	id: string;
+	/** Opaque owner scope; missing legacy values are visible only to local operator. */
+	ownerScope?: string;
 	/** Working directory where the session was started. Empty string for old sessions. */
 	cwd: string;
 	/** User-defined display name from session_info entries. */
@@ -370,6 +396,16 @@ function migrateV2ToV3(entries: FileEntry[]): void {
 	}
 }
 
+/** Legacy sessions predate remote principals and therefore belong to local operator. */
+function migrateV3ToV4(entries: FileEntry[]): void {
+	for (const entry of entries) {
+		if (entry.type !== "session") continue;
+		entry.version = 4;
+		entry.ownerScope ??= "local:operator";
+		break;
+	}
+}
+
 /**
  * Run all necessary migrations to bring entries to current version.
  * Mutates entries in place. Returns true if any migration was applied.
@@ -382,6 +418,7 @@ function migrateToCurrentVersion(entries: FileEntry[]): boolean {
 
 	if (version < 2) migrateV1ToV2(entries);
 	if (version < 3) migrateV2ToV3(entries);
+	if (version < 4) migrateV3ToV4(entries);
 
 	return true;
 }
@@ -644,6 +681,18 @@ function readSessionHeader(filePath: string): Partial<SessionHeader> | undefined
 		return undefined;
 	}
 	return JSON.parse(firstLine) as Partial<SessionHeader>;
+}
+
+/** Read only the ownership header so callers can authorize before opening history. */
+export function readSessionOwnerScope(filePath: string): string | undefined {
+	const header = readSessionHeader(filePath);
+	if (header?.type !== "session" || typeof header.id !== "string") {
+		throw new Error(`Session ownership header is invalid: ${filePath}`);
+	}
+	if (header.ownerScope !== undefined && (typeof header.ownerScope !== "string" || !header.ownerScope.trim())) {
+		throw new Error(`Session owner scope is invalid: ${filePath}`);
+	}
+	return header.ownerScope;
 }
 
 function isValidSessionFile(filePath: string): boolean {
@@ -986,6 +1035,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 		return {
 			path: filePath,
 			id: header.id,
+			...(header.ownerScope === undefined ? {} : { ownerScope: header.ownerScope }),
 			cwd,
 			name,
 			state,
@@ -1075,6 +1125,7 @@ export class SessionManager {
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
 	private persistListeners = new Set<SessionPersistListener>();
+	private readonly defaultNewSessionOptions: NewSessionOptions;
 
 	private constructor(
 		cwd: string,
@@ -1082,16 +1133,18 @@ export class SessionManager {
 		sessionFile: string | undefined,
 		persist: boolean,
 		preloadedEntries?: FileEntry[],
+		newSessionOptions: NewSessionOptions = {},
 	) {
 		this.cwd = cwd;
 		this.sessionDir = sessionDir;
 		this.persist = persist;
+		this.defaultNewSessionOptions = { ...newSessionOptions };
 		if (persist && sessionDir) ensurePrivateDirectory(sessionDir);
 
 		if (sessionFile) {
 			this.setSessionFile(sessionFile, preloadedEntries);
 		} else {
-			this.newSession();
+			this.newSession(newSessionOptions);
 		}
 	}
 
@@ -1149,10 +1202,16 @@ export class SessionManager {
 	}
 
 	newSession(options?: NewSessionOptions): string | undefined {
-		let sessionId = options?.id ?? createSessionId();
+		const previousOwnerScope = this.getHeader()?.ownerScope;
+		const effectiveOptions: NewSessionOptions = {
+			...this.defaultNewSessionOptions,
+			...(previousOwnerScope === undefined ? {} : { ownerScope: previousOwnerScope }),
+			...options,
+		};
+		let sessionId = effectiveOptions.id ?? createSessionId();
 		let sessionFile: string | undefined;
 		if (this.persist) {
-			if (options?.id) {
+			if (effectiveOptions.id) {
 				sessionFile = getSessionFilePath(this.getSessionDir(), sessionId);
 				if (existsSync(sessionFile)) {
 					throw new Error(`Session file already exists for id "${sessionId}": ${sessionFile}`);
@@ -1172,7 +1231,8 @@ export class SessionManager {
 			id: this.sessionId,
 			timestamp,
 			cwd: this.cwd,
-			parentSession: options?.parentSession,
+			parentSession: effectiveOptions.parentSession,
+			ownerScope: effectiveOptions.ownerScope,
 		};
 		this.fileEntries = [header];
 		this.byId.clear();
@@ -1220,8 +1280,10 @@ export class SessionManager {
 			writeFileSync(tempPath, content, { mode: 0o600 });
 			if (metadata !== undefined) chownSync(tempPath, metadata.uid, metadata.gid);
 			chmodSync(tempPath, 0o600);
+			syncFile(tempPath);
 			renameSync(tempPath, targetPath);
 			chmodSync(targetPath, 0o600);
+			syncDirectory(directory);
 		} finally {
 			rmSync(tempPath, { force: true });
 		}
@@ -1288,6 +1350,7 @@ export class SessionManager {
 			timestamp,
 			cwd: this.cwd,
 			parentSession: previousHeader?.parentSession,
+			ownerScope: previousHeader?.ownerScope ?? this.defaultNewSessionOptions.ownerScope,
 		};
 		this.fileEntries = [header, ...this.getEntries()];
 		this._rewriteFile();
@@ -1332,6 +1395,7 @@ export class SessionManager {
 			ensurePrivateSessionFile(this.sessionFile);
 			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
 			chmodSync(this.sessionFile, 0o600);
+			syncFile(this.sessionFile);
 			this._notifyPersistListeners();
 		}
 	}
@@ -1938,9 +2002,9 @@ export class SessionManager {
 	 * @param cwd Working directory (stored in session header)
 	 * @param sessionDir Optional session directory. If omitted, uses the configured session root.
 	 */
-	static create(cwd: string, sessionDir?: string): SessionManager {
+	static create(cwd: string, sessionDir?: string, options: NewSessionOptions = {}): SessionManager {
 		const dir = sessionDir ?? getDefaultSessionDir(cwd);
-		return new SessionManager(cwd, dir, undefined, true);
+		return new SessionManager(cwd, dir, undefined, true, undefined, options);
 	}
 
 	/**
@@ -2011,8 +2075,8 @@ export class SessionManager {
 	}
 
 	/** Create an in-memory session (no file persistence) */
-	static inMemory(cwd: string = process.cwd(), sessionDir = ""): SessionManager {
-		return new SessionManager(cwd, sessionDir, undefined, false);
+	static inMemory(cwd: string = process.cwd(), sessionDir = "", options: NewSessionOptions = {}): SessionManager {
+		return new SessionManager(cwd, sessionDir, undefined, false, undefined, options);
 	}
 
 	/**
@@ -2051,16 +2115,15 @@ export class SessionManager {
 			timestamp,
 			cwd: targetCwd,
 			parentSession: sourcePath,
+			ownerScope: sourceHeader.ownerScope,
 		};
-		appendFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { mode: 0o600 });
-
-		for (const entry of sourceEntries) {
-			if (entry.type === "session") continue;
-			appendFileSync(newSessionFile, `${JSON.stringify(entry)}
-`, { mode: 0o600 });
-		}
-
+		const content = [newHeader, ...sourceEntries.filter((entry) => entry.type !== "session")]
+			.map((entry) => JSON.stringify(entry))
+			.join("\n") + "\n";
+		writeFileSync(newSessionFile, content, { mode: 0o600 });
 		chmodSync(newSessionFile, 0o600);
+		syncFile(newSessionFile);
+		syncDirectory(dir);
 		return new SessionManager(targetCwd, dir, newSessionFile, true);
 	}
 

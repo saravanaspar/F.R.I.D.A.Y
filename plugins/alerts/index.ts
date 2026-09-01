@@ -9,6 +9,7 @@ import { CHANNELS_TRUSTED_CAPABILITY } from "../channels/trusted-contract.js";
 import { EVENTS_CAPABILITY, type EventRecord } from "../events/contract.js";
 import { PERMISSIONS_CAPABILITY } from "../permissions/contract.js";
 import { PERMISSIONS_TRUSTED_CAPABILITY } from "../permissions/trusted-contract.js";
+import { ownerScopeAllows, principalScope } from "../principal-scope.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION, type SystemJsonObject } from "../system/contract.js";
 import { ALERTS_CAPABILITY, type AlertRule, type AlertsService } from "./contract.js";
 
@@ -47,6 +48,13 @@ function bounded(value: unknown, label: string, maximum = 256): string | undefin
   if (text.length > maximum || /[\r\n\0]/.test(text)) throw new Error(`${label} is invalid`);
   return text;
 }
+function alertOwnerScope(value: unknown): string | undefined {
+  const ownerScope = bounded(value, "alert owner scope", 64);
+  if (ownerScope !== undefined && ownerScope !== "local:operator" && !/^channel:[a-f0-9]{32}$/.test(ownerScope)) {
+    throw new Error("alert owner scope is invalid");
+  }
+  return ownerScope;
+}
 function parseRule(value: unknown): AlertRule {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("alert rule is malformed");
   const raw = value as Record<string, unknown>;
@@ -62,8 +70,10 @@ function parseRule(value: unknown): AlertRule {
   if (!Number.isSafeInteger(cooldownSeconds) || cooldownSeconds < 0 || cooldownSeconds > MAX_COOLDOWN_SECONDS) throw new Error("alert cooldown is invalid");
   const createdAt = bounded(raw.createdAt, "alert createdAt", 64);
   if (!createdAt) throw new Error("alert createdAt is invalid");
+  const ownerScope = alertOwnerScope(raw.ownerScope);
   return Object.freeze({
     id,
+    ...(ownerScope === undefined ? {} : { ownerScope }),
     ...(bounded(raw.type, "alert type") === undefined ? {} : { type: bounded(raw.type, "alert type") }),
     ...(bounded(raw.source, "alert source") === undefined ? {} : { source: bounded(raw.source, "alert source") }),
     ...(bounded(raw.subject, "alert subject") === undefined ? {} : { subject: bounded(raw.subject, "alert subject") }),
@@ -185,7 +195,11 @@ const alertsPlugin: FridayPlugin = definePlugin({
     label: "Alert subscriptions",
     description: "List channel-bound event alert subscriptions.",
     parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
-    execute: () => service.rules(),
+    permission() {
+      return { id: "alerts.list", effect: "private-read", resource: "alerts:origin", network: false };
+    },
+    execute: (_input, context) => service.rules()
+      .filter((rule) => ownerScopeAllows(rule.ownerScope, context.turn.principal)),
   });
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
     id: "alerts.subscribe",
@@ -199,6 +213,9 @@ const alertsPlugin: FridayPlugin = definePlugin({
       },
       additionalProperties: false,
     }),
+    permission() {
+      return { id: "alerts.subscribe", effect: "system-write", resource: "alerts:origin", network: false };
+    },
     async execute(input, context) {
       if (context.turn.principal.authority !== "channel") throw new Error("Alert subscriptions must originate from the channel that will receive them");
       const type = bounded(input.type, "event type");
@@ -221,7 +238,16 @@ const alertsPlugin: FridayPlugin = definePlugin({
       });
       return serializeMutation(async () => {
         if (rules.length >= MAX_RULES) throw new Error(`At most ${MAX_RULES} alert rules are supported`);
-        const rule: AlertRule = Object.freeze({ id: randomUUID(), ...(type ? { type } : {}), ...(source ? { source } : {}), ...(subject ? { subject } : {}), cooldownSeconds, target, createdAt: new Date().toISOString() });
+        const rule: AlertRule = Object.freeze({
+          id: randomUUID(),
+          ownerScope: principalScope(context.turn.principal),
+          ...(type ? { type } : {}),
+          ...(source ? { source } : {}),
+          ...(subject ? { subject } : {}),
+          cooldownSeconds,
+          target,
+          createdAt: new Date().toISOString(),
+        });
         const next = [...rules, rule];
         await saveState(next);
         rules = next;
@@ -236,7 +262,11 @@ const alertsPlugin: FridayPlugin = definePlugin({
       const id = bounded(input.id, "alert id", 128) ?? "";
       return { id: "alerts.remove", effect: "system-write", resource: `alert:${id}`, network: false };
     },
-    execute: async (input) => ({ removed: await service.remove(bounded(input.id, "alert id", 128) ?? "") }),
+    execute: async (input, context) => {
+      const id = bounded(input.id, "alert id", 128) ?? "";
+      const owned = service.rules().some((rule) => rule.id === id && ownerScopeAllows(rule.ownerScope, context.turn.principal));
+      return { removed: owned ? await service.remove(id) : false };
+    },
   });
 });
 

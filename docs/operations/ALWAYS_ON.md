@@ -52,10 +52,11 @@ loginctl enable-linger "$USER"
 ```
 
 FRIDAY receives SIGTERM on service stop and uses its normal bounded quiesce and
-resource-cleanup path. `Restart=always` restarts FRIDAY only after the entire
-service cgroup is empty; `StartLimitIntervalSec=0` prevents repeated unexpected
-failures from permanently disabling automatic recovery. `systemctl stop` is still
-an explicit stop and is not automatically restarted by systemd.
+resource-cleanup path. `Restart=on-failure` restarts FRIDAY only after the entire
+service cgroup is empty. `StartLimitIntervalSec=300` with `StartLimitBurst=10`
+bounds a crash loop after ten starts in five minutes. Inspect `crashes.ndjson` and
+the user journal before running `systemctl --user reset-failed friday` and starting
+the service again. `systemctl stop` remains an explicit stop and is not restarted.
 
 Fatal failures that reach FRIDAY's process-level handlers are also appended to
 `~/.friday/logs/crashes.ndjson` with private permissions and secret redaction. A

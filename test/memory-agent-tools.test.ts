@@ -64,6 +64,32 @@ describe("agent memory tools", () => {
     await expect(forget.execute({ id: relationId, kind: "relation", scope: "global" })).resolves.toMatchObject({ output: { deleted: true } });
   });
 
+  it("partitions global memory by opaque principal ownership", async () => {
+    const { root, tools } = await assemble();
+    const remember = tools.find((tool) => tool.name === "memory_remember")!;
+    const recall = tools.find((tool) => tool.name === "memory_recall")!;
+    const context = (ownerScope: string) => ({
+      cwd: root,
+      sessionId: `session-${ownerScope.slice(-4)}`,
+      ownerScope,
+      deferAfterReply() {},
+      deferOnFailure() {},
+    });
+    const alice = context(`channel:${"a".repeat(32)}`);
+    const bob = context(`channel:${"b".repeat(32)}`);
+
+    await remember.execute({
+      title: "Alice private preference",
+      content: "Alice prefers the blue deployment window.",
+      scope: "global",
+    }, undefined, alice);
+
+    expect(JSON.stringify((await recall.execute({ query: "blue deployment window" }, undefined, alice)).output))
+      .toContain("Alice private preference");
+    expect(JSON.stringify((await recall.execute({ query: "blue deployment window" }, undefined, bob)).output))
+      .not.toContain("Alice private preference");
+  });
+
   it("indexes only bounded project Markdown knowledge rather than the codebase", async () => {
     const { root, tools } = await assemble();
     const project = join(root, "demo-project");

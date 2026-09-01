@@ -1,7 +1,7 @@
 import type { Contribution } from "../capabilities/protocol.js";
 import { defineContribution } from "../capabilities/protocol.js";
 import type { PermissionAction } from "../permissions/contract.js";
-import type { InboundTurn } from "../turn-loop/contract.js";
+import type { InboundTurn, TurnFinalizerDescriptor } from "../turn-loop/contract.js";
 
 /** Values are validated as JSON-safe at the executor boundary. */
 export type SystemJsonValue = unknown;
@@ -16,7 +16,7 @@ export interface SystemActionExecutionContext {
   /** Host-owned routed session destination for restart-safe continuations. */
   readonly destinationId?: string | undefined;
   /** Register host-only work that must run only after the final response is delivered and recorded. */
-  deferAfterReply(callback: () => void | Promise<void>): void;
+  deferAfterReply(callback: () => void | Promise<void>, durable?: TurnFinalizerDescriptor): void;
   /** Register compensation that runs if execution, presentation, publication, or reply delivery fails. */
   deferOnFailure?(callback: (error: unknown) => void | Promise<void>): void;
 }
@@ -31,7 +31,8 @@ export interface SystemActionContribution {
   readonly label: string;
   readonly description: string;
   readonly parameters: Readonly<SystemJsonObject>;
-  permission?(input: Readonly<SystemJsonObject>): PermissionAction | undefined;
+  /** Every host action must declare authorization. The executor fails closed. */
+  permission(input: Readonly<SystemJsonObject>): PermissionAction;
   execute(
     input: Readonly<SystemJsonObject>,
     context: SystemActionExecutionContext,

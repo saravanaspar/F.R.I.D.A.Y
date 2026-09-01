@@ -68,6 +68,20 @@ const integrationsPlugin: FridayPlugin = definePlugin({
       });
     },
   });
+  async function authorizeConfiguredConnectionAccess(reason: string): Promise<void> {
+    await permissions.authorize({
+      mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+      workspace: process.cwd(),
+      access: "read",
+      action: {
+        id: "integrations.connections.read",
+        effect: "global-operational-read",
+        resource: "integrations:connections",
+        network: false,
+      },
+      reason,
+    });
+  }
   ctx.services.provide(INTEGRATIONS_CAPABILITY, integrations);
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
@@ -77,6 +91,7 @@ const integrationsPlugin: FridayPlugin = definePlugin({
     description: "List configured integration connections and the actions exposed by installed adapters.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     async execute() {
+      await authorizeConfiguredConnectionAccess("list configured integration connections");
       const adapters = new Map(integrations.adapters().map((adapter) => [adapter.id, adapter]));
       return {
         output: integrations.connections().map((connection) => ({
@@ -109,9 +124,11 @@ const integrationsPlugin: FridayPlugin = definePlugin({
       additionalProperties: false,
     },
     async execute(input, signal) {
+      const connectionId = agentString(input, "connectionId");
+      await authorizeConfiguredConnectionAccess(`access configured integration connection ${connectionId}`);
       return {
         output: await integrations.invoke(
-          agentString(input, "connectionId"),
+          connectionId,
           agentString(input, "actionId"),
           (input.input ?? null) as IntegrationJsonValue,
           signal,
@@ -125,6 +142,9 @@ const integrationsPlugin: FridayPlugin = definePlugin({
     label: "Integration connections",
     description: "List configured integration connections.",
     parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+    permission() {
+      return { id: "integrations.connections", effect: "global-operational-read", resource: "integrations:connections", network: false };
+    },
     execute: () => integrations.connections(),
   });
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
@@ -132,6 +152,9 @@ const integrationsPlugin: FridayPlugin = definePlugin({
     label: "Integration providers",
     description: "List installed integration adapters and their actions.",
     parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+    permission() {
+      return { id: "integrations.providers", effect: "global-operational-read", resource: "integrations:providers", network: false };
+    },
     execute: () => integrations.adapters(),
   });
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {

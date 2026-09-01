@@ -9,6 +9,7 @@
     "./plugins/autonomy/index.ts",
     "./plugins/channels/index.ts",
     "./plugins/compaction/index.ts",
+    "./plugins/conditional-hooks/index.ts",
     "./plugins/evaluation/index.ts",
     "./plugins/events/index.ts",
     "./plugins/execution/index.ts",

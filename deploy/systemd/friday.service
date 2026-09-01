@@ -1,7 +1,8 @@
 [Unit]
 Description=FRIDAY personal agent
-# Never stop retrying after a burst of crashes. FRIDAY records catchable fatal failures; the system journal covers hard kills/OOMs.
-StartLimitIntervalSec=0
+# Bound restart storms while retaining automatic recovery from isolated failures.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 After=network-online.target
 Wants=network-online.target
 
@@ -13,7 +14,7 @@ ExitType=cgroup
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 WorkingDirectory=%h
 ExecStart=/usr/bin/env friday
-Restart=always
+Restart=on-failure
 RestartSec=5
 KillMode=control-group
 KillSignal=SIGTERM

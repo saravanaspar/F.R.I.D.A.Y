@@ -113,6 +113,10 @@ describe("permissions policy", () => {
 });
 
 describe("Podman sandbox", () => {
+  function podmanResult(stdout = "", status = 0) {
+    return { pid: 1, output: [null, stdout, ""], stdout, stderr: "", status, signal: null } as never;
+  }
+
   it("builds a rootless read-only, network-off command for read operations", async () => {
     const workspace = await tempDir("friday-podman-");
     const cwd = join(workspace, "src");
@@ -202,12 +206,77 @@ describe("Podman sandbox", () => {
       expect(context.args).toContain("--label=io.friday.managed=true");
       expect(context.args).toContain("--label=io.friday.process=proc-abc123");
       expect(context.args).toContain("--label=io.friday.run=run-xyz");
+      expect(context.args).toContain(`--label=io.friday.runtime-pid=${process.pid}`);
+      expect(context.args.some((arg) => /^--label=io\.friday\.runtime-start=(?:[a-f0-9]{32}|unverifiable)$/.test(arg))).toBe(true);
       expect(context.args.some((arg) => /^--label=io\.friday\.owner=[a-f0-9]{24}$/.test(arg))).toBe(true);
       expect(context.args.slice(-3)).toEqual(["localhost/friday-sandbox:gen0", "-c", "npm run dev"]);
     } finally {
       if (previousFridayHome === undefined) delete process.env.FRIDAY_HOME;
       else process.env.FRIDAY_HOME = previousFridayHome;
     }
+  });
+
+  it("keeps a live predecessor container during successor cleanup and removes only proven-stale owners", () => {
+    const calls: Array<{ command: string; args: readonly string[] }> = [];
+    const identities = new Map<number, string | undefined>([
+      [303, "current-birth"],
+      [101, "live-birth"],
+      [202, "new-birth-after-pid-reuse"],
+      [404, undefined],
+      [505, undefined],
+    ]);
+    const sandbox = createPodmanSandboxService({
+      probe: () => ({ available: true }),
+      runtimePid: 303,
+      processIdentity: (pid) => identities.get(pid),
+      processAlive: (pid) => pid === 404 ? true : pid === 505 ? false : undefined,
+      run(command, args) {
+        calls.push({ command, args });
+        if (args[0] === "ps") return podmanResult("live-id\nstale-id\nprobe-failed-live-id\ndead-id\nlegacy-id\n");
+        if (args[0] === "inspect") {
+          return podmanResult([
+            "live-id\t101\tlive-birth",
+            "stale-id\t202\told-birth-before-pid-reuse",
+            "probe-failed-live-id\t404\tlive-but-proc-unreadable",
+            "dead-id\t505\tdead-birth",
+            "legacy-id\t999\tunverifiable",
+          ].join("\n"));
+        }
+        if (args[0] === "rm") return podmanResult();
+        throw new Error(`Unexpected command: ${command} ${args.join(" ")}`);
+      },
+    });
+
+    sandbox.cleanupStaleManagedProcesses?.();
+
+    const removal = calls.find((call) => call.args[0] === "rm");
+    expect(removal?.args).toEqual(["rm", "-f", "stale-id", "dead-id"]);
+    expect(removal?.args).not.toContain("live-id");
+    expect(removal?.args).not.toContain("probe-failed-live-id");
+    expect(removal?.args).not.toContain("legacy-id");
+  });
+
+  it("keeps project source on the exact host bind mount across runtime generations", async () => {
+    const workspace = await tempDir("friday-podman-host-source-");
+    await writeFile(join(workspace, "live-source.ts"), "export const generation = 1;\n");
+    const first = createPodmanSandboxService({ probe: () => ({ available: true }), runtimePid: 101, processIdentity: () => "birth-1" });
+    const successor = createPodmanSandboxService({ probe: () => ({ available: true }), runtimePid: 202, processIdentity: () => "birth-2" });
+    const request = {
+      command: "git status --short",
+      cwd: workspace,
+      workspace,
+      access: "write" as const,
+      network: false,
+      env: {},
+    };
+
+    const firstCommand = first.sandboxShell(request).command;
+    const successorCommand = successor.sandboxShell(request).command;
+
+    expect(firstCommand).toContain(`'--volume=${workspace}:${workspace}:rw'`);
+    expect(successorCommand).toContain(`'--volume=${workspace}:${workspace}:rw'`);
+    expect(firstCommand.match(/--volume=/g)).toHaveLength(1);
+    expect(successorCommand.match(/--volume=/g)).toHaveLength(1);
   });
 
   it("builds direct internal processes inside the same network-off sandbox boundary", async () => {

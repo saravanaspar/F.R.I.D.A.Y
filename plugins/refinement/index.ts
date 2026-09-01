@@ -9,6 +9,7 @@ import { definePlugin } from "../capabilities/protocol.js";
 import { MEMORY_CAPABILITY } from "../memory/contract.js";
 import { MODEL_CAPABILITY } from "../model/contract.js";
 import { PERMISSIONS_CAPABILITY } from "../permissions/contract.js";
+import { ownerStateRoot, principalScope } from "../principal-scope.js";
 import {
   SYSTEM_ACTION_CONTRIBUTION,
   SYSTEM_STATUS_CONTRIBUTION,
@@ -71,7 +72,6 @@ const refinementPlugin: FridayPlugin = definePlugin({
   const memory = ctx.services.require(MEMORY_CAPABILITY);
   const model = ctx.services.require(MODEL_CAPABILITY);
   const permissions = ctx.services.require(PERMISSIONS_CAPABILITY);
-  const history = new RefinementHistoryStore();
   const autoRefine = new Map<string, AutoRefineAccumulator>();
   let mutationTail: Promise<void> = Promise.resolve();
 
@@ -91,11 +91,15 @@ const refinementPlugin: FridayPlugin = definePlugin({
   const service: RefinementService = Object.freeze({ api: refinement });
   ctx.services.provide(REFINEMENT_CAPABILITY, service);
 
-  function globalStore() {
+  function globalStore(ownerScope: string | undefined) {
     return new memory.api.MemoryStore({
-      stateDir: memory.api.getGlobalMemoryStateDir(stateRoot()),
+      stateDir: memory.api.getGlobalMemoryStateDir(ownerStateRoot(stateRoot(), ownerScope)),
       scope: "global",
     });
+  }
+
+  function historyStore(ownerScope: string | undefined): RefinementHistoryStore {
+    return new RefinementHistoryStore(join(ownerStateRoot(stateRoot(), ownerScope), "refinement"));
   }
 
   function localStore(sessionArtifactDir: string) {
@@ -127,6 +131,7 @@ const refinementPlugin: FridayPlugin = definePlugin({
 
   function applyAndRecord(
     store: ReturnType<typeof globalStore>,
+    history: RefinementHistoryStore,
     proposal: refinement.RefinementProposal,
     options: Parameters<typeof refinement.applyRefinementProposal>[2],
   ): refinement.RefinementResult {
@@ -200,7 +205,8 @@ const refinementPlugin: FridayPlugin = definePlugin({
       const trajectory = autoRefineTrajectory(tracker);
       signal?.throwIfAborted();
 
-      const global = globalStore();
+      const history = historyStore(context.ownerScope);
+      const global = globalStore(context.ownerScope);
       const local = localStore(context.sessionArtifactDir);
       try {
         const combinedState = memory.api.mergeMemoryStates(global.snapshot(), local.snapshot());
@@ -244,7 +250,7 @@ const refinementPlugin: FridayPlugin = definePlugin({
         await serializeMutation(() => {
           const mutationStore = localStore(context.sessionArtifactDir!);
           try {
-            return applyAndRecord(mutationStore, proposal, {
+          return applyAndRecord(mutationStore, history, proposal, {
               id: plan.id,
               scope: "local",
               baselineState: localBaseline,
@@ -264,7 +270,7 @@ const refinementPlugin: FridayPlugin = definePlugin({
   ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
     id: "refinement",
     label: "Refinement",
-    snapshot: () => ({ recent: history.list(5).map((entry) => ({ id: entry.id, summary: entry.summary, rollbackOf: entry.rollbackOf ?? null })) }),
+    snapshot: () => ({ health: "healthy", storage: "principal-scoped" }),
   });
 
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
@@ -279,10 +285,15 @@ const refinementPlugin: FridayPlugin = definePlugin({
       },
       additionalProperties: false,
     }),
+    permission() {
+      return { id: "refinement.plan", effect: "private-read", resource: "refinement:global", network: true };
+    },
     async execute(input, context) {
+      const ownerScope = principalScope(context.turn.principal);
+      const history = historyStore(ownerScope);
       const trajectory = systemString(input, "trajectory", { maximum: 64_000 }) ?? context.turn.text;
       const instructions = systemString(input, "instructions", { maximum: 16_000 });
-      const store = globalStore();
+      const store = globalStore(ownerScope);
       try {
         const { selected, apiKey } = await modelForRefinement();
         return await refinement.planRefinement(
@@ -311,10 +322,15 @@ const refinementPlugin: FridayPlugin = definePlugin({
       },
       additionalProperties: false,
     }),
+    permission() {
+      return { id: "refinement.apply", effect: "system-write", resource: "refinement:global", network: true };
+    },
     async execute(input, context) {
+      const ownerScope = principalScope(context.turn.principal);
+      const history = historyStore(ownerScope);
       const trajectory = systemString(input, "trajectory", { maximum: 64_000 }) ?? context.turn.text;
       const instructions = systemString(input, "instructions", { maximum: 16_000 });
-      const store = globalStore();
+      const store = globalStore(ownerScope);
       let baseline: refinement.RefinementState;
       let plan: refinement.RefinementPlan;
       try {
@@ -340,10 +356,10 @@ const refinementPlugin: FridayPlugin = definePlugin({
         reason: `apply refinement ${plan.id}`,
       });
       return serializeMutation(() => {
-        const mutationStore = globalStore();
+        const mutationStore = globalStore(ownerScope);
         try {
           assertAffectedEntriesUnchanged(mutationStore, plan.proposal, baseline);
-          return applyAndRecord(mutationStore, plan.proposal, {
+          return applyAndRecord(mutationStore, history, plan.proposal, {
             id: plan.id,
             scope: "global",
             baselineState: baseline,
@@ -364,8 +380,11 @@ const refinementPlugin: FridayPlugin = definePlugin({
       properties: { limit: { type: "integer", minimum: 1, maximum: 100 } },
       additionalProperties: false,
     }),
-    execute(input) {
-      return history.list(positiveLimit(input));
+    permission() {
+      return { id: "refinement.history", effect: "private-read", resource: "refinement:history", network: false };
+    },
+    execute(input, context) {
+      return historyStore(principalScope(context.turn.principal)).list(positiveLimit(input));
     },
   });
 
@@ -379,13 +398,19 @@ const refinementPlugin: FridayPlugin = definePlugin({
       required: ["id"],
       additionalProperties: false,
     }),
+    permission(input) {
+      const id = systemString(input, "id", { required: true, maximum: 160 })!;
+      return { id: "refinement.rollback", effect: "system-write", resource: `refinement:${id}`, network: false };
+    },
     async execute(input, context) {
+      const ownerScope = principalScope(context.turn.principal);
+      const history = historyStore(ownerScope);
       const id = systemString(input, "id", { required: true, maximum: 160 })!;
       const target = history.get(id);
       if (!target) throw new Error(`Refinement ${id} not found`);
       const proposal = refinement.buildRollbackProposal(target);
       const plan: refinement.RefinementPlan = { proposal, id: `rollback_${randomUUID()}`, rollbackOf: target.id, rollbackScope: "global" };
-      const baselineStore = globalStore();
+      const baselineStore = globalStore(ownerScope);
       let baseline: refinement.RefinementState;
       try {
         baseline = baselineStore.snapshot();
@@ -401,10 +426,10 @@ const refinementPlugin: FridayPlugin = definePlugin({
         reason: `rollback refinement ${target.id}`,
       });
       return serializeMutation(() => {
-        const store = globalStore();
+        const store = globalStore(ownerScope);
         try {
           assertAffectedEntriesUnchanged(store, proposal, baseline);
-          return applyAndRecord(store, proposal, {
+          return applyAndRecord(store, history, proposal, {
             id: plan.id,
             rollbackOf: target.id,
             scope: "global",

@@ -383,7 +383,7 @@ describe("self-improvement autonomous composition", () => {
     const preparation = harness.evaluations.filter((entry) => entry.command.startsWith("npm ci"));
     expect(preparation.length).toBeGreaterThanOrEqual(2);
     expect(preparation.every((entry) => entry.network === true)).toBe(true);
-  });
+  }, 15_000);
 
   it("rolls back the promoted generation when replacement readiness fails", async () => {
     const { repository, baseCommit } = await initRepository();

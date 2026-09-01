@@ -638,7 +638,70 @@ describe("channel hub", () => {
     };
     hub.registerTransport(transport);
     expect(() => hub.registerTransport(transport)).toThrow("already registered");
-    expect(hub.list()).toEqual([{ channel: "test", accountId: "a", state: "stopped" }]);
+    expect(hub.list()).toEqual([{
+      channel: "test",
+      accountId: "a",
+      state: "stopped",
+      health: "down",
+      retryCount: 0,
+      inboundFailures: 0,
+      outboundFailures: 0,
+      authFailures: 0,
+      networkFailures: 0,
+      backlog: 0,
+    }]);
+    expect(hub.status()).toMatchObject({ health: "degraded", configured: 1, up: 0, degraded: 0, down: 1, backlog: 0 });
+  });
+
+  it("reports inbound retries, auth/network failures, activity timestamps, and protected backlog", async () => {
+    let handler: Parameters<ChannelTransport["start"]>[0] | undefined;
+    let admissionAttempts = 0;
+    let sendAttempts = 0;
+    const transport: ChannelTransport = {
+      channel: "test",
+      accountId: "a",
+      async start(next) { handler = next; },
+      async stop() {},
+      status: () => ({ channel: "test", accountId: "a", state: "running" }),
+      async send(target) {
+        sendAttempts += 1;
+        if (sendAttempts === 1) throw Object.assign(new Error("request unauthorized"), { status: 401 });
+        return { channel: "test", accountId: "a", conversationId: target.conversationId, messageIds: ["sent"] };
+      },
+    };
+    let now = Date.parse("2026-08-24T00:00:00.000Z");
+    const hub = new ChannelHub({ credentialVault: new FakeVault(), now: () => now });
+    hub.registerTransport(transport);
+    hub.subscribeAdmission(async () => {
+      admissionAttempts += 1;
+      if (admissionAttempts === 1) throw new Error("network timeout");
+    });
+    await hub.startAll();
+    const raw = inbound("hello", { channel: "test", accountId: "a", conversationId: "c", senderId: "u" });
+    await expect(handler!(raw)).rejects.toThrow("network timeout");
+    expect(hub.status()).toMatchObject({ health: "degraded", up: 0, degraded: 1, backlog: 1 });
+    now += 1_000;
+    await expect(handler!(raw)).resolves.toMatchObject({ classification: "message" });
+    expect(hub.status()).toMatchObject({ health: "healthy", up: 1, degraded: 0, retryCount: 1, backlog: 0 });
+    await expect(hub.send({ channel: "test", accountId: "a", conversationId: "c" }, "hello")).rejects.toThrow("unauthorized");
+    expect(hub.status()).toMatchObject({ health: "degraded", up: 0, degraded: 1 });
+    now += 1_000;
+    await expect(hub.send({ channel: "test", accountId: "a", conversationId: "c" }, "hello")).resolves.toMatchObject({ messageIds: ["sent"] });
+
+    expect(hub.status()).toMatchObject({
+      health: "healthy",
+      configured: 1,
+      up: 1,
+      retryCount: 1,
+      inboundFailures: 1,
+      outboundFailures: 1,
+      authFailures: 1,
+      networkFailures: 1,
+      backlog: 0,
+      lastInboundAt: "2026-08-24T00:00:01.000Z",
+      lastFailureAt: "2026-08-24T00:00:01.000Z",
+      lastOutboundAt: "2026-08-24T00:00:02.000Z",
+    });
   });
 });
 

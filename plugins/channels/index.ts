@@ -397,6 +397,7 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
 
     const safe: ChannelsService = Object.freeze({
       list: () => hub.list(),
+      status: () => hub.status(),
       subscribe: (listener: Parameters<ChannelsService["subscribe"]>[0]) => hub.subscribe(listener),
     });
     const trusted: ChannelsTrustedService = Object.freeze({
@@ -458,7 +459,7 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
     ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
       id: "channels",
       label: "Channels",
-      snapshot: () => safe.list() as unknown as JsonValue,
+      snapshot: () => safe.status() as unknown as JsonValue,
     });
 
     ctx.effect(() => hub.stopAll());

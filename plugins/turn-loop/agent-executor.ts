@@ -8,6 +8,7 @@ import type { ModelCredentialService } from "../auth/contract.js";
 import type { MemoryService } from "../memory/contract.js";
 import type { ModelService } from "../model/contract.js";
 import type { ObservabilityService } from "../observability/contract.js";
+import { ownerScopeAllows, ownerStateRoot, principalScope, type PrincipalOrigin } from "../principal-scope.js";
 import type { PromptsService } from "../prompts/contract.js";
 import type { RlmService } from "../rlm/contract.js";
 import type { SandboxService } from "../sandbox/contract.js";
@@ -25,6 +26,7 @@ import type {
   TurnExecutionContext,
   TurnExecutionResult,
   TurnExecutor,
+  TurnFinalizerDescriptor,
   TurnProgressUpdate,
 } from "./contract.js";
 
@@ -76,6 +78,7 @@ interface AgentRuntime {
 interface AgentRuntimeRunResult {
   readonly text: string;
   readonly afterReply?: (() => void | Promise<void>) | undefined;
+  readonly afterReplyFinalizers?: readonly TurnFinalizerDescriptor[] | undefined;
   readonly afterFailure?: ((error: unknown) => void | Promise<void>) | undefined;
 }
 
@@ -487,6 +490,7 @@ export function createAgentTurnExecutor(
       const runtimeExtensionContext: AgentToolExecutionContext = {
         cwd,
         sessionId,
+        ...(session.getHeader()?.ownerScope === undefined ? {} : { ownerScope: session.getHeader()!.ownerScope }),
         ...(session.getSessionArtifactDir() === undefined ? {} : { sessionArtifactDir: session.getSessionArtifactDir() }),
         deferAfterReply() { throw new Error("deferAfterReply is unavailable during agent runtime preparation"); },
         deferOnFailure() { throw new Error("deferOnFailure is unavailable during agent runtime preparation"); },
@@ -520,7 +524,10 @@ export function createAgentTurnExecutor(
         depth: number;
         maxDepth: number;
       }) => {
-        const childSession = dependencies.sessions.api.SessionManager.create(cwd, childOptions.sessionDir);
+        const inheritedOwnerScope = session.getHeader()?.ownerScope;
+        const childSession = dependencies.sessions.api.SessionManager.create(cwd, childOptions.sessionDir, {
+          ...(inheritedOwnerScope === undefined ? {} : { ownerScope: inheritedOwnerScope }),
+        });
         const child = await buildRuntime(childSession, {
           persistent: true,
           model: { provider: childOptions.model.provider, modelId: childOptions.model.id },
@@ -677,7 +684,12 @@ export function createAgentTurnExecutor(
                   const item = part as { type?: unknown; text?: unknown };
                   return item.type === "text" && typeof item.text === "string" ? [item.text] : [];
                 }).join(" ");
-            const memory = relevantMemory(dependencies.optional?.memory?.(), root, query, session.getSessionArtifactDir());
+            const memory = relevantMemory(
+              dependencies.optional?.memory?.(),
+              ownerStateRoot(root, session.getHeader()?.ownerScope),
+              query,
+              session.getSessionArtifactDir(),
+            );
             const persistedInputs = boundedPersistedInputContext(messages as AgentMessage[], userIndex);
             const ephemeralContext = ephemeralInputContext?.trim();
             if (!memory && !persistedInputs && !ephemeralContext && ephemeralImages.length === 0) return messages;
@@ -794,14 +806,19 @@ export function createAgentTurnExecutor(
           if (isDisposed) throw new Error(`Agent runtime ${session.getSessionId()} is disposed`);
           signal?.throwIfAborted();
           const afterReplyCallbacks: Array<() => void | Promise<void>> = [];
+          const afterReplyFinalizers: TurnFinalizerDescriptor[] = [];
           const afterFailureCallbacks: Array<(error: unknown) => void | Promise<void>> = [];
           const extensionContext: AgentToolExecutionContext = {
             cwd,
             sessionId,
+            ...(session.getHeader()?.ownerScope === undefined ? {} : { ownerScope: session.getHeader()!.ownerScope }),
             ...(session.getSessionArtifactDir() === undefined ? {} : { sessionArtifactDir: session.getSessionArtifactDir() }),
             ...(turnContext === undefined ? {} : { turn: turnContext.turn }),
             ...(jobId === undefined ? {} : { jobId }),
-            deferAfterReply(callback) { afterReplyCallbacks.push(callback); },
+            deferAfterReply(callback, durable) {
+              afterReplyCallbacks.push(callback);
+              if (durable) afterReplyFinalizers.push(durable);
+            },
             deferOnFailure(callback) { afterFailureCallbacks.push(callback); },
           };
           const tools = buildTools(extensionContext);
@@ -943,6 +960,12 @@ export function createAgentTurnExecutor(
             return Object.freeze({
               text: textResult,
               ...(afterReply === undefined ? {} : { afterReply }),
+              ...(afterReplyFinalizers.length === 0 ? {} : {
+                afterReplyFinalizers: Object.freeze(afterReplyFinalizers.map((entry) => Object.freeze({
+                  type: entry.type,
+                  payload: structuredClone(entry.payload),
+                }))),
+              }),
               ...(afterFailure === undefined ? {} : { afterFailure }),
             });
           } finally {
@@ -994,10 +1017,13 @@ export function createAgentTurnExecutor(
 
   const persistentRuntime = async (
     destinationId: string,
+    origin: PrincipalOrigin,
     onSessionCreated?: ((sessionId: string) => Promise<void>) | undefined,
   ): Promise<CachedRuntime> => {
     if (destinationId === "session:new") {
-      const session = dependencies.sessions.api.SessionManager.create(defaultCwd, sessionsDir);
+      const session = dependencies.sessions.api.SessionManager.create(defaultCwd, sessionsDir, {
+        ownerScope: principalScope(origin),
+      });
       await onSessionCreated?.(session.getSessionId());
       const runtime = await buildRuntime(session, { persistent: true });
       const entry: CachedRuntime = { runtime, lastUsedAt: Date.now(), busy: 0 };
@@ -1011,6 +1037,9 @@ export function createAgentTurnExecutor(
     }
     const cached = cache.get(sessionId);
     if (cached) {
+      if (!ownerScopeAllows(cached.runtime.session.getHeader()?.ownerScope, origin)) {
+        throw new Error(`Permission policy denied session access: ${sessionId}`);
+      }
       const currentRevision = dependencies.optional?.skills?.()?.revision() ?? 0;
       if (cached.runtime.skillsRevision === currentRevision || cached.busy > 0) return cached;
       cache.delete(sessionId);
@@ -1023,6 +1052,10 @@ export function createAgentTurnExecutor(
     }
     const sessionPath = join(sessionsDir, `${sessionId}.jsonl`);
     if (!existsSync(sessionPath)) throw new Error(`Routed session does not exist: ${sessionId}`);
+    const ownerScope = dependencies.sessions.api.readSessionOwnerScope(sessionPath);
+    if (!ownerScopeAllows(ownerScope, origin)) {
+      throw new Error(`Permission policy denied session access: ${sessionId}`);
+    }
     const session = dependencies.sessions.api.SessionManager.open(sessionPath, sessionsDir);
     if (session.getSessionId() !== sessionId) throw new Error(`Routed session id mismatch: ${sessionId}`);
     const runtime = await buildRuntime(session, { persistent: true });
@@ -1042,13 +1075,16 @@ export function createAgentTurnExecutor(
       if (disposed) throw new Error("Agent turn executor is disposed");
       context.signal?.throwIfAborted();
       if (context.decision.destination.kind === "transient") {
-        const session = dependencies.sessions.api.SessionManager.inMemory(defaultCwd);
+        const session = dependencies.sessions.api.SessionManager.inMemory(defaultCwd, "", {
+          ownerScope: principalScope(context.turn.principal),
+        });
         const runtime = await buildRuntime(session, { persistent: false });
         try {
           const result = await runtime.run(context.turn.text, context.turn.timestamp, context.signal, context.progress, context.jobId, context);
           return Object.freeze({
             text: result.text,
             ...(result.afterReply === undefined ? {} : { afterReply: result.afterReply }),
+            ...(result.afterReplyFinalizers === undefined ? {} : { afterReplyFinalizers: result.afterReplyFinalizers }),
             ...(result.afterFailure === undefined ? {} : { afterFailure: result.afterFailure }),
           });
         } finally {
@@ -1066,7 +1102,11 @@ export function createAgentTurnExecutor(
             notify: false,
           })
         : undefined;
-      const cached = await persistentRuntime(destinationId, destinationId === "session:new" ? reportReady : undefined);
+      const cached = await persistentRuntime(
+        destinationId,
+        context.turn.principal,
+        destinationId === "session:new" ? reportReady : undefined,
+      );
       if (destinationId !== "session:new") await reportReady?.(cached.runtime.sessionId);
       cached.busy += 1;
       cached.lastUsedAt = Date.now();
@@ -1077,6 +1117,7 @@ export function createAgentTurnExecutor(
           text: result.text,
           sessionId: cached.runtime.sessionId,
           ...(result.afterReply === undefined ? {} : { afterReply: result.afterReply }),
+          ...(result.afterReplyFinalizers === undefined ? {} : { afterReplyFinalizers: result.afterReplyFinalizers }),
           ...(result.afterFailure === undefined ? {} : { afterFailure: result.afterFailure }),
         });
       } finally {

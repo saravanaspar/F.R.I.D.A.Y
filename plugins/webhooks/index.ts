@@ -80,6 +80,9 @@ export function createWebhooksPlugin(options: WebhooksPluginOptions = {}): Frida
       label: "Webhook routes",
       description: "List configured non-secret webhook route metadata.",
       parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+      permission() {
+        return { id: "webhooks.routes", effect: "global-operational-read", resource: "webhooks:routes", network: false };
+      },
       execute: () => services.public.routes(),
     });
     ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {

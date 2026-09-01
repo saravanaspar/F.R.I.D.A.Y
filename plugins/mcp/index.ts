@@ -233,6 +233,21 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
       },
     });
 
+    async function authorizeConfiguredServerAccess(reason: string): Promise<void> {
+      await permissions.authorize({
+        mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+        workspace: process.cwd(),
+        access: "read",
+        action: {
+          id: "mcp.servers.read",
+          effect: "global-operational-read",
+          resource: "mcp:servers",
+          network: false,
+        },
+        reason,
+      });
+    }
+
     const service = Object.freeze<McpService>({
       servers: () => manager.servers(),
       status: (server) => manager.status(server),
@@ -266,6 +281,7 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
       description: "List configured MCP servers and whether each is ready for use.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
       async execute() {
+        await authorizeConfiguredServerAccess("list configured MCP servers");
         return {
           output: service.servers().map((server) => ({
             id: server.id,
@@ -290,7 +306,9 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
         additionalProperties: false,
       },
       async execute(input, signal) {
-        const tools = await service.listTools(agentString(input, "server"), signal);
+        const server = agentString(input, "server");
+        await authorizeConfiguredServerAccess(`access configured MCP server ${server}`);
+        const tools = await service.listTools(server, signal);
         return {
           output: tools.map((tool) => ({
             server: tool.server,
@@ -317,8 +335,10 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
         additionalProperties: false,
       },
       async execute(input, signal) {
+        const server = agentString(input, "server");
+        await authorizeConfiguredServerAccess(`access configured MCP server ${server}`);
         const result = await service.callTool({
-          server: agentString(input, "server"),
+          server,
           tool: agentString(input, "tool"),
           ...(input.arguments === undefined ? {} : { arguments: input.arguments as McpJsonValue }),
           ...(signal === undefined ? {} : { signal }),
@@ -377,6 +397,9 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
         properties: { server: { type: "string" } },
         additionalProperties: false,
       }),
+      permission() {
+        return { id: "mcp.servers", effect: "global-operational-read", resource: "mcp:servers", network: false };
+      },
       execute(input) {
         const server = systemString(input, "server");
         return server === undefined ? service.servers() : service.status(server);
@@ -437,6 +460,10 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
         required: ["url"],
         additionalProperties: false,
       }),
+      permission(input) {
+        const url = systemString(input, "url", { required: true, maximum: 2_048 })!;
+        return { id: "mcp.install", effect: "external-read", resource: `mcp-source:${url}`, network: true };
+      },
       async execute(input, context) {
         const url = installUrl(systemString(input, "url", { required: true, maximum: 2_048 })!);
         const requestedId = systemString(input, "id", { maximum: 128 });
@@ -604,12 +631,28 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
             });
           },
         });
-        if (!ensured.result) return { installed: false, feasible: false, reason: ensured.feasibility.reason };
+        if (!ensured.result) return {
+          installed: false,
+          feasible: ensured.feasibility.feasible,
+          placement: ensured.feasibility.placement,
+          target: ensured.feasibility.target,
+          requiresCode: ensured.feasibility.requiresCode,
+          reason: ensured.feasibility.reason,
+          nextStep: ensured.feasibility.objective,
+        };
         context.deferAfterReply(async () => {
           await selfImprovement.finalizeHandoff(ensured.result!, {
             beforeHandoff: () => confirmRestartWithActiveWork(context, "MCP capability installation"),
           });
           process.kill(process.pid, "SIGTERM");
+        }, {
+          type: "self-improvement.handoff",
+          payload: {
+            candidateId: ensured.result.candidateId,
+            generationId: ensured.result.generationId,
+            commit: ensured.result.commit,
+            restartRequestId: ensured.result.restartRequestId,
+          },
         });
         return { installed: false, extended: true, generationId: ensured.result.generationId, message: "The missing MCP package capability was built. After this reply FRIDAY will perform a verified handoff and resume this installation automatically." };
       },

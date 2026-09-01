@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { reportOperationalError } from "@friday/operational-errors";
 import type { FridayPlugin } from "../../src/plugin.js";
 import {
   normalizeCustomModelEndpoint,
@@ -33,6 +34,7 @@ import {
   type SystemJsonObject,
 } from "../system/contract.js";
 import { RUNTIME_SETTINGS_CAPABILITY, type RuntimeSettingsService } from "./contract.js";
+import { TURN_FINALIZER_CONTRIBUTION, type AgentExtensionJsonValue } from "../turn-loop/contract.js";
 import { registerPersonaExtensions } from "./personas.js";
 
 const RESTART_MARKER = "FRIDAY_RUNTIME_SETTINGS_RESTART";
@@ -313,7 +315,10 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
             outcome = "succeeded";
             release();
           };
-          updateOptions.afterReply!(settleSuccess);
+          updateOptions.afterReply!(settleSuccess, {
+            type: "runtime-settings.handoff",
+            payload: { restartRequestId: restart.requestId, home },
+          });
           updateOptions.onFailure!(settleFailure);
           return candidate;
         } catch (error) {
@@ -323,6 +328,56 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
       },
     });
     ctx.services.provide(RUNTIME_SETTINGS_CAPABILITY, service);
+    ctx.contribute(TURN_FINALIZER_CONTRIBUTION, {
+      type: "runtime-settings.handoff",
+      async finalize(payload: AgentExtensionJsonValue, finalizerContext) {
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+          throw new Error("Runtime-settings handoff finalizer payload is invalid");
+        }
+        const restartRequestId = (payload as Record<string, AgentExtensionJsonValue>).restartRequestId;
+        const payloadHome = (payload as Record<string, AgentExtensionJsonValue>).home;
+        if (typeof restartRequestId !== "string" || !restartRequestId.trim() || payloadHome !== home) {
+          throw new Error("Runtime-settings handoff finalizer does not match this runtime");
+        }
+        const manager = lifecycle.createLifecycleManager({ stateDir: join(home, "lifecycle") });
+        let quiesced = false;
+        let takeoverAccepted = false;
+        try {
+          await confirmRestartWithActiveWork({
+            turn: finalizerContext.turn,
+            ...(finalizerContext.signal === undefined ? {} : { signal: finalizerContext.signal }),
+            deferAfterReply() {},
+          }, "Runtime settings handoff recovery");
+          await handoff.quiesce();
+          quiesced = true;
+          manager.releaseForTakeover(restartRequestId);
+          await manager.waitForTakeover(restartRequestId, {
+            timeoutMs: TAKEOVER_TIMEOUT_MS,
+            ...(finalizerContext.signal === undefined ? {} : { signal: finalizerContext.signal }),
+          });
+          takeoverAccepted = true;
+          await stopPredecessor();
+        } catch (error) {
+          if (!takeoverAccepted) {
+            try {
+              await manager.retireReplacement(restartRequestId, "Recovered runtime-settings handoff failed");
+            } catch (cleanupError) {
+              reportOperationalError({
+                component: "runtime-settings",
+                operation: "retire replacement after recovered handoff failure",
+                operationCode: "replacement-retire",
+                error: cleanupError,
+                severity: "warn",
+                outcome: "degraded",
+                correlationId: restartRequestId,
+              });
+            }
+            if (quiesced) await handoff.resume();
+          }
+          throw error;
+        }
+      },
+    });
 
     // A runtime-settings successor validates the candidate before declaring itself ready.
     if (process.env[RESTART_MARKER] === "1") {
@@ -366,6 +421,9 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
       label: "Runtime settings",
       description: "Show the current non-secret main model, routing model, and permission defaults.",
       parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+      permission() {
+        return { id: "runtime.settings", effect: "global-operational-read", resource: "runtime:settings", network: false };
+      },
       execute: async () => publicSettings(await service.read()),
     });
 
@@ -430,6 +488,9 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
         },
         additionalProperties: false,
       }),
+      permission() {
+        return { id: "runtime.custom-model.configure", effect: "system-write", resource: "runtime:custom-models", network: false };
+      },
       async execute(input, context) {
         const channels = ctx.services.optional(CHANNELS_TRUSTED_CAPABILITY);
         const credentials = ctx.services.optional(MODEL_CREDENTIALS_CAPABILITY);
@@ -557,6 +618,9 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
       label: "Custom models",
       description: "List configured non-secret custom model endpoints.",
       parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+      permission() {
+        return { id: "runtime.custom-models", effect: "global-operational-read", resource: "runtime:custom-models", network: false };
+      },
       execute: async () => (await readCustomModels(home)).map((entry) => ({
         provider: entry.provider,
         modelId: entry.modelId,

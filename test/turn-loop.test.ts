@@ -1,9 +1,25 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import type { EventInput, EventRecord, EventsService } from "../plugins/events/contract.js";
 import type { PermissionsTrustedService } from "../plugins/permissions/trusted-contract.js";
 import type { RoutingDecision, RoutingService } from "../plugins/routing/contract.js";
 import type { InboundTurn, TurnExecutor } from "../plugins/turn-loop/contract.js";
 import { createTurnRuntime } from "../plugins/turn-loop/turn-loop.js";
+import { SqliteTurnReplyOutbox } from "../plugins/turn-loop/reply-outbox.js";
+
+const temporaryDirectories: string[] = [];
+
+function temporaryDirectory(): string {
+  const directory = mkdtempSync(join(tmpdir(), "friday-turn-loop-"));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
+});
 
 function decision(
   destination: RoutingDecision["destination"] = { kind: "session", id: "session:project" },
@@ -135,7 +151,12 @@ describe("Turn Loop", () => {
     expect(replies).toEqual(["done"]);
     expect(events.inputs.map((event) => event.type)).toEqual(["turn.received", "turn.executed", "turn.delivered", "turn.completed"]);
     expect(JSON.stringify(events.inputs)).not.toContain("hello m1");
-    expect(events.inputs.find((event) => event.type === "turn.executed")?.data).toMatchObject({ text: "done" });
+    expect(events.inputs.find((event) => event.type === "turn.executed")?.data).toMatchObject({
+      replyRef: expect.stringMatching(/^turn-reply:/),
+      replySha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      requiresFinalization: false,
+    });
+    expect(JSON.stringify(events.inputs)).not.toContain("done");
   });
 
   it("preserves validated channel attachments across turn normalization", async () => {
@@ -259,6 +280,82 @@ describe("Turn Loop", () => {
     expect(routing.messages).toHaveLength(1);
   });
 
+  it("replays the private outbox after an ambiguous channel acknowledgement without re-executing side effects", async () => {
+    const events = eventsHarness();
+    const permissions = permissionsHarness();
+    const routing = routingHarness(decision());
+    const attempts: string[] = [];
+    let channelAvailable = false;
+    let executions = 0;
+    const runtime = createTurnRuntime({
+      routing: routing.service,
+      permissions: permissions.service,
+      events: events.service,
+      executors: () => [{
+        id: "agent",
+        canHandle: () => true,
+        async execute() {
+          executions += 1;
+          return { text: "side effect already committed" };
+        },
+      }],
+    });
+    const inbound = turn("ambiguous-channel-ack", async (text) => {
+      attempts.push(text);
+      if (!channelAvailable) throw new Error("provider ACK was lost");
+    });
+
+    await expect(runtime.submit(inbound)).rejects.toThrow("provider ACK was lost");
+    channelAvailable = true;
+    await expect(runtime.submit(inbound)).resolves.toMatchObject({ status: "completed", executorId: "agent" });
+
+    expect(executions).toBe(1);
+    expect(routing.messages).toHaveLength(1);
+    expect(attempts).toEqual([
+      "side effect already committed",
+      "FRIDAY could not complete this turn.",
+      "side effect already committed",
+    ]);
+  });
+
+  it("replays delivery when the reply succeeded but its durable delivery event did not commit", async () => {
+    const events = eventsHarness();
+    const originalPublish = events.service.publish.bind(events.service);
+    let failDelivery = true;
+    (events.service as { publish: EventsService["publish"] }).publish = (input) => {
+      if (input.type === "turn.delivered" && failDelivery) {
+        failDelivery = false;
+        throw new Error("delivery-event-store-unavailable");
+      }
+      return originalPublish(input);
+    };
+    const permissions = permissionsHarness();
+    const routing = routingHarness(decision());
+    const replies: string[] = [];
+    let executions = 0;
+    const runtime = createTurnRuntime({
+      routing: routing.service,
+      permissions: permissions.service,
+      events: events.service,
+      executors: () => [{
+        id: "agent",
+        canHandle: () => true,
+        async execute() {
+          executions += 1;
+          return { text: "durable answer" };
+        },
+      }],
+    });
+    const inbound = turn("delivery-commit-failure", async (text) => { replies.push(text); });
+
+    await expect(runtime.submit(inbound)).rejects.toThrow("delivery-event-store-unavailable");
+    await expect(runtime.submit(inbound)).resolves.toMatchObject({ status: "completed", executorId: "agent" });
+
+    expect(executions).toBe(1);
+    expect(routing.messages).toHaveLength(1);
+    expect(replies).toEqual(["durable answer", "durable answer"]);
+  });
+
   it("serializes whole turns per external conversation and per routed persistent session", async () => {
     const events = eventsHarness();
     const permissions = permissionsHarness();
@@ -374,6 +471,68 @@ describe("Turn Loop", () => {
     expect(executions).toBe(1);
     expect(routing.messages).toHaveLength(1);
     expect(replies).toEqual(["real answer"]);
+  });
+
+  it("reconstructs a required finalizer after restart and records completion only after it succeeds", async () => {
+    const events = eventsHarness();
+    const permissions = permissionsHarness();
+    const routing = routingHarness(decision());
+    const outboxStateDir = temporaryDirectory();
+    const predecessorOutbox = new SqliteTurnReplyOutbox(outboxStateDir);
+    const replies: string[] = [];
+    let executions = 0;
+    let recoveredFinalizers = 0;
+    const firstRuntime = createTurnRuntime({
+      routing: routing.service,
+      permissions: permissions.service,
+      events: events.service,
+      replyOutbox: predecessorOutbox,
+      executors: () => [{
+        id: "agent",
+        canHandle: () => true,
+        async execute() {
+          executions += 1;
+          return {
+            text: "private answer",
+            afterReply: async () => { throw new Error("predecessor-crashed-before-finalization"); },
+            afterReplyFinalizers: [{ type: "test.recover", payload: { operationId: "op-1" } }],
+          };
+        },
+      }],
+    });
+
+    await expect(firstRuntime.submit(turn("finalizer-restart", async (text) => { replies.push(text); })))
+      .rejects.toThrow("predecessor-crashed-before-finalization");
+    expect(events.inputs.some((event) => event.type === "turn.completed")).toBe(false);
+    expect(JSON.stringify(events.inputs)).not.toContain("private answer");
+    predecessorOutbox.close();
+
+    const successorOutbox = new SqliteTurnReplyOutbox(outboxStateDir);
+    const restartedRuntime = createTurnRuntime({
+      routing: routing.service,
+      permissions: permissions.service,
+      events: events.service,
+      replyOutbox: successorOutbox,
+      executors: () => [{ id: "must-not-run", canHandle: () => true, async execute() { throw new Error("duplicate execution"); } }],
+      finalizers: () => [{
+        type: "test.recover",
+        async finalize(payload) {
+          expect(payload).toEqual({ operationId: "op-1" });
+          recoveredFinalizers += 1;
+        },
+      }],
+    });
+
+    await expect(restartedRuntime.submit(turn("finalizer-restart", async (text) => { replies.push(text); })))
+      .resolves.toMatchObject({ status: "completed", executorId: "agent" });
+    expect(executions).toBe(1);
+    expect(recoveredFinalizers).toBe(1);
+    expect(replies).toEqual(["private answer"]);
+    const finalizedIndex = events.inputs.findIndex((event) => event.type === "turn.finalized");
+    const completedIndex = events.inputs.findIndex((event) => event.type === "turn.completed");
+    expect(finalizedIndex).toBeGreaterThan(-1);
+    expect(completedIndex).toBeGreaterThan(finalizedIndex);
+    successorOutbox.close();
   });
 
   it("fails closed on ambiguous executors and returns only a generic failure to the ingress", async () => {

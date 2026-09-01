@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { reportOperationalError } from "@friday/operational-errors";
+import { reportOperationalError, sanitizeOperationalError } from "@friday/operational-errors";
 import { lstat, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { EventsService } from "../events/contract.js";
@@ -63,7 +63,7 @@ interface ActiveRun {
 export interface SessionJobManagerOptions {
   readonly stateDir: string;
   readonly events?: EventsService | undefined;
-  readonly resolveLabel?: ((destinationId: string, text: string) => Promise<string> | string) | undefined;
+  readonly resolveLabel?: ((destinationId: string, text: string, origin: SessionJobRecord["origin"]) => Promise<string> | string) | undefined;
   readonly progressNotifyIntervalMs?: number | undefined;
   readonly quiesceTimeoutMs?: number | undefined;
   readonly now?: (() => number) | undefined;
@@ -247,7 +247,7 @@ async function loadLegacyState(path: string): Promise<PersistedState> {
     }
     return { schema: STATE_SCHEMA, jobs };
   } catch (error) {
-    throw new Error(`Session-jobs state schema is invalid: ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Session-jobs state schema is invalid: ${path}: ${errorMessage(error)}`);
   }
 }
 
@@ -262,7 +262,7 @@ function queueSerial<T>(queues: Map<string, Promise<void>>, key: string, operati
 }
 
 function errorMessage(error: unknown): string {
-  return clip(error instanceof Error ? error.message : String(error), MAX_STATUS);
+  return clip(sanitizeOperationalError(error).safeMessage, MAX_STATUS);
 }
 
 function defaultLabel(destinationId: string, text: string): string {
@@ -274,7 +274,7 @@ export class SessionJobManager implements SessionJobsService {
   private readonly options: {
     readonly stateDir: string;
     readonly events?: EventsService | undefined;
-    readonly resolveLabel?: ((destinationId: string, text: string) => Promise<string> | string) | undefined;
+    readonly resolveLabel?: ((destinationId: string, text: string, origin: SessionJobRecord["origin"]) => Promise<string> | string) | undefined;
     readonly progressNotifyIntervalMs: number;
     readonly quiesceTimeoutMs: number;
     readonly now: () => number;
@@ -387,7 +387,7 @@ export class SessionJobManager implements SessionJobsService {
     const id = clip(this.options.idFactory(), 96);
     if (!id || this.jobs.has(id)) throw new Error(`session job id is unavailable: ${id || "empty"}`);
     const createdAt = new Date(Number.isFinite(request.timestamp) ? request.timestamp : this.options.now()).toISOString();
-    const label = clip(await this.options.resolveLabel?.(destinationId, request.text) ?? defaultLabel(destinationId, request.text), 160);
+    const label = clip(await this.options.resolveLabel?.(destinationId, request.text, request.origin) ?? defaultLabel(destinationId, request.text), 160);
     const activeAfterLabelResolution = [...this.jobs.values()].filter((job) => isActive(job.status)).length;
     if (activeAfterLabelResolution >= MAX_ACTIVE_JOBS) {
       throw new Error(`session-jobs active job limit reached (${MAX_ACTIVE_JOBS})`);
@@ -481,12 +481,14 @@ export class SessionJobManager implements SessionJobsService {
     const completedAt = new Date(this.options.now()).toISOString();
     const cancelled = cloneMutable(job);
     cancelled.status = "cancelled";
-    cancelled.error = clip(reason, MAX_STATUS);
+    cancelled.error = errorMessage(new Error(reason));
     cancelled.currentStatus = "Cancellation requested";
     cancelled.completedAt = completedAt;
     cancelled.updatedAt = completedAt;
+    delete cancelled.requestText;
     await this.persist([cancelled]);
     Object.assign(job, cancelled);
+    delete job.requestText;
     const run = this.active.get(job.id);
     run?.controller.abort(job.error);
     this.publish("session-job.cancelled", job);
@@ -613,8 +615,10 @@ export class SessionJobManager implements SessionJobsService {
     resumed.completedAt = completedAt;
     resumed.updatedAt = completedAt;
     delete resumed.error;
+    delete resumed.requestText;
     await this.persist([resumed]);
     Object.assign(job, resumed);
+    delete job.requestText;
     this.publish("session-job.resumed", job);
     return clone(job);
   }
@@ -674,8 +678,10 @@ export class SessionJobManager implements SessionJobsService {
       completed.resultPreview = clip(result.text, MAX_PREVIEW);
       completed.completedAt = completedAt;
       completed.updatedAt = completedAt;
+      delete completed.requestText;
       await this.persist([completed]);
       Object.assign(job, completed);
+      delete job.requestText;
       this.publish("session-job.completed", job);
       await this.safeNotify(run.request.notify, [`Completed ${job.label} (${job.id}).`, "", result.text].join("\n"));
       afterNotify = result.afterNotify;
@@ -688,10 +694,12 @@ export class SessionJobManager implements SessionJobsService {
       failed.currentStatus = "Failed";
       failed.completedAt = completedAt;
       failed.updatedAt = completedAt;
+      delete failed.requestText;
       let terminalPersistenceError: unknown;
       try {
         await this.persist([failed]);
         Object.assign(job, failed);
+        delete job.requestText;
       } catch (persistError) {
         terminalPersistenceError = persistError;
         // Reflect that execution has stopped without pretending the terminal state is

@@ -1,6 +1,7 @@
 import type { ModelService } from "../model/contract.js";
-import type { PermissionsService } from "../permissions/contract.js";
+import { permissionEffectAccess, type PermissionsService } from "../permissions/contract.js";
 import type { PermissionsTrustedService } from "../permissions/trusted-contract.js";
+import { ownerScopeAllows, principalScope, type PrincipalOrigin } from "../principal-scope.js";
 import type { RoutingDecision } from "../routing/contract.js";
 import type { TurnExecutionContext, TurnExecutionResult, TurnExecutor } from "../turn-loop/contract.js";
 import {
@@ -259,6 +260,9 @@ function actionMap(actions: readonly ScheduledActionContribution[]): Map<string,
   for (const action of actions) {
     const id = nonEmptyString(action.id, "scheduled action id", 128);
     if (result.has(id)) throw new Error(`Duplicate scheduled action contribution: ${id}`);
+    if (typeof action.permission !== "function") {
+      throw new Error(`Scheduled action ${id} has no explicit permission declaration`);
+    }
     result.set(id, action);
   }
   return result;
@@ -266,10 +270,25 @@ function actionMap(actions: readonly ScheduledActionContribution[]): Map<string,
 
 function envelope(task: ScheduledTask): { actionId: string; payload: JsonValue } {
   const payload = record(task.payload);
-  if (!payload || payload.version !== 1) throw new Error(`Scheduled action payload is invalid for task ${task.id}`);
+  if (!payload || (payload.version !== 1 && payload.version !== 2)) throw new Error(`Scheduled action payload is invalid for task ${task.id}`);
   const actionId = nonEmptyString(payload.actionId, "scheduled action payload actionId", 128);
   assertJsonValue(payload.payload, "scheduled action payload");
   return { actionId, payload: payload.payload as JsonValue };
+}
+
+function taskOwnerScope(task: ScheduledTask): string | undefined {
+  if (task.taskType !== SCHEDULED_ACTION_TASK_TYPE) return undefined;
+  const payload = record(task.payload);
+  if (!payload || payload.version !== 2) return undefined;
+  const ownerScope = payload.ownerScope;
+  if (typeof ownerScope !== "string" || (ownerScope !== "local:operator" && !/^channel:[a-f0-9]{32}$/.test(ownerScope))) {
+    throw new Error(`Scheduled action owner scope is invalid for task ${task.id}`);
+  }
+  return ownerScope;
+}
+
+function taskVisibleTo(task: ScheduledTask, origin: PrincipalOrigin): boolean {
+  return ownerScopeAllows(taskOwnerScope(task), origin);
 }
 
 export function installScheduledActionDispatcher(options: {
@@ -347,12 +366,14 @@ async function authorizePreparedAction(
   payload: JsonValue,
   context: ScheduledActionPrepareContext,
 ): Promise<void> {
-  const permission = action.permission?.(payload, context);
-  if (!permission) return;
+  const permission = action.permission(payload, context);
+  if (!permission || typeof permission !== "object") {
+    throw new Error(`Scheduled action ${action.id} returned no permission declaration`);
+  }
   await permissions.authorize({
     mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
     workspace: process.cwd(),
-    access: permission.effect === "workspace-read" || permission.effect === "external-read" ? "read" : "write",
+    access: permissionEffectAccess(permission.effect),
     action: permission,
     reason: `schedule future action ${action.id}`,
   });
@@ -391,7 +412,9 @@ export function createSchedulerTurnExecutor(options: SchedulerTurnExecutorOption
       const current = now();
       const zone = timezone();
       const actions = options.actions();
-      const tasks = options.scheduler.list();
+      const visibleTasks = (): readonly ScheduledTask[] => options.scheduler.list()
+        .filter((task) => taskVisibleTo(task, context.turn.principal));
+      const tasks = visibleTasks();
       const plan = await options.planner({
         text: context.turn.text,
         now: current.toISOString(),
@@ -402,7 +425,7 @@ export function createSchedulerTurnExecutor(options: SchedulerTurnExecutorOption
       });
 
       if (plan.operation === "list") {
-        const listed = options.scheduler.list().map((task) => ({
+        const listed = visibleTasks().map((task) => ({
           id: task.id,
           name: task.name,
           actionId: taskActionId(task) ?? null,
@@ -415,23 +438,36 @@ export function createSchedulerTurnExecutor(options: SchedulerTurnExecutorOption
       }
 
       if (plan.operation === "history") {
-        const history = options.scheduler.history({
-          ...(plan.taskId === undefined ? {} : { taskId: plan.taskId }),
-          limit: plan.limit ?? 20,
-        });
+        const limit = plan.limit ?? 20;
+        const currentTasks = visibleTasks();
+        const history = plan.taskId === undefined
+          ? currentTasks
+              .flatMap((task) => options.scheduler.history({ taskId: task.id, limit }))
+              .sort((left, right) => right.startedAt.localeCompare(left.startedAt) || right.runId.localeCompare(left.runId))
+              .slice(0, limit)
+          : (() => {
+              if (!currentTasks.some((task) => task.id === plan.taskId)) {
+                throw new Error(`Unknown scheduled task: ${plan.taskId}`);
+              }
+              return options.scheduler.history({ taskId: plan.taskId, limit });
+            })();
         return Object.freeze({ text: history.length === 0 ? "No scheduler history." : resultText(history), metadata: { operation: "history" } });
       }
 
       if (plan.operation === "cancel") {
+        const task = options.scheduler.get(plan.taskId);
+        if (!task || !taskVisibleTo(task, context.turn.principal)) throw new Error(`Unknown scheduled task: ${plan.taskId}`);
         await authorizeMutation(options.permissions, "scheduler.task.cancel", `scheduler:${plan.taskId}`, `cancel scheduled task ${plan.taskId}`);
-        const task = options.scheduler.cancel(plan.taskId);
+        const cancelled = options.scheduler.cancel(plan.taskId);
         return Object.freeze({
-          text: `Cancelled scheduled task ${task.name} (${task.id}).`,
-          metadata: { operation: "cancel", taskId: task.id },
+          text: `Cancelled scheduled task ${cancelled.name} (${cancelled.id}).`,
+          metadata: { operation: "cancel", taskId: cancelled.id },
         });
       }
 
       if (plan.operation === "remove") {
+        const task = options.scheduler.get(plan.taskId);
+        if (!task || !taskVisibleTo(task, context.turn.principal)) throw new Error(`Unknown scheduled task: ${plan.taskId}`);
         await authorizeMutation(options.permissions, "scheduler.task.remove", `scheduler:${plan.taskId}`, `remove scheduled task ${plan.taskId}`);
         const removed = options.scheduler.remove(plan.taskId);
         if (!removed) throw new Error(`Unknown scheduled task: ${plan.taskId}`);
@@ -452,7 +488,12 @@ export function createSchedulerTurnExecutor(options: SchedulerTurnExecutorOption
         : plan.schedule;
       const task = options.scheduler.schedule({
         taskType: SCHEDULED_ACTION_TASK_TYPE,
-        payload: { version: 1, actionId: action.id, payload: prepared },
+        payload: {
+          version: 2,
+          ownerScope: principalScope(context.turn.principal),
+          actionId: action.id,
+          payload: prepared,
+        },
         schedule,
         ...(plan.name === undefined ? {} : { name: plan.name }),
         ...(plan.missedRunPolicy === undefined ? {} : { missedRunPolicy: plan.missedRunPolicy }),

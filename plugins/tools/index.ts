@@ -29,7 +29,17 @@ const toolsPlugin: FridayPlugin = definePlugin({ id: "tools", requires: [EXECUTI
   };
   configureExecutionAccess(access);
   ctx.afterReady(async () => {
-    sandbox.cleanupStaleManagedProcesses?.();
+    try {
+      sandbox.cleanupStaleManagedProcesses?.();
+    } catch (error) {
+      reportOperationalError({
+        component: "tools",
+        operation: "clean stale managed Podman processes",
+        operationCode: "sandbox.stale-cleanup-failed",
+        error,
+        severity: "warn",
+      });
+    }
     try {
       await tools.cleanupStaleOutputFiles();
     } catch (error) {

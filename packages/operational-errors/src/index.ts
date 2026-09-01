@@ -1,20 +1,65 @@
+import { createHash } from "node:crypto";
+
 export type OperationalErrorSeverity = "warn" | "error";
+export type OperationalErrorOutcome = "failure" | "cancelled" | "degraded";
+
+export interface OperationalErrorContext {
+  readonly code?: string | undefined;
+  readonly errorClass?: string | undefined;
+  readonly retryable?: boolean | undefined;
+  readonly outcome?: OperationalErrorOutcome | undefined;
+}
+
+export interface SanitizedOperationalError {
+  readonly code: string;
+  readonly errorClass: string;
+  readonly errorName: string;
+  readonly fingerprint: string;
+  readonly safeMessage: string;
+  readonly retryable: boolean;
+  readonly outcome: OperationalErrorOutcome;
+}
 
 export interface OperationalErrorInput {
   readonly component: string;
   readonly operation: string;
+  /** Stable bounded enum-like identifier used in metrics. Never include IDs or paths. */
+  readonly operationCode?: string | undefined;
   readonly error: unknown;
   readonly severity?: OperationalErrorSeverity | undefined;
+  readonly outcome?: OperationalErrorOutcome | undefined;
+  readonly retryable?: boolean | undefined;
+  readonly attempt?: number | undefined;
+  readonly maxAttempts?: number | undefined;
+  readonly durationMs?: number | undefined;
+  readonly traceId?: string | undefined;
+  readonly spanId?: string | undefined;
+  readonly correlationId?: string | undefined;
+  readonly recoveryAction?: string | undefined;
+  readonly nextRetryAt?: string | undefined;
 }
 
 export interface OperationalErrorEvent {
   readonly at: string;
   readonly component: string;
   readonly operation: string;
+  readonly operationCode: string;
   readonly severity: OperationalErrorSeverity;
+  readonly outcome: OperationalErrorOutcome;
+  readonly retryable: boolean;
   readonly errorName: string;
   readonly errorMessage: string;
-  readonly errorCode?: string | undefined;
+  readonly errorCode: string;
+  readonly errorClass: string;
+  readonly errorFingerprint: string;
+  readonly attempt?: number | undefined;
+  readonly maxAttempts?: number | undefined;
+  readonly durationMs?: number | undefined;
+  readonly traceId?: string | undefined;
+  readonly spanId?: string | undefined;
+  readonly correlationId?: string | undefined;
+  readonly recoveryAction?: string | undefined;
+  readonly nextRetryAt?: string | undefined;
 }
 
 export type OperationalErrorSink = (event: OperationalErrorEvent) => void;
@@ -30,6 +75,58 @@ let activeSink: { readonly id: symbol; readonly sink: OperationalErrorSink } | u
 function bounded(value: unknown, fallback: string, maximum: number): string {
   const text = String(value ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim();
   return (text || fallback).slice(0, maximum);
+}
+
+function stableIdentifier(value: unknown, fallback: string, maximum = 128): string {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._:-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, maximum);
+  return /^[a-z0-9][a-z0-9._:-]*$/.test(normalized) ? normalized : fallback;
+}
+
+function inferredErrorClass(error: unknown): string {
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : undefined;
+  const code = String(record?.code ?? "").toUpperCase();
+  const name = error instanceof Error ? error.name.toLowerCase() : typeof error;
+  if (code.includes("SQLITE_BUSY") || code.includes("SQLITE_LOCKED")) return "storage-contention";
+  if (code === "ENOSPC") return "storage-capacity";
+  if (code === "EROFS" || code === "EACCES" || code === "EPERM") return "storage-permission";
+  if (code === "ETIMEDOUT" || code === "ECONNRESET" || code === "ENOTFOUND") return "network";
+  if (name.includes("abort") || name.includes("timeout")) return "cancelled";
+  if (name.includes("type") || name.includes("validation") || name.includes("syntax")) return "validation";
+  return "internal";
+}
+
+function inferredCode(error: unknown, errorClass: string): string {
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : undefined;
+  if (typeof record?.code === "string" || typeof record?.code === "number") {
+    return stableIdentifier(record.code, "operational-failure", 64);
+  }
+  return stableIdentifier(errorClass, "operational-failure", 64);
+}
+
+/**
+ * Canonical safe representation for every durable domain error. Subsystems must
+ * persist `safeMessage`/classification fields from this result, never Error.message.
+ */
+export function sanitizeOperationalError(
+  error: unknown,
+  context: OperationalErrorContext = {},
+): SanitizedOperationalError {
+  const errorName = bounded(error instanceof Error ? error.name : typeof error, "Error", 128);
+  const safeMessage = redactSensitiveText(error instanceof Error ? error.message : error);
+  const errorClass = stableIdentifier(context.errorClass, inferredErrorClass(error), 64);
+  const code = stableIdentifier(context.code, inferredCode(error, errorClass), 64);
+  const outcome = context.outcome ?? (errorClass === "cancelled" ? "cancelled" : "failure");
+  const retryable = context.retryable ?? new Set(["storage-contention", "network", "cancelled"]).has(errorClass);
+  const fingerprint = createHash("sha256")
+    .update(JSON.stringify([code, errorClass, errorName, safeMessage]))
+    .digest("hex")
+    .slice(0, 24);
+  return Object.freeze({ code, errorClass, errorName, fingerprint, safeMessage, retryable, outcome });
 }
 
 /** Redact common credential forms in free-form text without changing unrelated content. */
@@ -50,19 +147,31 @@ export function isSensitiveFieldName(value: string): boolean {
 }
 
 function eventFor(input: OperationalErrorInput): OperationalErrorEvent {
-  const error = input.error;
-  const record = error && typeof error === "object" ? error as Record<string, unknown> : undefined;
-  const code = typeof record?.code === "string" || typeof record?.code === "number"
-    ? bounded(record.code, "", 64)
-    : undefined;
+  const sanitized = sanitizeOperationalError(input.error, {
+    outcome: input.outcome,
+    retryable: input.retryable,
+  });
   return Object.freeze({
     at: new Date().toISOString(),
     component: bounded(input.component, "unknown", 128),
     operation: bounded(input.operation, "unknown", 256),
+    operationCode: stableIdentifier(input.operationCode, "unspecified", 128),
     severity: input.severity ?? "error",
-    errorName: bounded(error instanceof Error ? error.name : typeof error, "Error", 128),
-    errorMessage: redactSensitiveText(error instanceof Error ? error.message : error),
-    ...(code ? { errorCode: code } : {}),
+    outcome: sanitized.outcome,
+    retryable: sanitized.retryable,
+    errorName: sanitized.errorName,
+    errorMessage: sanitized.safeMessage,
+    errorCode: sanitized.code,
+    errorClass: sanitized.errorClass,
+    errorFingerprint: sanitized.fingerprint,
+    ...(input.attempt === undefined ? {} : { attempt: input.attempt }),
+    ...(input.maxAttempts === undefined ? {} : { maxAttempts: input.maxAttempts }),
+    ...(input.durationMs === undefined ? {} : { durationMs: input.durationMs }),
+    ...(input.traceId === undefined ? {} : { traceId: stableIdentifier(input.traceId, "invalid", 128) }),
+    ...(input.spanId === undefined ? {} : { spanId: stableIdentifier(input.spanId, "invalid", 128) }),
+    ...(input.correlationId === undefined ? {} : { correlationId: stableIdentifier(input.correlationId, "invalid", 128) }),
+    ...(input.recoveryAction === undefined ? {} : { recoveryAction: bounded(input.recoveryAction, "none", 256) }),
+    ...(input.nextRetryAt === undefined ? {} : { nextRetryAt: bounded(input.nextRetryAt, "unknown", 64) }),
   });
 }
 

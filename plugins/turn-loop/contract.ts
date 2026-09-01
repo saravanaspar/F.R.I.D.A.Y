@@ -47,6 +47,22 @@ export type AgentExtensionJsonValue =
   | AgentExtensionJsonValue[]
   | { [key: string]: AgentExtensionJsonValue };
 
+/** Durable, JSON-safe instruction for replaying required post-reply work after restart. */
+export interface TurnFinalizerDescriptor {
+  readonly type: string;
+  readonly payload: AgentExtensionJsonValue;
+}
+
+export interface TurnFinalizerContext {
+  readonly turn: InboundTurn;
+  readonly signal?: AbortSignal | undefined;
+}
+
+export interface TurnFinalizerContribution {
+  readonly type: string;
+  finalize(payload: AgentExtensionJsonValue, context: TurnFinalizerContext): void | Promise<void>;
+}
+
 export interface AgentToolContributionResult {
   /** JSON-safe result rendered back to the model as bounded tool-result text. */
   readonly output: AgentExtensionJsonValue;
@@ -59,11 +75,13 @@ export interface AgentToolContributionResult {
 export interface AgentToolExecutionContext {
   readonly cwd: string;
   readonly sessionId: string;
+  /** Opaque host-owned ownership key used to partition durable plugin state. */
+  readonly ownerScope?: string | undefined;
   readonly sessionArtifactDir?: string | undefined;
   readonly turn?: InboundTurn | undefined;
   /** Durable Session Jobs attribution for restart-aware system/tool actions. */
   readonly jobId?: string | undefined;
-  deferAfterReply(callback: () => void | Promise<void>): void;
+  deferAfterReply(callback: () => void | Promise<void>, durable?: TurnFinalizerDescriptor): void;
   deferOnFailure(callback: (error: unknown) => void | Promise<void>): void;
 }
 
@@ -143,6 +161,9 @@ export const AGENT_PROMPT_SECTION_CONTRIBUTION: Contribution<AgentPromptSectionC
 export const AGENT_AFTER_TURN_CONTRIBUTION: Contribution<AgentAfterTurnContribution> =
   defineContribution<AgentAfterTurnContribution>("agent.after-turn");
 
+export const TURN_FINALIZER_CONTRIBUTION: Contribution<TurnFinalizerContribution> =
+  defineContribution<TurnFinalizerContribution>("turn.finalizer");
+
 export interface TurnSubmitOptions {
   readonly signal?: AbortSignal | undefined;
 }
@@ -172,8 +193,10 @@ export interface TurnExecutionResult {
   readonly text: string;
   readonly sessionId?: string | undefined;
   readonly metadata?: Readonly<Record<string, string | number | boolean | null>> | undefined;
-  /** Host-only finalizer run after the reply and durable completion record succeed. */
+  /** Host-only finalizer run after reply delivery but before durable completion. */
   readonly afterReply?: (() => void | Promise<void>) | undefined;
+  /** Private outbox descriptors used to reconstruct required finalization after restart. */
+  readonly afterReplyFinalizers?: readonly TurnFinalizerDescriptor[] | undefined;
   /** Host-only compensation run when the turn fails before or during finalization. */
   readonly afterFailure?: ((error: unknown) => void | Promise<void>) | undefined;
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { installOperationalErrorSink, isSensitiveFieldName, redactSensitiveText, reportOperationalError, reportUnlessExpectedAbort } from "../src/index.js";
+import { installOperationalErrorSink, isSensitiveFieldName, redactSensitiveText, reportOperationalError, reportUnlessExpectedAbort, sanitizeOperationalError } from "../src/index.js";
 
 let uninstall: (() => void) | undefined;
 afterEach(() => { uninstall?.(); uninstall = undefined; vi.restoreAllMocks(); });
@@ -61,5 +61,28 @@ describe("operational failure reporting", () => {
     controller.abort();
     reportUnlessExpectedAbort({ component: "test", operation: "poll", error: new Error("stopped") }, controller.signal);
     expect(events).toEqual([]);
+  });
+
+  it("returns a stable redacted durable error classification", () => {
+    const first = sanitizeOperationalError(Object.assign(new Error("GET https://x.test?a=1&api_key=secret-value"), { code: "ETIMEDOUT" }));
+    const second = sanitizeOperationalError(Object.assign(new Error("GET https://x.test?a=1&api_key=secret-value"), { code: "ETIMEDOUT" }));
+    expect(first).toMatchObject({ code: "etimedout", errorClass: "network", retryable: true, outcome: "failure" });
+    expect(first.safeMessage).not.toContain("secret-value");
+    expect(first.fingerprint).toBe(second.fingerprint);
+  });
+
+  it("keeps thousands of dynamic paths and ids out of metric identifiers", () => {
+    const events: Array<{ operation?: string; operationCode?: string }> = [];
+    uninstall = installOperationalErrorSink((event) => events.push(event));
+    for (let index = 0; index < 2_500; index += 1) {
+      reportOperationalError({
+        component: "sessions",
+        operation: `scan /private/session-${index}/job-${index}`,
+        operationCode: "sessions.scan-entry",
+        error: new Error("failed"),
+      });
+    }
+    expect(new Set(events.map((event) => event.operation)).size).toBe(2_500);
+    expect(new Set(events.map((event) => event.operationCode))).toEqual(new Set(["sessions.scan-entry"]));
   });
 });

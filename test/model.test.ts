@@ -66,6 +66,7 @@ describe("model plugin", () => {
       spans: () => [],
       metrics: () => [],
       status: () => ({
+        health: "healthy",
         logCount: 0,
         spanCount: 0,
         metricSeriesCount: 0,
@@ -75,6 +76,9 @@ describe("model plugin", () => {
         droppedLogs: 0,
         droppedSpans: 0,
         droppedMetrics: 0,
+        droppedMetricsByReason: {},
+        metricSeriesUtilization: 0,
+        metricSeriesNearCapacity: false,
       }),
       close() {},
     };

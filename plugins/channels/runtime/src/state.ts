@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
@@ -26,6 +26,11 @@ function privateDirectory(path: string): void {
   chmodSync(path, 0o700);
 }
 
+function syncPath(path: string): void {
+  const descriptor = openSync(path, "r");
+  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+}
+
 export function readPrivateJson<T>(path: string, maxBytes = MAX_STATE_BYTES): T | undefined {
   if (!existsSync(path)) return undefined;
   const info = lstatSync(path);
@@ -41,13 +46,18 @@ export function writePrivateJson(path: string, value: unknown, maxBytes = MAX_ST
   try {
     writeFileSync(temporary, encoded, { mode: 0o600, flag: "wx" });
     chmodSync(temporary, 0o600);
+    syncPath(temporary);
     renameSync(temporary, path);
     chmodSync(path, 0o600);
+    syncPath(dirname(path));
   } finally {
     if (existsSync(temporary)) unlinkSync(temporary);
   }
 }
 
 export function removePrivateJson(path: string): void {
-  if (existsSync(path)) unlinkSync(path);
+  if (existsSync(path)) {
+    unlinkSync(path);
+    syncPath(dirname(path));
+  }
 }

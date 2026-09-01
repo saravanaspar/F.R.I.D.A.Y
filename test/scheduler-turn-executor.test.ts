@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { PermissionsService } from "../plugins/permissions/contract.js";
 import type { PermissionsTrustedService } from "../plugins/permissions/trusted-contract.js";
+import { principalScope } from "../plugins/principal-scope.js";
 import {
   type JsonValue,
   type ScheduledActionContribution,
@@ -28,7 +29,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function context(text = "remind me in a minute"): TurnExecutionContext {
+function context(text = "remind me in a minute", senderId = "user-9"): TurnExecutionContext {
   return {
     turn: {
       id: "message-1",
@@ -37,7 +38,7 @@ function context(text = "remind me in a minute"): TurnExecutionContext {
         channel: "telegram",
         accountId: "main",
         conversationId: "chat-7",
-        senderId: "user-9",
+        senderId,
       },
       text,
       timestamp: Date.now(),
@@ -147,7 +148,8 @@ describe("scheduler turn executor", () => {
       name: "stand-up-reminder",
       taskType: "friday.scheduled-action",
       payload: {
-        version: 1,
+        version: 2,
+        ownerScope: principalScope(context().turn.principal),
         actionId: "test.reminder",
         payload: { message: "Stand up", conversationId: "chat-7" },
       },
@@ -168,7 +170,13 @@ describe("scheduler turn executor", () => {
     scheduler.schedule({
       id: "managed",
       name: "managed-task",
-      taskType: "test.none",
+      taskType: "friday.scheduled-action",
+      payload: {
+        version: 2,
+        ownerScope: principalScope(context().turn.principal),
+        actionId: "test.none",
+        payload: {},
+      },
       schedule: { kind: "once", at: new Date(Date.now() + 60_000).toISOString() },
     });
     const authorizations: string[] = [];
@@ -192,6 +200,48 @@ describe("scheduler turn executor", () => {
     await scheduler.close();
   });
 
+  it("keeps task discovery and mutations scoped to the exact originating principal", async () => {
+    let currentPlan: SchedulerTurnPlan = { operation: "list" };
+    let plannerTaskIds: readonly string[] = [];
+    const scheduler = createSchedulerService({ stateDir: tempRoot() });
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const alice = context("list my schedules", "alice").turn.principal;
+    const bob = context("list my schedules", "bob").turn.principal;
+    for (const [id, name, ownerScope] of [
+      ["alice-task", "Alice private reminder", principalScope(alice)],
+      ["bob-task", "Bob private reminder", principalScope(bob)],
+    ] as const) {
+      scheduler.schedule({
+        id,
+        name,
+        taskType: "friday.scheduled-action",
+        payload: { version: 2, ownerScope, actionId: "test.none", payload: {} },
+        schedule: { kind: "once", at: future },
+      });
+    }
+    const authorizations: string[] = [];
+    const executor = createSchedulerTurnExecutor({
+      scheduler,
+      permissions: permissions(authorizations),
+      actions: () => [],
+      planner: async (request) => {
+        plannerTaskIds = request.tasks.map((task) => task.id);
+        return currentPlan;
+      },
+    });
+
+    const listed = await executor.execute(context("list my schedules", "alice"));
+    expect(plannerTaskIds).toEqual(["alice-task"]);
+    expect(listed.text).toContain("Alice private reminder");
+    expect(listed.text).not.toContain("Bob private reminder");
+
+    currentPlan = { operation: "cancel", taskId: "bob-task" };
+    await expect(executor.execute(context("cancel Bob's task", "alice"))).rejects.toThrow("Unknown scheduled task");
+    expect(scheduler.get("bob-task")?.enabled).toBe(true);
+    expect(authorizations).toEqual([]);
+    await scheduler.close();
+  });
+
   it("uses the configured user timezone as the authoritative wall-clock zone for cron schedules", async () => {
     const scheduler = createSchedulerService({ stateDir: tempRoot(), idFactory: () => "timezone-task" });
     const action: ScheduledActionContribution = {
@@ -200,6 +250,7 @@ describe("scheduler turn executor", () => {
       description: "Test timezone binding",
       parameters: {},
       prepare: () => ({}),
+      permission: () => ({ id: "test.timezone", effect: "system-write", resource: "test:timezone", network: false }),
       execute() {},
     };
     let plannerZone = "";
@@ -251,6 +302,7 @@ describe("scheduler turn executor", () => {
       description: "same",
       parameters: {},
       prepare: () => null,
+      permission: () => ({ id: "same", effect: "system-write", resource: "test:same", network: false }),
       execute() {},
     };
     const duplicateExecutor = createSchedulerTurnExecutor({
@@ -260,6 +312,14 @@ describe("scheduler turn executor", () => {
       planner: async () => ({ operation: "list" }),
     });
     await expect(duplicateExecutor.execute(context())).rejects.toThrow("Duplicate scheduled action contribution");
+
+    const missingPermissionExecutor = createSchedulerTurnExecutor({
+      scheduler,
+      permissions: permissions([]),
+      actions: () => [{ ...duplicate, id: "missing-permission", permission: undefined } as unknown as ScheduledActionContribution],
+      planner: async () => ({ operation: "list" }),
+    });
+    await expect(missingPermissionExecutor.execute(context())).rejects.toThrow("no explicit permission declaration");
     await scheduler.close();
   });
 });

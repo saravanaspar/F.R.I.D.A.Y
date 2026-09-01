@@ -61,7 +61,10 @@ export interface PermissionsController {
 }
 
 const EFFECTS = new Set<PermissionEffect>([
+  "public-read",
   "workspace-read",
+  "private-read",
+  "global-operational-read",
   "workspace-write",
   "external-read",
   "external-write",
@@ -120,6 +123,7 @@ function effectMutates(effect: PermissionEffect): boolean {
 }
 
 function roleAllows(role: TrustedIdentityRole, action: PermissionAction): boolean {
+  if (action.effect === "global-operational-read") return role === "operator";
   return role === "operator" || !effectMutates(action.effect);
 }
 
@@ -131,6 +135,9 @@ function requestNeedsApproval(request: PermissionRequest): boolean {
   if (request.action.network) return true;
   if (request.mode === "full") return false;
   switch (request.action.effect) {
+    case "public-read":
+    case "private-read":
+    case "global-operational-read":
     case "workspace-read":
       return false;
     case "workspace-write":
@@ -242,7 +249,13 @@ export function createPermissionsController(options: PermissionsServiceOptions =
         workspace = canonicalExistingOrParent(request.workspace);
         action = validateAction(request.action);
         if (request.path !== undefined) service.assertWorkspacePath(workspace, request.path);
-        const expectedAccess = action.effect === "workspace-read" || action.effect === "external-read" ? "read" : "write";
+        const expectedAccess = action.effect === "public-read"
+          || action.effect === "private-read"
+          || action.effect === "global-operational-read"
+          || action.effect === "workspace-read"
+          || action.effect === "external-read"
+          ? "read"
+          : "write";
         if (request.access !== expectedAccess) {
           throw new Error(`Permission action ${action.id} requires ${expectedAccess} access, not ${request.access}`);
         }

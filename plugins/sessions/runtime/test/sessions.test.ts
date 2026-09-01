@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  CURRENT_SESSION_VERSION,
   SessionManager,
   buildSessionContext,
   loadEntriesFromFile,
@@ -245,7 +246,7 @@ describe("SessionManager", () => {
     session.flushNow();
 
     const loaded = loadEntriesFromFile(path);
-    expect(loaded[0]).toMatchObject({ type: "session", version: 3 });
+    expect(loaded[0]).toMatchObject({ type: "session", version: CURRENT_SESSION_VERSION });
     expect(readFileSync(path, "utf8").trim().length).toBeGreaterThan(0);
   });
 });

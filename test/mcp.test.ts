@@ -6,15 +6,23 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PluginTestHost } from "./helpers/plugin-host.js";
 import authPlugin from "../plugins/auth/index.js";
 import { AGENT_TOOL_CONTRIBUTION } from "../plugins/turn-loop/contract.js";
-import { createAuditPlugin } from "../plugins/audit/index.js";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import eventsPlugin from "../plugins/events/index.js";
-import { collectContributions, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
+import {
+  collectContributions,
+  definePlugin,
+  requireCapability,
+  uninstallCapabilityRegistry,
+} from "../plugins/capabilities/protocol.js";
 import { createMcpPlugin } from "../plugins/mcp/index.js";
 import { MCP_CAPABILITY } from "../plugins/mcp/contract.js";
 import { MCP_TRUSTED_CAPABILITY } from "../plugins/mcp/trusted-contract.js";
 import modelPlugin from "../plugins/model/index.js";
-import permissionsPlugin from "../plugins/permissions/index.js";
+import {
+  PERMISSIONS_CAPABILITY,
+  type PermissionRequest,
+  type PermissionsService,
+} from "../plugins/permissions/contract.js";
 import sessionResourcesPlugin from "../plugins/session-resources/index.js";
 import { createVaultPlugin } from "../plugins/vault/index.js";
 import { McpManager, getMcpStateDir } from "@friday/mcp";
@@ -266,14 +274,26 @@ describe("MCP production client", () => {
     const stateRoot = temp();
     const previousState = process.env.FRIDAY_STATE_DIR;
     process.env.FRIDAY_STATE_DIR = stateRoot;
+    const authorizations: PermissionRequest[] = [];
+    const permissions: PermissionsService = {
+      normalizeMode: () => "auto",
+      async authorize(request) {
+        authorizations.push(request);
+        return { allowed: true, approvedBy: "policy" };
+      },
+      assertWorkspacePath: (_workspace, path) => path,
+    };
+    const permissionProvider = definePlugin(
+      { id: "test-mcp-permissions", provides: [PERMISSIONS_CAPABILITY] },
+      (ctx) => { ctx.services.provide(PERMISSIONS_CAPABILITY, permissions); },
+    );
     try {
       uninstallCapabilityRegistry();
       const friday = new PluginTestHost();
       await friday.activatePlugin(capabilitiesPlugin);
       await friday.activatePlugin(sessionResourcesPlugin);
       await friday.activatePlugin(modelPlugin);
-      await friday.activatePlugin(createAuditPlugin({ stateDir: join(stateRoot, "audit"), workspaceRoot: process.cwd() }));
-      await friday.activatePlugin(permissionsPlugin);
+      await friday.activatePlugin(permissionProvider);
       await friday.activatePlugin(createVaultPlugin({ stateDir: join(stateRoot, "vault"), workspaceRoot: process.cwd() }));
       await friday.activatePlugin(eventsPlugin);
       await friday.activatePlugin(authPlugin);
@@ -284,10 +304,40 @@ describe("MCP production client", () => {
       expect(Object.keys(safe).sort()).toEqual(["callTool", "disconnect", "listTools", "servers", "status"]);
       expect(Object.keys(trusted).sort()).toEqual(["credentialRef", "login", "registerServer", "removeServer"]);
       expect(JSON.stringify(safe.servers())).not.toContain("vault://");
-      expect(collectContributions(AGENT_TOOL_CONTRIBUTION).map((tool) => tool.name).sort()).toEqual([
+      const tools = collectContributions(AGENT_TOOL_CONTRIBUTION);
+      expect(tools.map((tool) => tool.name).sort()).toEqual([
         "mcp_call_tool",
         "mcp_list_tools",
         "mcp_servers",
+      ]);
+      await expect(tools.find((tool) => tool.name === "mcp_servers")!.execute({})).resolves.toMatchObject({
+        output: expect.any(Array),
+      });
+      await expect(tools.find((tool) => tool.name === "mcp_list_tools")!.execute({ server: "missing" }))
+        .rejects.toThrow(/Unknown MCP server/);
+      await expect(tools.find((tool) => tool.name === "mcp_call_tool")!.execute({
+        server: "missing",
+        tool: "noop",
+      })).rejects.toThrow(/Unknown MCP server/);
+      expect(authorizations.map((request) => request.action)).toEqual([
+        {
+          id: "mcp.servers.read",
+          effect: "global-operational-read",
+          resource: "mcp:servers",
+          network: false,
+        },
+        {
+          id: "mcp.servers.read",
+          effect: "global-operational-read",
+          resource: "mcp:servers",
+          network: false,
+        },
+        {
+          id: "mcp.servers.read",
+          effect: "global-operational-read",
+          resource: "mcp:servers",
+          network: false,
+        },
       ]);
     } finally {
       if (previousState === undefined) delete process.env.FRIDAY_STATE_DIR;

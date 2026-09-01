@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { reportOperationalError } from "@friday/operational-errors";
+import { reportOperationalError, sanitizeOperationalError } from "@friday/operational-errors";
 import type {
   JsonValue,
   MissedRunPolicy,
@@ -114,8 +114,7 @@ function retryDelay(policy: ScheduledRetryPolicy, attempt: number): number {
 }
 
 function errorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.slice(0, 2000);
+  return sanitizeOperationalError(error).safeMessage;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -178,6 +177,9 @@ export function createSchedulerService(options: SchedulerServiceOptions = {}): S
   let workerStartedAt: string | undefined;
   let workerLastTickAt: string | undefined;
   let workerLastError: string | undefined;
+  let workerLastFailureAt: string | undefined;
+  let workerAttemptFailures = 0;
+  let workerFailedOccurrences = 0;
 
   const assertOpen = (): void => {
     if (closed) throw new Error("scheduler service is closed");
@@ -257,6 +259,7 @@ export function createSchedulerService(options: SchedulerServiceOptions = {}): S
         nextRunAt: task.nextRunAt,
         ...(task.retryScheduledFor ? { retryScheduledFor: task.retryScheduledFor } : {}),
         consecutiveFailures: task.consecutiveFailures,
+        consecutiveFailedOccurrences: task.consecutiveFailedOccurrences,
       });
       return { taskId, status: "cancelled" };
     }
@@ -276,6 +279,7 @@ export function createSchedulerService(options: SchedulerServiceOptions = {}): S
           nextRunAt,
           retryScheduledFor: claimed.run.scheduledFor,
           consecutiveFailures: task.consecutiveFailures + 1,
+          consecutiveFailedOccurrences: task.consecutiveFailedOccurrences,
         });
       } else {
         const next = successNextRun(task, claimed.run, completed);
@@ -288,10 +292,11 @@ export function createSchedulerService(options: SchedulerServiceOptions = {}): S
           error: failure,
           enabled: next.enabled,
           nextRunAt: next.nextRunAt,
-          consecutiveFailures: 0,
+          consecutiveFailures: task.consecutiveFailures + 1,
+          consecutiveFailedOccurrences: task.consecutiveFailedOccurrences + 1,
         });
       }
-      return { taskId, status: "error", error: failure };
+      return { taskId, status: "error", error: failure, occurrenceExhausted: exhausted };
     }
 
     const next = successNextRun(task, claimed.run, completed);
@@ -304,6 +309,7 @@ export function createSchedulerService(options: SchedulerServiceOptions = {}): S
       enabled: next.enabled,
       nextRunAt: next.nextRunAt,
       consecutiveFailures: 0,
+      consecutiveFailedOccurrences: 0,
     });
     return { taskId, status: "success" };
   };
@@ -370,6 +376,7 @@ export function createSchedulerService(options: SchedulerServiceOptions = {}): S
         maxCatchUpRuns: normalizePositiveInteger(input.maxCatchUpRuns, 10, "maxCatchUpRuns", 1000),
         retry: normalizeRetry(input.retry),
         consecutiveFailures: 0,
+        consecutiveFailedOccurrences: 0,
       };
       return cloneTask(database.createTask(task));
     },
@@ -447,6 +454,9 @@ export function createSchedulerService(options: SchedulerServiceOptions = {}): S
       workerStartedAt = started.toISOString();
       workerLastTickAt = undefined;
       workerLastError = undefined;
+      workerLastFailureAt = undefined;
+      workerAttemptFailures = 0;
+      workerFailedOccurrences = 0;
       const controller = new AbortController();
       workerController = controller;
       const onExternalAbort = (): void => controller.abort(workerOptions.signal?.reason);
@@ -462,13 +472,22 @@ export function createSchedulerService(options: SchedulerServiceOptions = {}): S
             try {
               const results = await service.runDue({ now: tick, maxTasks: maxTasksPerTick, maxConcurrent, leaseMs, signal: controller.signal });
               const missing = results.find((result) => result.status === "missing-executor");
-              workerLastError = missing?.error;
+              const failures = results.filter((result) => result.status === "error");
+              workerAttemptFailures += failures.length;
+              workerFailedOccurrences += failures.filter((result) => result.occurrenceExhausted === true).length;
+              const latestFailure = [...results].reverse().find((result) => result.error);
+              if (latestFailure?.error) {
+                workerLastError = latestFailure.error;
+                workerLastFailureAt = tick.toISOString();
+              }
               if (missing?.error) {
                 reportOperationalError({ component: "scheduler", operation: "defer task with missing executor", error: new Error(missing.error), severity: "warn" });
               }
             } catch (error) {
               if (controller.signal.aborted) break;
               workerLastError = errorMessage(error);
+              workerLastFailureAt = tick.toISOString();
+              workerAttemptFailures += 1;
               reportOperationalError({ component: "scheduler", operation: "run durable scheduler tick", error });
             }
             if (controller.signal.aborted) break;
@@ -508,6 +527,9 @@ export function createSchedulerService(options: SchedulerServiceOptions = {}): S
         ...(workerStartedAt ? { startedAt: workerStartedAt } : {}),
         ...(workerLastTickAt ? { lastTickAt: workerLastTickAt } : {}),
         ...(workerLastError ? { lastError: workerLastError } : {}),
+        ...(workerLastFailureAt ? { lastFailureAt: workerLastFailureAt } : {}),
+        attemptFailures: workerAttemptFailures,
+        failedOccurrences: workerFailedOccurrences,
       };
     },
 

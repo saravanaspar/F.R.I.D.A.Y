@@ -4,6 +4,7 @@ import type { FridayPlugin } from "../../src/plugin.js";
 import { CHANNELS_TRUSTED_CAPABILITY } from "../channels/trusted-contract.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { EVENTS_CAPABILITY } from "../events/contract.js";
+import { ownerScopeAllows } from "../principal-scope.js";
 import { TURN_INGRESS_HOOK } from "../turn-loop/contract.js";
 import { isLifecycleRestartEnvironment, LIFECYCLE_HANDOFF_CONTRIBUTION } from "../lifecycle/contract.js";
 import { SESSIONS_CAPABILITY } from "../sessions/contract.js";
@@ -170,11 +171,13 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
       progressNotifyIntervalMs: options.progressNotifyIntervalMs,
       recoverInterrupted: !restartSuccessor,
       startSuspended: restartSuccessor,
-      async resolveLabel(destinationId, text) {
+      async resolveLabel(destinationId, text, origin) {
         if (destinationId === "session:new") return text.trim().slice(0, 80) || "new session";
         if (!destinationId.startsWith("session:")) return destinationId;
         const sessionId = destinationId.slice("session:".length);
-        const candidate = (await sessions.SessionManager.listAll(undefined, sessionsDir)).find((entry) => entry.id === sessionId);
+        const candidate = (await sessions.SessionManager.listAll(undefined, sessionsDir))
+          .filter((entry) => ownerScopeAllows(entry.ownerScope, origin))
+          .find((entry) => entry.id === sessionId);
         return candidate?.name?.trim() || candidate?.firstMessage?.trim().slice(0, 80) || `session ${sessionId}`;
       },
     });
@@ -262,7 +265,15 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
     ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
       id: "session-jobs",
       label: "Background session jobs",
-      snapshot: () => ({ active: manager.list({ activeOnly: true, limit: 100 }) }),
+      snapshot: () => {
+        const active = manager.list({ activeOnly: true, limit: 100 });
+        return {
+          active: active.length,
+          queued: active.filter((job) => job.status === "queued").length,
+          running: active.filter((job) => job.status === "running").length,
+          retrying: active.filter((job) => job.status === "retrying").length,
+        };
+      },
     });
 
     ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
@@ -277,10 +288,15 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
         },
         additionalProperties: false,
       }),
-      execute(input) {
+      permission() {
+        return { id: "session.jobs.list", effect: "private-read", resource: "session-jobs:origin", network: false };
+      },
+      execute(input, context) {
         const includeCompleted = input.includeCompleted === true;
         const limit = optionalInteger(input, "limit", 20, 100);
-        const jobs = manager.list({ activeOnly: !includeCompleted, limit });
+        const jobs = manager.list({ activeOnly: !includeCompleted, limit: 100 })
+          .filter((job) => sameOrigin(job, context))
+          .slice(0, limit);
         return formatJobList(jobs, includeCompleted);
       },
     });
@@ -361,13 +377,17 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
         required: ["query"],
         additionalProperties: false,
       }),
-      async execute(input) {
+      permission() {
+        return { id: "session.transcript", effect: "private-read", resource: "sessions:origin", network: false };
+      },
+      async execute(input, context) {
         const query = optionalString(input, "query") ?? "";
         const limit = optionalInteger(input, "limit", 20, 100);
-        const jobMatches = manager.find(query, { activeOnly: false });
+        const jobMatches = manager.find(query, { activeOnly: false }).filter((entry) => sameOrigin(entry, context));
         let sessionId = jobMatches.length === 1 ? jobMatches[0]?.sessionId : undefined;
         let job = jobMatches.length === 1 ? jobMatches[0] : undefined;
-        const all = await sessions.SessionManager.listAll(undefined, sessionsDir);
+        const all = (await sessions.SessionManager.listAll(undefined, sessionsDir))
+          .filter((entry) => ownerScopeAllows(entry.ownerScope, context.turn.principal));
         if (!sessionId) {
           const normalized = query.replace(/^session:/i, "").trim().toLowerCase();
           const sessionMatches = all.filter((entry) =>

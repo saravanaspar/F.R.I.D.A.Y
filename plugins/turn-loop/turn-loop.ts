@@ -3,6 +3,7 @@ import { reportOperationalError } from "@friday/operational-errors";
 import type { EventsService } from "../events/contract.js";
 import type { ObservabilityService } from "../observability/contract.js";
 import type { PermissionsTrustedService } from "../permissions/trusted-contract.js";
+import { principalScope } from "../principal-scope.js";
 import type { RoutingService } from "../routing/contract.js";
 import type { SessionJobsService } from "../session-jobs/contract.js";
 import type {
@@ -10,11 +11,13 @@ import type {
   TurnAttachment,
   TurnExecutionResult,
   TurnExecutor,
+  TurnFinalizerContribution,
   TurnResult,
   TurnRuntimeService,
   TurnRuntimeStatus,
   TurnSubmitOptions,
 } from "./contract.js";
+import { MemoryTurnReplyOutbox, type TurnReplyOutbox, type TurnReplyOutboxRecord } from "./reply-outbox.js";
 
 const MAX_ID_CHARS = 256;
 const MAX_TEXT_CHARS = 128_000;
@@ -31,6 +34,8 @@ export interface TurnRuntimeOptions {
   readonly executors: () => readonly TurnExecutor[];
   readonly observability?: (() => ObservabilityService | undefined) | undefined;
   readonly sessionJobs?: (() => SessionJobsService | undefined) | undefined;
+  readonly replyOutbox?: TurnReplyOutbox | undefined;
+  readonly finalizers?: (() => readonly TurnFinalizerContribution[]) | undefined;
 }
 
 function boundedText(value: string, label: string, maximum: number): string {
@@ -148,7 +153,9 @@ function deliveredEventId(key: string): string {
 }
 
 interface DurableExecutionResult {
-  readonly text: string;
+  readonly replyRef: string;
+  readonly replySha256: string;
+  readonly requiresFinalization: boolean;
   readonly destinationKind: string;
   readonly destinationId: string;
   readonly executionProfile: string;
@@ -160,7 +167,9 @@ interface DurableExecutionResult {
 function durableExecutionFromEvent(value: unknown): DurableExecutionResult | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const data = value as Record<string, unknown>;
-  if (typeof data.text !== "string" || !data.text || data.text.length > MAX_TEXT_CHARS) return undefined;
+  if (typeof data.replyRef !== "string" || !/^turn-reply:[a-f0-9]{64}$/.test(data.replyRef)) return undefined;
+  if (typeof data.replySha256 !== "string" || !/^[a-f0-9]{64}$/.test(data.replySha256)) return undefined;
+  if (typeof data.requiresFinalization !== "boolean") return undefined;
   for (const key of ["destinationKind", "destinationId", "executionProfile", "executorId"] as const) {
     if (typeof data[key] !== "string" || !(data[key] as string).trim()) return undefined;
   }
@@ -174,7 +183,9 @@ function durableExecutionFromEvent(value: unknown): DurableExecutionResult | und
     }
   }
   return Object.freeze({
-    text: data.text,
+    replyRef: data.replyRef,
+    replySha256: data.replySha256,
+    requiresFinalization: data.requiresFinalization,
     destinationKind: data.destinationKind as string,
     destinationId: data.destinationId as string,
     executionProfile: data.executionProfile as string,
@@ -188,15 +199,11 @@ function eventSubject(key: string): string {
   return `turn:${key.slice(0, 32)}`;
 }
 
-function eventData(turn: InboundTurn): Record<string, string | number> {
+function eventData(turn: InboundTurn, key: string): Record<string, string | number> {
   return {
-    messageId: turn.id,
+    messageKey: key.slice(0, 32),
     authority: turn.principal.authority,
-    channel: turn.principal.channel,
-    accountId: turn.principal.accountId,
-    conversationId: turn.principal.conversationId,
-    senderId: turn.principal.senderId,
-    ...(turn.principal.threadId === undefined ? {} : { threadId: turn.principal.threadId }),
+    ownerScope: principalScope(turn.principal),
   };
 }
 
@@ -262,12 +269,44 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
   const conversationQueues = new Map<string, Promise<void>>();
   const sessionQueues = new Map<string, Promise<void>>();
   const completedInProcess = new Set<string>();
+  const replyOutbox = options.replyOutbox ?? new MemoryTurnReplyOutbox();
   // Deferred host callbacks cannot be serialized. Keeping them keyed by turn lets a
   // same-process provider retry replay the durable reply and still run the callback
   // exactly once. Cross-process restart recovery must be owned by the subsystem that
   // created the callback (lifecycle/settings/self-improvement all persist their state).
   const pendingFinalizers = new Map<string, () => void | Promise<void>>();
   let activeTurns = 0;
+
+  const runFinalizers = async (
+    turn: InboundTurn,
+    key: string,
+    record: TurnReplyOutboxRecord,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    if (!record.requiresFinalization) return;
+    const callback = pendingFinalizers.get(key);
+    if (callback) {
+      await callback();
+      return;
+    }
+    if (record.finalizers.length === 0) {
+      throw new Error("Required after-reply finalizer cannot be reconstructed after restart");
+    }
+    const handlers = new Map<string, TurnFinalizerContribution>();
+    for (const contribution of options.finalizers?.() ?? []) {
+      if (handlers.has(contribution.type)) throw new Error(`Duplicate turn finalizer contribution: ${contribution.type}`);
+      handlers.set(contribution.type, contribution);
+    }
+    for (const descriptor of record.finalizers) {
+      const handler = handlers.get(descriptor.type);
+      if (!handler) throw new Error(`Turn finalizer is unavailable after restart: ${descriptor.type}`);
+      signal?.throwIfAborted();
+      await handler.finalize(structuredClone(descriptor.payload), {
+        turn,
+        ...(signal === undefined ? {} : { signal }),
+      });
+    }
+  };
 
   const rememberCompleted = (key: string): void => {
     completedInProcess.delete(key);
@@ -286,7 +325,7 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
         source: "turn-loop",
         subject: eventSubject(key),
         data: {
-          ...eventData(turn),
+          ...eventData(turn, key),
           phase,
           errorType: error instanceof Error ? error.name : "unknown",
         },
@@ -301,9 +340,12 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
     const completionId = completedEventId(key);
     const executionId = executedEventId(key);
     const deliveryId = deliveredEventId(key);
+    const finalizationId = `turn:${key}:finalized`;
+    const ownerScope = principalScope(turn.principal);
     let phase = "dedupe";
     let replyDelivered = false;
     let executionDurable = false;
+    let replyStored = false;
     let execution: TurnExecutionResult | undefined;
 
     try {
@@ -311,6 +353,7 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
       if (completedInProcess.has(key) || options.events.get(completionId) !== undefined) {
         rememberCompleted(key);
         pendingFinalizers.delete(key);
+        replyOutbox.delete(key, ownerScope);
         return Object.freeze({ status: "duplicate", messageId: turn.id });
       }
 
@@ -320,9 +363,13 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
       // instead of duplicate real-world side effects or duplicate background jobs.
       const durableExecution = durableExecutionFromEvent(options.events.get(executionId)?.data);
       if (durableExecution) {
+        const durableReply = replyOutbox.get(key, ownerScope);
+        if (!durableReply || durableExecution.replyRef !== `turn-reply:${key}` || durableReply.sha256 !== durableExecution.replySha256) {
+          throw new Error("Durable turn reply is missing or does not match its event reference");
+        }
         if (options.events.get(deliveryId) === undefined) {
           phase = "reply-replay";
-          await turn.reply(durableExecution.text);
+          await turn.reply(durableReply.text);
           replyDelivered = true;
           phase = "delivery-replay";
           options.events.publish({
@@ -330,10 +377,21 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
             type: "turn.delivered",
             source: "turn-loop",
             subject: eventSubject(key),
-            data: eventData(turn),
+            data: eventData(turn, key),
           });
         } else {
           replyDelivered = true;
+        }
+        if (options.events.get(finalizationId) === undefined && durableExecution.requiresFinalization) {
+          phase = "after-reply-replay";
+          await runFinalizers(turn, key, durableReply, submitOptions.signal);
+          options.events.publish({
+            id: finalizationId,
+            type: "turn.finalized",
+            source: "turn-loop",
+            subject: eventSubject(key),
+            data: eventData(turn, key),
+          });
         }
         phase = "completion-replay";
         options.events.publish({
@@ -342,7 +400,7 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
           source: "turn-loop",
           subject: eventSubject(key),
           data: {
-            ...eventData(turn),
+            ...eventData(turn, key),
             destinationKind: durableExecution.destinationKind,
             destinationId: durableExecution.destinationId,
             executionProfile: durableExecution.executionProfile,
@@ -353,10 +411,8 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
           },
         });
         rememberCompleted(key);
-        const finalizer = pendingFinalizers.get(key);
         pendingFinalizers.delete(key);
-        phase = "after-reply-replay";
-        await finalizer?.();
+        replyOutbox.delete(key, ownerScope);
         return Object.freeze({
           status: "completed",
           messageId: turn.id,
@@ -372,7 +428,7 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
         source: "turn-loop",
         subject: eventSubject(key),
         occurredAt: new Date(turn.timestamp).toISOString(),
-        data: eventData(turn),
+        data: eventData(turn, key),
       });
 
       phase = "identity";
@@ -482,17 +538,26 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
             : await execute();
 
         submitOptions.signal?.throwIfAborted();
-        // Persist the externally visible result before attempting delivery. If the
-        // reply transport fails or the process is restarted, a provider retry can
-        // replay this exact result without running the executor twice.
+        // Persist the private externally visible result before attempting delivery.
+        // The globally inspectable event journal stores only a hash/reference.
         phase = "execution-result";
+        const durableReply = replyOutbox.put({
+          turnKey: key,
+          ownerScope,
+          text: execution.text,
+          finalizers: execution.afterReplyFinalizers ?? [],
+          requiresFinalization: execution.afterReply !== undefined,
+        });
+        replyStored = true;
         options.events.publish({
           id: executionId,
           type: "turn.executed",
           source: "turn-loop",
           subject: eventSubject(key),
           data: {
-            text: execution.text,
+            replyRef: `turn-reply:${key}`,
+            replySha256: durableReply.sha256,
+            requiresFinalization: durableReply.requiresFinalization,
             destinationKind: decision.destination.kind,
             destinationId: decision.destination.id,
             executionProfile: decision.execution.profile,
@@ -514,8 +579,20 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
           type: "turn.delivered",
           source: "turn-loop",
           subject: eventSubject(key),
-          data: eventData(turn),
+          data: eventData(turn, key),
         });
+
+        if (execution.afterReply) {
+          phase = "after-reply";
+          await runFinalizers(turn, key, durableReply, submitOptions.signal);
+          options.events.publish({
+            id: finalizationId,
+            type: "turn.finalized",
+            source: "turn-loop",
+            subject: eventSubject(key),
+            data: eventData(turn, key),
+          });
+        }
 
         phase = "completion";
         options.events.publish({
@@ -524,7 +601,7 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
           source: "turn-loop",
           subject: eventSubject(key),
           data: {
-            ...eventData(turn),
+            ...eventData(turn, key),
             destinationKind: decision.destination.kind,
             destinationId: decision.destination.id,
             executionProfile: decision.execution.profile,
@@ -534,10 +611,8 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
           },
         });
         rememberCompleted(key);
-        phase = "after-reply";
-        const finalizer = pendingFinalizers.get(key);
         pendingFinalizers.delete(key);
-        await finalizer?.();
+        replyOutbox.delete(key, ownerScope);
         return Object.freeze({
           status: "completed",
           messageId: turn.id,
@@ -553,6 +628,7 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
       // that occur before that commit point; after it, retry delivery/completion from
       // the durable result instead of re-running or rolling back the executor.
       if (!executionDurable) {
+        if (replyStored) replyOutbox.delete(key, ownerScope);
         try {
           await execution?.afterFailure?.(error);
         } catch (cleanupError) {

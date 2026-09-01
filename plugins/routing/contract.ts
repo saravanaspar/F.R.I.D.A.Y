@@ -5,6 +5,7 @@ export type RoutingDestinationKind = "session" | "transient" | "scheduler" | "sy
 export type RoutingExecutionProfile = "agent" | "utility" | "scheduler" | "system";
 
 export interface RoutingPrincipal {
+  readonly authority: "local" | "channel";
   readonly channel: string;
   readonly accountId: string;
   readonly conversationId: string;

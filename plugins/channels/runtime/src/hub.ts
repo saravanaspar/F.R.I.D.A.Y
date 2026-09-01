@@ -13,6 +13,7 @@ import type {
   ChannelTarget,
   ChannelTransport,
   ChannelTransportStatus,
+  ChannelHubStatus,
   CredentialCaptureRequest,
   CredentialCaptureCompletion,
   PendingChannelApproval,
@@ -34,8 +35,22 @@ const MAX_PROMPT_TTL_MS = 15 * 60_000;
 const DEFAULT_CANCELLATION_TTL_MS = 60 * 60_000;
 const MAX_CANCELLATION_TTL_MS = 24 * 60 * 60_000;
 const MAX_SECRET_BYTES = 64 * 1024;
+const MAX_FAILED_INGRESS = 10_000;
 
 type Listener = (message: ChannelInboundMessage) => void | Promise<void>;
+
+interface TransportObservation {
+  lastInboundAt?: string;
+  lastOutboundAt?: string;
+  lastFailureAt?: string;
+  retryCount: number;
+  inboundFailures: number;
+  outboundFailures: number;
+  authFailures: number;
+  networkFailures: number;
+  inboundDegraded: boolean;
+  outboundDegraded: boolean;
+}
 
 type PendingCredentialInternal = {
   readonly public: PendingCredentialCapture;
@@ -96,6 +111,22 @@ function principalKey(principal: ChannelPrincipal): string {
 
 function targetKey(target: Pick<ChannelTarget, "channel" | "accountId">): string {
   return `${target.channel}\u0000${target.accountId}`;
+}
+
+function failureCategory(error: unknown): "auth" | "network" | "other" {
+  const candidate = error && typeof error === "object" ? error as { code?: unknown; status?: unknown; name?: unknown; message?: unknown } : {};
+  const text = [candidate.code, candidate.status, candidate.name, candidate.message, error]
+    .filter((value) => value !== undefined)
+    .map(String)
+    .join(" ")
+    .toLowerCase();
+  if (/\b(?:401|403|auth|unauthori[sz]ed|forbidden|credential|token)\b/.test(text)) return "auth";
+  if (/\b(?:network|timeout|timed out|fetch|connect|socket|dns|econn[a-z]*|enet[a-z]*|ehost[a-z]*|enotfound|unreachable)\b/.test(text)) return "network";
+  return "other";
+}
+
+function latest(values: readonly (string | undefined)[]): string | undefined {
+  return values.filter((value): value is string => value !== undefined).sort().at(-1);
 }
 
 function targetFromPrincipal(principal: ChannelPrincipal): ChannelTarget {
@@ -210,6 +241,8 @@ export class ChannelHub {
   readonly #onError: (message: string, error?: unknown) => void;
   readonly #protectedStatePath: string;
   readonly #transports = new Map<string, ChannelTransport>();
+  readonly #observations = new Map<string, TransportObservation>();
+  readonly #failedIngress = new Set<string>();
   readonly #listeners = new Set<Listener>();
   readonly #admissionListeners = new Set<Listener>();
   readonly #pendingCaptures = new Map<string, PendingCredentialInternal>();
@@ -361,14 +394,78 @@ export class ChannelHub {
       throw new Error(`Channel transport already registered: ${transport.channel}/${transport.accountId}`);
     }
     this.#transports.set(key, transport);
+    this.#observations.set(key, {
+      retryCount: 0,
+      inboundFailures: 0,
+      outboundFailures: 0,
+      authFailures: 0,
+      networkFailures: 0,
+      inboundDegraded: false,
+      outboundDegraded: false,
+    });
   }
 
   list(): readonly ChannelTransportStatus[] {
     return Object.freeze(
       [...this.#transports.values()]
-        .map((transport) => Object.freeze({ ...transport.status() }))
+        .map((transport) => {
+          const key = targetKey(transport);
+          const base = transport.status();
+          const observation = this.#observations.get(key)!;
+          const pending = this.#pendingCount(key);
+          const baseHealth = base.health ?? (base.state === "running" ? "up" : base.state === "error" ? "degraded" : "down");
+          const health = baseHealth === "up" && (observation.inboundDegraded || observation.outboundDegraded)
+            ? "degraded"
+            : baseHealth;
+          return Object.freeze({
+            ...base,
+            health,
+            ...(observation.lastInboundAt === undefined ? {} : { lastInboundAt: observation.lastInboundAt }),
+            ...(observation.lastOutboundAt === undefined ? {} : { lastOutboundAt: observation.lastOutboundAt }),
+            ...(observation.lastFailureAt === undefined ? {} : { lastFailureAt: observation.lastFailureAt }),
+            retryCount: observation.retryCount + (base.retryCount ?? 0),
+            inboundFailures: observation.inboundFailures + (base.inboundFailures ?? 0),
+            outboundFailures: observation.outboundFailures + (base.outboundFailures ?? 0),
+            authFailures: observation.authFailures + (base.authFailures ?? 0),
+            networkFailures: observation.networkFailures + (base.networkFailures ?? 0),
+            backlog: pending + (base.backlog ?? 0),
+          });
+        })
         .sort((a, b) => `${a.channel}/${a.accountId}`.localeCompare(`${b.channel}/${b.accountId}`)),
     );
+  }
+
+  status(): ChannelHubStatus {
+    const transports = this.list();
+    const pending = Object.freeze({
+      credentialCaptures: this.#pendingCaptures.size,
+      approvals: this.#pendingApprovals.size,
+      prompts: this.#pendingPrompts.size,
+      cancellations: this.#pendingCancellations.size,
+      failedIngressAwaitingRetry: this.#failedIngress.size,
+    });
+    const configured = transports.length;
+    const up = transports.filter((entry) => entry.health === "up").length;
+    const degraded = transports.filter((entry) => entry.health === "degraded").length;
+    const down = configured - up - degraded;
+    return Object.freeze({
+      health: configured === 0 ? "unconfigured" : degraded > 0 || down > 0 ? "degraded" : "healthy",
+      configured,
+      up,
+      degraded,
+      down,
+      ...(latest(transports.map((entry) => entry.lastInboundAt)) === undefined ? {} : { lastInboundAt: latest(transports.map((entry) => entry.lastInboundAt))! }),
+      ...(latest(transports.map((entry) => entry.lastOutboundAt)) === undefined ? {} : { lastOutboundAt: latest(transports.map((entry) => entry.lastOutboundAt))! }),
+      ...(latest(transports.map((entry) => entry.lastFailureAt)) === undefined ? {} : { lastFailureAt: latest(transports.map((entry) => entry.lastFailureAt))! }),
+      retryCount: transports.reduce((sum, entry) => sum + (entry.retryCount ?? 0), 0),
+      inboundFailures: transports.reduce((sum, entry) => sum + (entry.inboundFailures ?? 0), 0),
+      outboundFailures: transports.reduce((sum, entry) => sum + (entry.outboundFailures ?? 0), 0),
+      authFailures: transports.reduce((sum, entry) => sum + (entry.authFailures ?? 0), 0),
+      networkFailures: transports.reduce((sum, entry) => sum + (entry.networkFailures ?? 0), 0),
+      backlog: transports.reduce((sum, entry) => sum + (entry.backlog ?? 0), 0),
+      pending,
+      transports,
+    });
   }
 
   subscribe(listener: Listener): () => void {
@@ -392,12 +489,36 @@ export class ChannelHub {
     // reports failures and remains operational so the user can repair/reconfigure it.
     const transports = [...this.#transports.values()];
     const results = await Promise.allSettled(transports.map((transport) =>
-      transport.start((message) => this.ingest(message)),
+      transport.start(async (message) => {
+        const transportKey = targetKey(message.principal);
+        const ingressKey = `${transportKey}\u0000${message.id}`;
+        const observation = this.#observations.get(transportKey);
+        if (observation) {
+          observation.lastInboundAt = new Date(this.#now()).toISOString();
+        }
+        try {
+          const result = await this.ingest(message);
+          if (observation) {
+            if (this.#failedIngress.delete(ingressKey)) observation.retryCount += 1;
+            observation.inboundDegraded = this.#hasFailedIngress(transportKey);
+          }
+          return result;
+        } catch (error) {
+          if (observation) this.#recordFailure(observation, "inbound", error);
+          this.#rememberFailedIngress(ingressKey);
+          throw error;
+        }
+      }),
     ));
     for (let index = 0; index < results.length; index += 1) {
       const result = results[index]!;
-      if (result.status === "fulfilled") continue;
       const transport = transports[index]!;
+      const observation = this.#observations.get(targetKey(transport))!;
+      if (result.status === "fulfilled") {
+        observation.inboundDegraded = this.#hasFailedIngress(targetKey(transport));
+        continue;
+      }
+      this.#recordFailure(observation, "inbound", result.reason);
       this.#onError(`start ${transport.channel}/${transport.accountId}`, result.reason);
     }
   }
@@ -852,7 +973,55 @@ export class ChannelHub {
       throw new Error(`No channel transport registered for ${target.channel}/${target.accountId}`);
     }
     const sanitized = sanitizeChannelText(text);
-    return transport.send(target, sanitized.text);
+    const observation = this.#observations.get(targetKey(target))!;
+    try {
+      const result = await transport.send(target, sanitized.text);
+      observation.lastOutboundAt = new Date(this.#now()).toISOString();
+      observation.outboundDegraded = false;
+      return result;
+    } catch (error) {
+      this.#recordFailure(observation, "outbound", error);
+      throw error;
+    }
+  }
+
+  #recordFailure(observation: TransportObservation, direction: "inbound" | "outbound", error: unknown): void {
+    observation.lastFailureAt = new Date(this.#now()).toISOString();
+    if (direction === "inbound") {
+      observation.inboundFailures += 1;
+      observation.inboundDegraded = true;
+    } else {
+      observation.outboundFailures += 1;
+      observation.outboundDegraded = true;
+    }
+    const category = failureCategory(error);
+    if (category === "auth") observation.authFailures += 1;
+    if (category === "network") observation.networkFailures += 1;
+  }
+
+  #rememberFailedIngress(ingressKey: string): void {
+    this.#failedIngress.add(ingressKey);
+    while (this.#failedIngress.size > MAX_FAILED_INGRESS) {
+      const oldest = this.#failedIngress.values().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.#failedIngress.delete(oldest);
+    }
+  }
+
+  #hasFailedIngress(transportKey: string): boolean {
+    for (const ingressKey of this.#failedIngress) {
+      if (ingressKey.startsWith(`${transportKey}\u0000`)) return true;
+    }
+    return false;
+  }
+
+  #pendingCount(key: string): number {
+    const matches = (principal: ChannelPrincipal): boolean => targetKey(principal) === key;
+    return [...this.#pendingCaptures.values()].filter((entry) => matches(entry.public.principal)).length
+      + [...this.#pendingApprovals.values()].filter((entry) => matches(entry.public.principal)).length
+      + [...this.#pendingPrompts.values()].filter((entry) => matches(entry.public.principal)).length
+      + [...this.#pendingCancellations.values()].filter((entry) => matches(entry.public.principal)).length
+      + [...this.#failedIngress].filter((entry) => entry.startsWith(`${key}\u0000`)).length;
   }
 
   async #resolveApproval(raw: RawChannelInboundMessage, key: string, approval: PendingApprovalInternal): Promise<ChannelInboundMessage> {

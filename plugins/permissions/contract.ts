@@ -4,6 +4,9 @@ import { defineCapability } from "../capabilities/protocol.js";
 export type PermissionMode = "ask" | "auto" | "full";
 export type WorkspaceAccess = "read" | "write";
 export type PermissionEffect =
+  | "public-read"
+  | "private-read"
+  | "global-operational-read"
   | "workspace-read"
   | "workspace-write"
   | "external-read"
@@ -56,6 +59,16 @@ export interface PermissionsService {
   normalizeMode(value?: string | undefined): PermissionMode;
   authorize(request: PermissionRequest): Promise<PermissionDecision>;
   assertWorkspacePath(workspace: string, path: string): string;
+}
+
+export function permissionEffectAccess(effect: PermissionEffect): WorkspaceAccess {
+  return effect === "public-read"
+    || effect === "private-read"
+    || effect === "global-operational-read"
+    || effect === "workspace-read"
+    || effect === "external-read"
+    ? "read"
+    : "write";
 }
 
 export const PERMISSIONS_CAPABILITY: Capability<PermissionsService> =

@@ -137,6 +137,39 @@ describe("action-aware permissions and trusted identities", () => {
       access: "read",
     })))).resolves.toEqual({ allowed: true, approvedBy: "policy" });
 
+    await expect(controller.trusted.runAsChannel(selector, () => controller.permissions.authorize(request(workspace, {
+      mode: "full",
+      access: "read",
+      action: {
+        id: "system.actions",
+        effect: "public-read",
+        resource: "system:actions",
+        network: false,
+      },
+    })))).resolves.toEqual({ allowed: true, approvedBy: "policy" });
+
+    await expect(controller.trusted.runAsChannel(selector, () => controller.permissions.authorize(request(workspace, {
+      mode: "full",
+      access: "read",
+      action: {
+        id: "sessions.private.read",
+        effect: "private-read",
+        resource: "sessions:owned",
+        network: false,
+      },
+    })))).resolves.toEqual({ allowed: true, approvedBy: "policy" });
+
+    await expect(controller.trusted.runAsChannel(selector, () => controller.permissions.authorize(request(workspace, {
+      mode: "full",
+      access: "read",
+      action: {
+        id: "audit.global.read",
+        effect: "global-operational-read",
+        resource: "audit:global",
+        network: false,
+      },
+    })))).rejects.toThrow(/read-only/);
+
     const forgedPrincipal = {
       id: "local:operator",
       kind: "local",

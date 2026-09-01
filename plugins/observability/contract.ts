@@ -92,6 +92,7 @@ export interface ObservabilityMetricSnapshot {
 }
 
 export interface ObservabilityStatus {
+  health: "healthy" | "degraded";
   logCount: number;
   spanCount: number;
   metricSeriesCount: number;
@@ -101,6 +102,11 @@ export interface ObservabilityStatus {
   droppedLogs: number;
   droppedSpans: number;
   droppedMetrics: number;
+  droppedMetricsByReason: Readonly<Record<string, number>>;
+  metricSeriesUtilization: number;
+  metricSeriesNearCapacity: boolean;
+  lastMetricDropAt?: string | undefined;
+  lastMetricDropReason?: string | undefined;
   /** Present when the implementation supports durable model-usage accounting. */
   usageCount?: number | undefined;
   maxUsageRows?: number | undefined;
