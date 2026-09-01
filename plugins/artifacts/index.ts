@@ -9,7 +9,16 @@ import { CHANNELS_TRUSTED_CAPABILITY } from "../channels/trusted-contract.js";
 import { EXECUTION_CAPABILITY } from "../execution/contract.js";
 import { SANDBOX_CAPABILITY } from "../sandbox/contract.js";
 import { SYSTEM_STATUS_CONTRIBUTION } from "../system/contract.js";
-import { ARTIFACTS_CAPABILITY, type ArtifactAttachment, type ArtifactChannelPrincipal, type ArtifactRecord, type ArtifactService, type PackageSourceInput, type PackageStage } from "./contract.js";
+import {
+  ARTIFACTS_CAPABILITY,
+  ARTIFACT_INPUT_ENRICHMENT_CONTRIBUTION,
+  type ArtifactAttachment,
+  type ArtifactChannelPrincipal,
+  type ArtifactRecord,
+  type ArtifactService,
+  type PackageSourceInput,
+  type PackageStage,
+} from "./contract.js";
 
 const DEFAULT_ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024;
 const DEFAULT_PACKAGE_MAX_BYTES = 25 * 1024 * 1024;
@@ -456,9 +465,26 @@ const artifactsPlugin: FridayPlugin = definePlugin({
           `mime=${record.mimeType ?? "unknown"}; size=${formatBytes(record.sizeBytes)}${extractedSummary}`,
           `readOnlyPath=${primaryPath}`,
         ].join("\n");
-        persistentContexts.push(manifest);
+        const enrichmentContexts: string[] = [];
+        const enrichmentPersistentContexts: string[] = [];
+        const enrichers = ctx.collect(ARTIFACT_INPUT_ENRICHMENT_CONTRIBUTION);
+        const enrichmentIds = new Set<string>();
+        for (const enricher of enrichers) {
+          if (enrichmentIds.has(enricher.id)) throw new Error(`Duplicate artifact input enrichment id: ${enricher.id}`);
+          enrichmentIds.add(enricher.id);
+          if (!enricher.supports(record)) continue;
+          const enriched = await enricher.enrich({
+            record,
+            read: () => service.consume(record.ref, async (bytes) => Uint8Array.from(bytes)),
+          });
+          if (!enriched) continue;
+          if (enriched.context?.trim()) enrichmentContexts.push(enriched.context.trim());
+          if (enriched.persistedContext?.trim()) enrichmentPersistentContexts.push(enriched.persistedContext.trim());
+        }
+        persistentContexts.push([manifest, ...enrichmentPersistentContexts].filter(Boolean).join("\n"));
         contexts.push([
           manifest,
+          ...enrichmentContexts,
           record.sizeBytes > SMALL_TEXT_PREVIEW_BYTES && isTextLike(record)
             ? "Large structured/text attachment: do not dump the whole file into model context. Inspect format/schema and a small sample first, then use IPython/Python or bounded shell queries to compute only the facts needed for the user's request. Keep parsed state in IPython when useful."
             : "",

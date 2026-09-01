@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -182,6 +182,32 @@ export function checkWorkspacePackages(root = projectRoot) {
   return ordered;
 }
 
+export function findWorkspaceNodeModules(root = projectRoot) {
+  return Object.freeze(checkWorkspacePackages(root)
+    .map((workspace) => ({
+      name: workspace.name,
+      relativePath: `${workspace.relativePath}/node_modules`,
+      path: resolve(workspace.path, "node_modules"),
+    }))
+    .filter((entry) => existsSync(entry.path)));
+}
+
+export function checkWorkspaceNodeModules(root = projectRoot) {
+  const localInstalls = findWorkspaceNodeModules(root);
+  if (localInstalls.length === 0) return localInstalls;
+  const paths = localInstalls.map((entry) => `  - ${entry.relativePath}`).join("\n");
+  throw new Error(
+    `Workspace-local node_modules directories are not allowed:\n${paths}\n` +
+    "Run `npm run clean:workspace-node-modules`, then install dependencies once from the repository root with `npm ci`.",
+  );
+}
+
+export function cleanWorkspaceNodeModules(root = projectRoot) {
+  const localInstalls = findWorkspaceNodeModules(root);
+  for (const entry of localInstalls) rmSync(entry.path, { recursive: true, force: true });
+  return localInstalls;
+}
+
 function runScript(script) {
   const ordered = checkWorkspacePackages();
   let count = 0;
@@ -216,11 +242,26 @@ function main() {
     }
     return;
   }
+  if (command === "check-node-modules") {
+    checkWorkspaceNodeModules();
+    process.stdout.write("Workspace node_modules check: PASS (root-hoisted install only)\n");
+    return;
+  }
+  if (command === "clean-node-modules") {
+    const removed = cleanWorkspaceNodeModules();
+    if (removed.length === 0) {
+      process.stdout.write("Workspace node_modules cleanup: nothing to remove\n");
+      return;
+    }
+    for (const entry of removed) process.stdout.write(`Removed ${entry.relativePath}\n`);
+    process.stdout.write(`Workspace node_modules cleanup: PASS (${removed.length} removed)\n`);
+    return;
+  }
   if (command === "build" || command === "test") {
     runScript(command);
     return;
   }
-  throw new Error("Usage: node scripts/workspace-packages.mjs <check|list|build|test> [--json]");
+  throw new Error("Usage: node scripts/workspace-packages.mjs <check|list|check-node-modules|clean-node-modules|build|test> [--json]");
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {

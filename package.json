@@ -20,7 +20,7 @@
     "build:workspaces": "node scripts/workspace-packages.mjs build",
     "test:workspaces": "npm run build:workspaces && node scripts/workspace-packages.mjs test",
     "verify": "npm run check:architecture && npm run check:packaging && tsc --noEmit && npm run check:silent-failures && npm run check:models && vitest run --config vitest.config.ts && node scripts/workspace-packages.mjs test",
-    "check:packaging": "node scripts/workspace-packages.mjs check && node scripts/binary-assets.mjs check",
+    "check:packaging": "node scripts/workspace-packages.mjs check && node scripts/workspace-packages.mjs check-node-modules && node scripts/binary-assets.mjs check",
     "build:sandbox-image": "node scripts/build-sandbox-image.mjs",
     "setup:execution-python": "npm run setup:python --workspace @friday/execution",
     "setup:whatsapp": "npm run setup:whatsapp --workspace @friday/channels",
@@ -32,7 +32,9 @@
     "generate-models": "node --experimental-strip-types scripts/generate-models.ts",
     "check:models": "node --experimental-strip-types scripts/generate-models.ts --check",
     "check:architecture": "node scripts/check-plugin-boundaries.mjs && node scripts/generate-builtin-plugins.mjs --check",
-    "generate:builtin-plugins": "node scripts/generate-builtin-plugins.mjs"
+    "generate:builtin-plugins": "node scripts/generate-builtin-plugins.mjs",
+    "clean:workspace-node-modules": "node scripts/workspace-packages.mjs clean-node-modules",
+    "check:workspace-node-modules": "node scripts/workspace-packages.mjs check-node-modules"
   },
   "dependencies": {
     "@friday/operational-errors": "0.0.1"

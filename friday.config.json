@@ -38,6 +38,7 @@
     "./plugins/tools/index.ts",
     "./plugins/turn-loop/index.ts",
     "./plugins/vault/index.ts",
+    "./plugins/voice/index.ts",
     "./plugins/webhooks/index.ts",
     "./plugins/worktrees/index.ts"
   ]

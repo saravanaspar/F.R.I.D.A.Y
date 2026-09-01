@@ -17,7 +17,7 @@ import systemPlugin from "../plugins/system/index.js";
 import turnLoopPlugin from "../plugins/turn-loop/index.js";
 import { getPluginManifest } from "../plugins/capabilities/protocol.js";
 
-const implementationPluginNames = ["session-resources", "sessions", "memory", "vault", "channels", "execution", "lifecycle", "evaluation", "worktrees", "generations", "self-improvement", "model", "refinement", "compaction", "autonomy", "subagents", "rlm", "prompts", "auth", "mcp", "agent", "tools", "skills"] as const;
+const implementationPluginNames = ["session-resources", "sessions", "memory", "vault", "channels", "execution", "lifecycle", "evaluation", "worktrees", "generations", "self-improvement", "model", "refinement", "compaction", "autonomy", "subagents", "rlm", "prompts", "auth", "mcp", "agent", "tools", "skills", "voice"] as const;
 const forbiddenSiblingPackageImport = /(?:from|import\()\s*["']@friday\/(?!operational-errors(?:["'/]))/;
 
 async function sourceFiles(directory: string): Promise<string[]> {
@@ -104,6 +104,22 @@ describe("plugin boundaries", () => {
     const observability = await readFile(resolve("plugins/observability/index.ts"), "utf8");
     expect(observability).toContain('installOperationalErrorSink');
     expect(observability).toContain('@friday/operational-errors');
+  });
+
+  it("keeps Voice behind generic artifact enrichment instead of coupling Channels or Turn Loop to speech providers", async () => {
+    const voice = await readFile(resolve("plugins/voice/index.ts"), "utf8");
+    expect(voice).toContain("ARTIFACT_INPUT_ENRICHMENT_CONTRIBUTION");
+    expect(voice).toContain("VOICE_CAPABILITY");
+    expect(voice).not.toMatch(/(?:from|import\()\s*["']\.\.\/channels\//);
+    expect(voice).not.toMatch(/(?:from|import\()\s*["']\.\.\/turn-loop\//);
+
+    const artifactsContract = await readFile(resolve("plugins/artifacts/contract.ts"), "utf8");
+    expect(artifactsContract).toContain('defineContribution<ArtifactInputEnricher>("artifact.input-enrichment")');
+
+    const channels = await readFile(resolve("plugins/channels/index.ts"), "utf8");
+    const turnLoop = await readFile(resolve("plugins/turn-loop/index.ts"), "utf8");
+    expect(channels).not.toMatch(/(?:openai|deepgram|elevenlabs).*transcri/i);
+    expect(turnLoop).not.toMatch(/(?:openai|deepgram|elevenlabs).*transcri/i);
   });
 
   it("uses plain subsystem names instead of -runtime plugin identities", async () => {

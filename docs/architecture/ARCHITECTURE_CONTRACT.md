@@ -49,8 +49,8 @@ and at least one ingress channel with one explicitly confirmed exact operator
 identity. `allowAll` transport admission never implies operator authority. Safe
 defaults use the main model for routing and `ask` permission mode. Rerunning setup
 may collect and persist bounded non-secret runtime defaults and perform explicitly
-approved host provisioning such as building the approved local sandbox image.
-Secrets remain Vault-owned.
+approved host provisioning such as building the approved local sandbox image or
+preflighting optional Voice STT/TTS providers. Secrets remain Vault-owned.
 
 Setup must not load the runtime plugin graph, expose a dynamic command
 registry, dispatch plugin operations, or become a second orchestration surface.
@@ -149,6 +149,8 @@ implementation. Execution behavior is selected from `turn.executor`
 contributions. Therefore a new transport such as Voice can publish the existing
 ingress contract, and a new execution profile can contribute an executor,
 without editing Turn Loop, host bootstrap, or unrelated plugins.
+
+Attachment intake remains Artifacts-owned. Optional processors such as Voice STT contribute through the generic `artifact.input-enrichment` seam after Artifacts has persisted the attachment, so a transport does not download the same media twice and Turn Loop does not acquire media-specific branches. Enrichment output is bounded host context over untrusted user content and may be persisted with the Session to avoid repeating external processing after restart.
 
 Routing owns WHERE/HOW classification only. Turn Loop must not embed
 Scheduler/System policy or transport-specific branches.

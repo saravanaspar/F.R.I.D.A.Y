@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { runOnboarding } from "./onboarding.js";
 import { runOnboardingCli } from "./cli.js";
 import { getFridayHome, readRuntimeSettings, updateRuntimeSettings } from "../plugins/runtime-settings/runtime-env.js";
+import { runVoiceSetup } from "./voice-setup.js";
 
 function bundledRoot(): string | undefined {
   const value = process.env.FRIDAY_BUNDLED_ROOT?.trim();
@@ -117,6 +118,7 @@ function setupHelp(): void {
     "  friday setup execution-python   Provision the private IPython kernel environment",
     "  friday setup sandbox            Build the approved rootless Podman sandbox image",
     "  friday setup whatsapp           Install the optional WhatsApp bridge dependencies",
+    "  friday setup voice              Configure and verify speech-to-text / text-to-speech providers",
     "  friday setup self-repository <path>  Save the canonical FRIDAY source checkout for self-improvement",
     "  friday setup --help",
     "",
@@ -164,6 +166,7 @@ export async function runSetupCli(args: readonly string[]): Promise<void> {
   if (rest.length > 0) throw new Error(`Unexpected setup arguments: ${rest.join(" ")}`);
   if (component === "execution-python") return setupExecutionPython();
   if (component === "whatsapp") return setupWhatsApp();
+  if (component === "voice") return runVoiceSetup({ home: getFridayHome(process.env) }).then(() => undefined);
   if (component === "sandbox") return setupSandbox();
   throw new Error(`Unknown setup component: ${component}. Run \`friday setup --help\`.`);
 }

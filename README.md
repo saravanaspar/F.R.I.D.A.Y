@@ -46,6 +46,7 @@ You can talk to the same assistant from a configured messaging channel, give it 
 | Long-running work | Runs persistent session jobs without forcing one conversation to wait for another task. |
 | Coding and automation | Uses execution tools, files, processes, sandboxes, integrations, and model-driven workflows. |
 | Multi-channel access | Receives and replies through Telegram, Discord, Slack, WhatsApp, Signal, Email, Teams, Google Chat, and SMS/Twilio. |
+| Voice | Optional speech-to-text and text-to-speech through OpenAI, Deepgram STT, or ElevenLabs TTS; audio transcripts enter the same trusted Turn Loop as text. |
 | Scheduling | Stores durable one-shot and recurring schedules in the user's configured IANA timezone. |
 | Memory | Keeps bounded preferences, habits, and graph-like relationships without stuffing the full history into every prompt. |
 | Skills | Installs and creates reusable skills that can be surfaced to the agent when relevant. |
@@ -161,6 +162,7 @@ friday setup sandbox
 friday setup execution-python
 friday setup self-repository /path/to/F.R.I.D.A.Y
 friday setup whatsapp
+friday setup voice
 friday setup --help
 ```
 
@@ -176,6 +178,7 @@ The core assistant does not silently install privileged host software. Enable on
 | Rootless coding sandbox | Rootless Podman | Build the local image with `friday setup sandbox`. Sandbox internet is blocked by default and network-bearing commands require an explicit request/permission approval. |
 | Self-improvement from source | Git + npm + a clean F.R.I.D.A.Y checkout | Save the canonical checkout with `friday setup self-repository /path/to/F.R.I.D.A.Y`. Release-binary self-improvement builds, verifies, stages, and hands off to a new host-native binary before activation. |
 | WhatsApp bridge | npm/Node tooling | Provision bridge dependencies with `friday setup whatsapp`. |
+| Voice | Provider API access | Configure and preflight STT/TTS with `friday setup voice`. OpenAI reuses the canonical model-provider Vault credential; Deepgram and ElevenLabs keys are stored in Voice-owned Vault refs. |
 
 Run `friday doctor` at any time for a sectioned installation, configuration, security, tooling, and recovery report. Every actionable warning/error includes a one-line repair guide. Doctor is non-interactive by default, does not make outbound network calls, and never reads plaintext Vault secrets. Use `friday doctor --fix` only when you want guided, confirmed repairs for deterministic fixes, or `friday doctor --json` for machine-readable diagnostics.
 
@@ -200,6 +203,8 @@ Network channels default toward explicit identity/access configuration. Protecte
 Email identity is derived from the parsed `From` address; F.R.I.D.A.Y does not currently evaluate mailbox `Authentication-Results`. Grant privileged Email authority only when the receiving mailbox or upstream gateway reliably enforces anti-spoofing policy.
 
 The `friday` runtime does not read terminal conversation input and registers no CLI channel. The command line is reserved for setup/onboarding compatibility, doctor, and bounded stopped-runtime maintenance.
+
+Voice is an optional plugin, not a second conversational runtime. `friday setup voice` configures provider/model/voice choices and verifies them with a tiny probe. Audio attachments are persisted by Artifacts once, then the Voice plugin enriches them with a bounded STT transcript marked as untrusted user content. TTS is exposed through the typed Voice capability for future mobile/voice transports; provider keys never belong on the mobile client.
 
 ## How it fits together
 

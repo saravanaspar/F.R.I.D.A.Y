@@ -54,7 +54,8 @@ src/runtime.ts
                     +-- vault
                     +-- events ----------> observability + alerts
                     +-- channels --------> protected interactions + turn.ingress
-                    +-- artifacts -------> safe attachment/package intake
+                    +-- artifacts -------> safe attachment/package intake + enrichment seam
+                    +-- voice -----------> STT/TTS capability + audio artifact enrichment
                     +-- worktrees
                     +-- generations
                     +-- scheduler -------> turn.executor + scheduler.action
@@ -133,6 +134,7 @@ packages must not import sibling FRIDAY runtime packages directly.
 - `tools` - coding-tool schemas and behavior for bash, edit and IPython; the FRIDAY adapter composes permissions and sandbox capabilities around all model-execution tools while low-level process/kernel transport remains delegated to execution
 - `skills` - skill discovery, frontmatter validation, source/collision tracking, Python-skill metadata, skill-block parsing and explicit `/skill:` expansion. It can inspect/install user-provided URL or attachment packages through Artifacts after separate network-inspection and mutation authorization, atomically maintains the private user Skills root, and publishes a revision so cached Agent sessions rebuild when installed skills change; prompt composition and Python environment preparation remain outside this plugin
 - `model` - model catalog, provider registry, streaming, reasoning, tool-call transport, token/cost handling and provider protocol behavior. It owns provider cache semantics, request-local stable-prefix breakpoints, session cache keys/retention and content-free request telemetry (duration, TTFT and cache usage); prompt text remains owned by `prompts`.
+- `voice` - optional speech input/output capability. The implementation package owns provider-neutral STT/TTS mechanics plus OpenAI STT/TTS, Deepgram STT and ElevenLabs TTS adapters. Non-secret provider/model/voice choices live in private Voice settings while credentials stay in Vault; OpenAI reuses the canonical model-provider credential. Voice contributes an Artifacts input enrichment for audio so the attachment is ingested once, transcribed into bounded untrusted-user context, and persisted with the session for restart without repeat transcription. TTS remains a typed capability for transports such as the future mobile companion rather than a transport-specific branch in Turn Loop or Channels.
 - `refinement` - model-driven continual-state proposals, validation, automatic review and conflict-safe Memory application. Conversational apply/rollback is two-stage: show the proposed persistent edits, authorize, apply, then persist bounded full-result history so later rollback remains possible; scheduling remains outside this plugin
 - `compaction` - context-token thresholds, recent-context cut points, split-turn handling, continuation summaries and abandoned-branch summaries; model completion and session persistence are consumed through injected ports
 - `autonomy` - autonomous objective workflow plus its generic continuation policy. It contributes the bounded `autonomy.run` System action and creates the Agent/session/tool composition for an objective, enforces turn/token/time budgets, runs deterministic quality gates, retries failed gates with bounded evidence and requires gate success rather than assistant prose as completion. It does not own candidate promotion, generation mutation or restart policy
@@ -144,8 +146,6 @@ packages must not import sibling FRIDAY runtime packages directly.
 - `mcp` - remote MCP client and external-service operation boundary. It ships built-in Linear and Notion endpoints plus persistent custom server metadata, speaks bounded Streamable HTTP with 2026 stateless negotiation plus definitive legacy fallback/session recovery, discovers/lists/calls remote tools, and keeps bearer/OAuth credentials behind opaque Vault refs. OAuth credentials are encrypted by Vault and refreshed callback-scoped; ordinary MCP status never exposes credential refs or token material. Every operation is mapped to a stable action-aware Permissions request (`mcp.login`, `mcp.list-tools`, or `mcp.call-tool`); tool calls remain conservatively `external-write` because remote annotations are not trusted to reduce authority. Successful calls publish bounded Events containing only server/tool/error metadata. The composition plugin contributes safe Agent tools for server metadata, tool discovery and tool invocation. MCP management/status is exposed through bounded `system.action`/`system.status` contributions; OAuth/login and credential refs remain trusted host APIs behind those permission-gated operations. MCP never invokes Agent or depends on Turn Loop implementation/runtime capability; it imports only the generic Turn Loop contribution contract and owns neither routing nor scheduling.
 
 ## Planned plugin boundaries
-
-- `voice` - speech input/output
 
 Subsystems stay separate when independently replaceable, reusable, or a meaningful
 safety boundary. Protocol internals and orchestration that exist only for one

@@ -38,6 +38,7 @@ import system from "../plugins/system/index.js";
 import tools from "../plugins/tools/index.js";
 import turnLoop from "../plugins/turn-loop/index.js";
 import vault from "../plugins/vault/index.js";
+import voice from "../plugins/voice/index.js";
 import webhooks from "../plugins/webhooks/index.js";
 import worktrees from "../plugins/worktrees/index.js";
 
@@ -81,6 +82,7 @@ export const BUILTIN_PLUGINS: ReadonlyMap<string, FridayPlugin> = new Map([
   ["./plugins/tools/index.ts", tools],
   ["./plugins/turn-loop/index.ts", turnLoop],
   ["./plugins/vault/index.ts", vault],
+  ["./plugins/voice/index.ts", voice],
   ["./plugins/webhooks/index.ts", webhooks],
   ["./plugins/worktrees/index.ts", worktrees],
 ]);

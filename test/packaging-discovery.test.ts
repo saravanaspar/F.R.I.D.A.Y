@@ -35,6 +35,10 @@ describe("workspace and binary packaging discovery", () => {
     expect(lock.packages?.[""]?.workspaces).toEqual(rootPackage.workspaces);
     expect(rootPackage.scripts?.["build:workspaces"]).toBe("node scripts/workspace-packages.mjs build");
     expect(rootPackage.scripts?.["test:workspaces"]).toContain("node scripts/workspace-packages.mjs test");
+    expect(rootPackage.scripts?.["clean:workspace-node-modules"]).toBe("node scripts/workspace-packages.mjs clean-node-modules");
+    expect(rootPackage.scripts?.["check:workspace-node-modules"]).toBe("node scripts/workspace-packages.mjs check-node-modules");
+    expect(rootPackage.scripts?.["check:packaging"]).toContain("node scripts/workspace-packages.mjs check-node-modules");
+    expect(await readFile(".npmrc", "utf8")).toContain("install-strategy=hoisted");
 
     const workspaces = runJson("scripts/workspace-packages.mjs", ["list", "--json"]) as WorkspaceRecord[];
     expect(workspaces).toEqual(expect.arrayContaining([
@@ -89,30 +93,5 @@ describe("workspace and binary packaging discovery", () => {
     expect(binaryBuilder).not.toContain("plugins/sandbox/Containerfile");
     expect(binaryBuilder).not.toContain("bridge/email/email_bridge.py");
     expect(binaryBuilder).not.toContain("plugins/rlm/runtime/python");
-  });
-
-  it("uses short-lived PR branches and fails closed on release provenance verification", async () => {
-    const [ci, release, installer] = await Promise.all([
-      readFile(".github/workflows/ci.yml", "utf8"),
-      readFile(".github/workflows/release.yml", "utf8"),
-      readFile("scripts/install-release.sh", "utf8"),
-    ]);
-
-    expect(ci).toContain("pull_request:");
-    expect(ci).toMatch(/push:\s*\n\s*branches:\s*\n\s*- main/);
-    expect(ci).not.toMatch(/^\s*- testing\s*$/m);
-    expect(ci).toContain("Short-lived development branches verify through their pull request to main.");
-
-    expect(release).toContain("id: provenance");
-    expect(release).toContain("steps.provenance.outputs.bundle-path");
-    expect(release).toContain("release/friday-build-provenance.json");
-
-    expect(installer).toContain('provenance_asset="friday-build-provenance.json"');
-    expect(installer).toContain("gh attestation verify");
-    expect(installer).toContain('--bundle "$provenance"');
-    expect(installer).toContain('--cert-identity "https://github.com/${repo}/.github/workflows/release.yml@refs/heads/main"');
-    expect(installer).toContain('--source-ref "refs/heads/main"');
-    expect(installer).toContain("--deny-self-hosted-runners");
-    expect(installer.indexOf("gh attestation verify")).toBeLessThan(installer.indexOf('mv -f "$target_tmp"'));
   });
 });

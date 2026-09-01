@@ -1,5 +1,5 @@
-import type { Capability } from "../capabilities/protocol.js";
-import { defineCapability } from "../capabilities/protocol.js";
+import type { Capability, Contribution } from "../capabilities/protocol.js";
+import { defineCapability, defineContribution } from "../capabilities/protocol.js";
 export interface ArtifactChannelPrincipal {
   readonly authority: "local" | "channel";
   readonly channel: string;
@@ -56,6 +56,30 @@ export interface ArtifactService {
   /** Safely materialize a user-supplied GitHub repository or ZIP source into a private temporary tree. */
   stagePackageSource(input: PackageSourceInput): Promise<PackageStage>;
 }
+
+
+export interface ArtifactInputEnrichmentResult {
+  /** Host-authored context derived from the persisted attachment. The underlying content remains untrusted user data. */
+  readonly context?: string | undefined;
+  /** Bounded context safe to persist in a durable session so restart does not repeat external processing. */
+  readonly persistedContext?: string | undefined;
+}
+
+export interface ArtifactInputEnrichmentContext {
+  readonly record: ArtifactRecord;
+  /** Read a fresh bounded copy of the persisted attachment bytes. */
+  read(): Promise<Uint8Array>;
+}
+
+/** Optional attachment processors such as Voice STT enrich the generic Artifacts input path without transport coupling. */
+export interface ArtifactInputEnricher {
+  readonly id: string;
+  supports(record: ArtifactRecord): boolean;
+  enrich(context: ArtifactInputEnrichmentContext): Promise<ArtifactInputEnrichmentResult | undefined>;
+}
+
+export const ARTIFACT_INPUT_ENRICHMENT_CONTRIBUTION: Contribution<ArtifactInputEnricher> =
+  defineContribution<ArtifactInputEnricher>("artifact.input-enrichment");
 
 export const ARTIFACTS_CAPABILITY: Capability<ArtifactService> =
   defineCapability<ArtifactService>("artifacts");
