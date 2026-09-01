@@ -10,6 +10,7 @@ import {
   type SystemActionContribution,
 } from "./contract.js";
 import {
+  createSystemActionInputValidator,
   createSystemActionsAction,
   createSystemModelPlanner,
   createSystemModelPresenter,
@@ -22,6 +23,7 @@ const systemPlugin: FridayPlugin = definePlugin({
   requires: [MODEL_CAPABILITY, PERMISSIONS_CAPABILITY],
   optional: [MODEL_CREDENTIALS_CAPABILITY],
 }, (ctx) => {
+  const models = ctx.services.require(MODEL_CAPABILITY);
   const contributedActions = (): readonly SystemActionContribution[] => ctx.collect(SYSTEM_ACTION_CONTRIBUTION);
   const statusAction = createSystemStatusAction(() => ctx.collect(SYSTEM_STATUS_CONTRIBUTION));
   const actionsAction = createSystemActionsAction(() => [statusAction, ...contributedActions()]);
@@ -30,14 +32,16 @@ const systemPlugin: FridayPlugin = definePlugin({
   ctx.contribute(TURN_EXECUTOR_CONTRIBUTION, createSystemTurnExecutor({
     permissions: ctx.services.require(PERMISSIONS_CAPABILITY),
     actions: allActions,
-    planner: createSystemModelPlanner(ctx.services.require(MODEL_CAPABILITY), () => ctx.services.optional(MODEL_CREDENTIALS_CAPABILITY)),
-    presenter: createSystemModelPresenter(ctx.services.require(MODEL_CAPABILITY), () => ctx.services.optional(MODEL_CREDENTIALS_CAPABILITY)),
+    planner: createSystemModelPlanner(models, () => ctx.services.optional(MODEL_CREDENTIALS_CAPABILITY)),
+    validateInput: createSystemActionInputValidator(models),
+    presenter: createSystemModelPresenter(models, () => ctx.services.optional(MODEL_CREDENTIALS_CAPABILITY)),
   }));
 });
 
 export default systemPlugin;
 export * from "./contract.js";
 export {
+  createSystemActionInputValidator,
   createSystemActionsAction,
   createSystemModelPlanner,
   createSystemModelPresenter,

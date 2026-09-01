@@ -83,7 +83,7 @@ curl -fsSL https://raw.githubusercontent.com/saravanaspar/F.R.I.D.A.Y/main/scrip
   | sh -s -- saravanaspar/F.R.I.D.A.Y
 ```
 
-The installer supports **Linux and macOS** on x64/arm64, downloads the matching GitHub Release asset into a private unpredictable temporary directory, verifies its SHA-256 checksum, and installs `friday` into `~/.local/bin` by default.
+The installer supports **Linux and macOS** on x64/arm64, downloads the matching GitHub Release asset into a private unpredictable temporary directory, verifies its SHA-256 checksum **and GitHub build-provenance attestation**, and installs `friday` into `~/.local/bin` by default. A recent GitHub CLI (`gh`) with `gh attestation verify` support is required; the installer fails closed if provenance cannot be verified.
 
 Then run:
 
@@ -387,12 +387,17 @@ git pull --ff-only origin main
 # Enter the desired release version, for example: 0.1.0
 ```
 
-Release builds currently target Linux x64/arm64 and macOS x64/arm64 and use the pinned Node.js 22.22.2 SEA-compatible runtime. Every published binary embeds the exact release tag version, is accompanied by its SHA-256 checksum, and is published alongside `SHA256SUMS` and an SPDX SBOM. The workflow also emits GitHub build-provenance attestations for the four binaries and SBOM. Windows release binaries are deliberately disabled until F.R.I.D.A.Y has native Windows ACL enforcement for private state and a Windows-specific security test matrix.
+Release builds currently target Linux x64/arm64 and macOS x64/arm64 and use the pinned Node.js 22.22.2 SEA-compatible runtime. Every published binary embeds the exact release tag version, is accompanied by its SHA-256 checksum, and is published alongside `SHA256SUMS`, an SPDX SBOM, and an offline-verifiable `friday-build-provenance.json` Sigstore bundle. The installer verifies that provenance against this repository's `release.yml` workflow on `main` before replacing the installed binary. Windows release binaries are deliberately disabled until F.R.I.D.A.Y has native Windows ACL enforcement for private state and a Windows-specific security test matrix.
 
-With a recent GitHub CLI, a downloaded release artifact can additionally be checked against its repository provenance:
+The installer performs this check automatically. A downloaded release artifact can also be checked manually against the published bundle:
 
 ```bash
-gh attestation verify ./friday-linux-x64 --repo saravanaspar/F.R.I.D.A.Y
+gh attestation verify ./friday-linux-x64 \
+  --repo saravanaspar/F.R.I.D.A.Y \
+  --bundle ./friday-build-provenance.json \
+  --cert-identity https://github.com/saravanaspar/F.R.I.D.A.Y/.github/workflows/release.yml@refs/heads/main \
+  --source-ref refs/heads/main \
+  --deny-self-hosted-runners
 ```
 
 ## Development

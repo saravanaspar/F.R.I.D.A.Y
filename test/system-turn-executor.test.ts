@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
+import * as modelApi from "@friday/model";
 import type { ModelService } from "../plugins/model/contract.js";
 import type { PermissionsService } from "../plugins/permissions/contract.js";
 import type { SystemActionContribution } from "../plugins/system/contract.js";
 import {
+  createSystemActionInputValidator,
   createSystemActionsAction,
   createSystemModelPlanner,
   createSystemStatusAction,
   createSystemTurnExecutor,
 } from "../plugins/system/executor.js";
 import type { TurnExecutionContext } from "../plugins/turn-loop/contract.js";
+
+const validateInput = createSystemActionInputValidator({ api: modelApi });
 
 function context(text = "change a setting"): TurnExecutionContext {
   return {
@@ -128,6 +132,7 @@ describe("system turn executor", () => {
       permissions: permissions(authorized),
       actions: () => [action],
       planner: async () => ({ actionId: "demo.write", input: { value: "on" } }),
+      validateInput,
     });
 
     expect(executor.canHandle(context().decision)).toBe(true);
@@ -169,6 +174,7 @@ describe("system turn executor", () => {
     const raw = createSystemTurnExecutor({
       permissions: permissions([]), actions: () => [logs],
       planner: async () => ({ actionId: "observability.logs", input: { limit: 50 }, presentation: "raw" }),
+      validateInput,
       presenter: async () => { throw new Error("raw log request must not invoke presenter"); },
     });
     const rawResult = await raw.execute(context("send me the last 50 logs"));
@@ -180,6 +186,7 @@ describe("system turn executor", () => {
     const analyzed = createSystemTurnExecutor({
       permissions: permissions([]), actions: () => [logs],
       planner: async () => ({ actionId: "observability.logs", input: { limit: 50 }, presentation: "analyze" }),
+      validateInput,
       presenter: async (request) => {
         expect((request.output as unknown[])).toHaveLength(50);
         return "The 50 sanitized logs show one recurring routing warning.";
@@ -204,6 +211,7 @@ describe("system turn executor", () => {
       permissions: permissions([]),
       actions: () => [base],
       planner: async () => ({ actionId: "missing", input: {} }),
+      validateInput,
     });
     await expect(unknown.execute(context())).rejects.toThrow("unavailable action");
 
@@ -211,6 +219,7 @@ describe("system turn executor", () => {
       permissions: permissions([]),
       actions: () => [base, base],
       planner: async () => ({ actionId: "same", input: {} }),
+      validateInput,
     });
     await expect(duplicate.execute(context())).rejects.toThrow("Duplicate system action contribution");
 
@@ -218,6 +227,7 @@ describe("system turn executor", () => {
       permissions: permissions([]),
       actions: () => [{ ...base, permission: undefined } as unknown as SystemActionContribution],
       planner: async () => ({ actionId: "same", input: {} }),
+      validateInput,
     });
     await expect(missingPermission.execute(context())).rejects.toThrow("no explicit permission declaration");
 
@@ -225,6 +235,7 @@ describe("system turn executor", () => {
       permissions: permissions([]),
       actions: () => [{ ...base, permission: () => undefined } as unknown as SystemActionContribution],
       planner: async () => ({ actionId: "same", input: {} }),
+      validateInput,
     });
     await expect(emptyPermission.execute(context())).rejects.toThrow("returned no permission declaration");
   });
@@ -246,6 +257,7 @@ describe("system turn executor", () => {
       permissions: permissions([]),
       actions: () => [action],
       planner: async () => ({ actionId: "restart", input: {}, presentation: "analyze" }),
+      validateInput,
       presenter: async () => { throw new Error("presentation failed"); },
     });
     await expect(presentationFailure.execute(context())).rejects.toThrow("presentation failed");
@@ -255,10 +267,56 @@ describe("system turn executor", () => {
       permissions: permissions([]),
       actions: () => [action],
       planner: async () => ({ actionId: "restart", input: {}, presentation: "raw" }),
+      validateInput,
     });
     const result = await downstreamFailure.execute(context());
     await result.afterFailure?.(new Error("reply failed"));
     await result.afterFailure?.(new Error("published twice"));
     expect(failures).toEqual(["presentation failed", "reply failed"]);
+  });
+
+  it("validates and canonicalizes system action input before permission or execution", async () => {
+    const authorized: string[] = [];
+    const executed: unknown[] = [];
+    const action: SystemActionContribution = {
+      id: "demo.validated",
+      label: "Validated demo",
+      description: "Require one bounded integer.",
+      parameters: {
+        type: "object",
+        properties: { count: { type: "integer", minimum: 1, maximum: 10 } },
+        required: ["count"],
+        additionalProperties: false,
+      },
+      permission(input) {
+        authorized.push(`permission:${String(input.count)}`);
+        return { id: "demo.validated", effect: "system-write", resource: `count:${String(input.count)}`, network: false };
+      },
+      execute(input) {
+        executed.push(input);
+        return { count: input.count };
+      },
+    };
+
+    const invalid = createSystemTurnExecutor({
+      permissions: permissions(authorized),
+      actions: () => [action],
+      planner: async () => ({ actionId: "demo.validated", input: { count: 2, injected: true } }),
+      validateInput,
+    });
+    await expect(invalid.execute(context())).rejects.toThrow(/Validation failed for tool "demo\.validated"/);
+    expect(authorized).toEqual([]);
+    expect(executed).toEqual([]);
+
+    const canonical = createSystemTurnExecutor({
+      permissions: permissions(authorized),
+      actions: () => [action],
+      planner: async () => ({ actionId: "demo.validated", input: { count: "3" } }),
+      validateInput,
+    });
+    await expect(canonical.execute(context())).resolves.toMatchObject({ metadata: { actionId: "demo.validated" } });
+    expect(authorized).toEqual(["permission:3", "demo.validated:count:3"]);
+    expect(executed).toEqual([{ count: 3 }]);
+    expect(Object.isFrozen(executed[0])).toBe(true);
   });
 });

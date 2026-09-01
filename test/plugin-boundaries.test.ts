@@ -954,6 +954,39 @@ describe("plugin boundaries", () => {
     expect(selfImprovementEntry).toContain('id: "self-improvement.run"');
     expect(selfImprovementEntry).not.toContain("registerCommand");
 
+    const runStart = selfImprovementEntry.indexOf('id: "self-improvement.run"');
+    const runPermission = selfImprovementEntry.indexOf("permission()", runStart);
+    const runParameters = selfImprovementEntry.slice(runStart, runPermission);
+    expect(runParameters).toContain('objective: { type: "string"');
+    for (const hostOwnedField of [
+      "repository:",
+      "provider:",
+      "model:",
+      "gates:",
+      "stateDir:",
+      "worktreeRoot:",
+      "permissionMode:",
+      "maxContinuations:",
+      "maxTurns:",
+      "maxTokens:",
+      "timeoutMs:",
+      "restartTimeoutMs:",
+      "takeoverTimeoutMs:",
+    ]) {
+      expect(runParameters, hostOwnedField).not.toContain(hostOwnedField);
+    }
+    expect(selfImprovementEntry.slice(runPermission, selfImprovementEntry.indexOf("ctx.contribute(AGENT_TOOL_CONTRIBUTION", runPermission)))
+      .toContain("const repository = configuredSelfRepository();");
+
+    const ensureMarker = 'ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {\n    id: "self-improvement.ensure-capability"';
+    const ensureStart = selfImprovementEntry.indexOf(ensureMarker);
+    const ensurePermission = selfImprovementEntry.indexOf("permission()", ensureStart);
+    const ensureParameters = selfImprovementEntry.slice(ensureStart, ensurePermission);
+    expect(ensureStart).toBeGreaterThanOrEqual(0);
+    expect(ensureParameters).not.toContain("repository:");
+    expect(selfImprovementEntry.slice(ensurePermission, selfImprovementEntry.indexOf('id: "self-improvement.status"', ensurePermission)))
+      .toContain("const repository = configuredSelfRepository();");
+
     const runtime = await readFile(resolve("src/runtime.ts"), "utf8");
     expect(runtime).toContain("activateConfiguredPlugins");
     expect(runtime).not.toMatch(/(?:from|import\()\s*["']\.\.\/plugins\//);

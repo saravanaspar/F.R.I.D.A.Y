@@ -264,6 +264,7 @@ jobs:
           (cd release && sha256sum "${expected[@]}" friday-sbom.spdx.json > SHA256SUMS)
 
       - name: Attest release binaries and SBOM
+        id: provenance
         uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
         with:
           subject-path: |
@@ -272,6 +273,16 @@ jobs:
             release/friday-darwin-x64
             release/friday-darwin-arm64
             release/friday-sbom.spdx.json
+
+      - name: Include offline-verifiable provenance bundle
+        shell: bash
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          test -s "$PROVENANCE_BUNDLE"
+          cp "$PROVENANCE_BUNDLE" release/friday-build-provenance.json
+          test -s release/friday-build-provenance.json
 
       - name: Create tag and publish release
         env:

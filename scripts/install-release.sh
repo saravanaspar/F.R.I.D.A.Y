@@ -31,13 +31,16 @@ esac
 
 asset="friday-${os}-${arch}"
 binary="friday"
+provenance_asset="friday-build-provenance.json"
 
 install_dir="${FRIDAY_INSTALL_DIR:-$HOME/.local/bin}"
 url="https://github.com/${repo}/releases/latest/download/${asset}"
+provenance_url="https://github.com/${repo}/releases/latest/download/${provenance_asset}"
 tmp_root="${TMPDIR:-/tmp}"
 tmp_dir="$(mktemp -d "${tmp_root%/}/friday-install.XXXXXXXX")"
 tmp="$tmp_dir/$binary"
 sum="$tmp_dir/${asset}.sha256"
+provenance="$tmp_dir/$provenance_asset"
 target_tmp=""
 cleanup() {
   [ -n "$target_tmp" ] && rm -f "$target_tmp" 2>/dev/null || true
@@ -47,9 +50,15 @@ trap cleanup EXIT HUP INT TERM
 
 mkdir -p "$install_dir"
 target_tmp="$(mktemp "${install_dir%/}/.friday-install.XXXXXXXX")"
+if ! command -v gh >/dev/null 2>&1; then
+  echo "GitHub CLI (gh) with artifact-attestation support is required to verify FRIDAY release provenance." >&2
+  echo "Install or upgrade gh, then run this installer again." >&2
+  exit 1
+fi
 echo "Installing FRIDAY from $url"
 curl -fL --proto '=https' --tlsv1.2 "$url" -o "$tmp"
 curl -fL --proto '=https' --tlsv1.2 "${url}.sha256" -o "$sum"
+curl -fL --proto '=https' --tlsv1.2 "$provenance_url" -o "$provenance"
 expected="$(awk 'NF { print $1; exit }' "$sum")"
 case "$expected" in
   ''|*[!0-9A-Fa-f]* ) echo "FRIDAY checksum file is invalid" >&2; exit 1 ;;
@@ -68,6 +77,15 @@ else
 fi
 if [ "$(printf '%s' "$expected" | tr 'A-F' 'a-f')" != "$(printf '%s' "$actual" | tr 'A-F' 'a-f')" ]; then
   echo "FRIDAY binary checksum verification failed" >&2
+  exit 1
+fi
+if ! gh attestation verify "$tmp" \
+  --repo "$repo" \
+  --bundle "$provenance" \
+  --cert-identity "https://github.com/${repo}/.github/workflows/release.yml@refs/heads/main" \
+  --source-ref "refs/heads/main" \
+  --deny-self-hosted-runners >/dev/null; then
+  echo "FRIDAY build provenance verification failed" >&2
   exit 1
 fi
 cat "$tmp" > "$target_tmp"

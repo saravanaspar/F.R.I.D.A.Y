@@ -46,10 +46,16 @@ export type SystemPresenter = (request: SystemPresenterRequest) => Promise<strin
 
 export type SystemTurnPlanner = (request: SystemPlannerRequest) => Promise<SystemTurnPlan>;
 
+export type SystemActionInputValidator = (
+  action: SystemActionContribution,
+  input: Readonly<SystemJsonObject>,
+) => Readonly<SystemJsonObject>;
+
 export interface SystemTurnExecutorOptions {
   readonly permissions: PermissionsService;
   readonly actions: () => readonly SystemActionContribution[];
   readonly planner: SystemTurnPlanner;
+  readonly validateInput: SystemActionInputValidator;
   readonly presenter?: SystemPresenter | undefined;
 }
 
@@ -78,6 +84,18 @@ function jsonObject(value: unknown, label: string): SystemJsonObject {
   if (!candidate) throw new Error(`${label} must be a JSON object`);
   assertJsonValue(candidate, label);
   return candidate as SystemJsonObject;
+}
+
+function freezeJsonValue<T extends SystemJsonValue>(value: T): T {
+  if (Array.isArray(value)) {
+    for (const entry of value) freezeJsonValue(entry);
+    return Object.freeze(value) as T;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const entry of Object.values(value)) freezeJsonValue(entry);
+    return Object.freeze(value) as T;
+  }
+  return value;
 }
 
 function nonEmptyString(value: unknown, label: string, max = 128): string {
@@ -211,6 +229,25 @@ export function createSystemModelPresenter(models: ModelService, credentials: ()
   };
 }
 
+export function createSystemActionInputValidator(models: ModelService): SystemActionInputValidator {
+  return (action, input) => {
+    const validated = models.api.validateToolArguments(
+      {
+        name: action.id,
+        description: action.description,
+        parameters: action.parameters as never,
+      },
+      {
+        type: "toolCall",
+        id: `system:${action.id}`,
+        name: action.id,
+        arguments: structuredClone(input) as Record<string, unknown>,
+      } as never,
+    );
+    return freezeJsonValue(jsonObject(validated, `system action ${action.id} input`));
+  };
+}
+
 function actionMap(actions: readonly SystemActionContribution[]): Map<string, SystemActionContribution> {
   const result = new Map<string, SystemActionContribution>();
   for (const action of actions) {
@@ -259,7 +296,8 @@ export function createSystemTurnExecutor(options: SystemTurnExecutorOptions): Tu
       });
       const action = actionMap(actions).get(plan.actionId);
       if (!action) throw new Error(`System plan selected an unavailable action: ${plan.actionId}`);
-      const permission = action.permission(plan.input);
+      const input = options.validateInput(action, plan.input);
+      const permission = action.permission(input);
       if (!permission || typeof permission !== "object") {
         throw new Error(`System action ${action.id} returned no permission declaration`);
       }
@@ -291,7 +329,7 @@ export function createSystemTurnExecutor(options: SystemTurnExecutorOptions): Tu
         }
       };
       try {
-        const output = await action.execute(plan.input, {
+        const output = await action.execute(input, {
           ...(context.signal === undefined ? {} : { signal: context.signal }),
           turn: context.turn,
           ...(context.jobId === undefined ? {} : { jobId: context.jobId }),

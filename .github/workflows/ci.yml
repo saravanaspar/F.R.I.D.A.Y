@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - testing
   pull_request:
     branches:
       - main
@@ -12,8 +11,8 @@ on:
 permissions:
   contents: read
 
-# A testing-branch push and its PR can target the same commit. Key concurrency by
-# commit so only one expensive verification run survives for that exact source.
+# Short-lived development branches verify through their pull request to main.
+# Key concurrency by commit so repeated PR updates replace stale verification runs.
 concurrency:
   group: ci-${{ github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: true

@@ -99,19 +99,6 @@ function systemPositiveInteger(input: Readonly<SystemJsonObject>, name: string):
   return value as number;
 }
 
-function systemGates(input: Readonly<SystemJsonObject>): readonly { id: string; command: string }[] | undefined {
-  const value = input.gates;
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > 32) throw new Error("gates must be an array with at most 32 commands");
-  return Object.freeze(value.map((entry, index) => {
-    if (typeof entry !== "string") throw new Error(`gates[${index}] must be a string`);
-    const command = entry.trim();
-    if (!command) throw new Error(`gates[${index}] must not be empty`);
-    if (command.length > 4_096) throw new Error(`gates[${index}] exceeds 4096 characters`);
-    return Object.freeze({ id: `gate-${index + 1}`, command });
-  }));
-}
-
 async function confirmRestartWithActiveWork(
   ctx: PluginContext,
   turn: import("../turn-loop/contract.js").InboundTurn,
@@ -437,54 +424,31 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
     id: "self-improvement.run",
     label: "Run self-improvement",
-    description: "Create, evaluate, promote, and hand off a bounded self-improvement candidate.",
+    description: "Create, evaluate, promote, and hand off a bounded candidate in the configured FRIDAY source repository using host-controlled safety settings.",
     parameters: Object.freeze({
       type: "object",
       properties: {
-        objective: { type: "string" },
-        repository: { type: "string" },
-        provider: { type: "string" },
-        model: { type: "string" },
-        gates: { type: "array", items: { type: "string" }, maxItems: 32 },
-        stateDir: { type: "string" },
-        worktreeRoot: { type: "string" },
-        maxContinuations: { type: "integer", minimum: 1 },
-        maxTurns: { type: "integer", minimum: 1 },
-        maxTokens: { type: "integer", minimum: 1 },
-        timeoutMs: { type: "integer", minimum: 1 },
-        restartTimeoutMs: { type: "integer", minimum: 1 },
-        takeoverTimeoutMs: { type: "integer", minimum: 1 },
-        permissionMode: { type: "string", enum: ["ask", "auto", "full"] },
+        objective: { type: "string", minLength: 1, maxLength: 8_192 },
       },
       required: ["objective"],
       additionalProperties: false,
     }),
     permission() {
+      const repository = configuredSelfRepository();
       return {
         id: "self-improvement.run",
         effect: "system-write",
-        resource: "self-improvement",
+        resource: `self-improvement:${repository}`,
         network: true,
       };
     },
     async execute(input, context) {
       const objective = systemString(input, "objective", { required: true, maximum: 8_192 })!;
-      const repository = systemString(input, "repository", { maximum: 4_096 }) ?? configuredSelfRepository();
-      const provider = systemString(input, "provider") ?? process.env.FRIDAY_MODEL_PROVIDER?.trim();
-      const model = systemString(input, "model") ?? process.env.FRIDAY_MODEL_ID?.trim();
+      const repository = configuredSelfRepository();
+      const provider = process.env.FRIDAY_MODEL_PROVIDER?.trim();
+      const model = process.env.FRIDAY_MODEL_ID?.trim();
       if (!provider || !model) throw new Error("self-improvement.run requires configured model provider and model id");
-      const permissionMode = permissions.normalizeMode(
-        systemString(input, "permissionMode", { maximum: 16 }) ?? process.env.FRIDAY_PERMISSION_MODE,
-      );
-      const stateDir = systemString(input, "stateDir", { maximum: 4_096 });
-      const worktreeRoot = systemString(input, "worktreeRoot", { maximum: 4_096 });
-      const gates = systemGates(input);
-      const maxContinuations = systemPositiveInteger(input, "maxContinuations");
-      const maxTurns = systemPositiveInteger(input, "maxTurns");
-      const maxTokens = systemPositiveInteger(input, "maxTokens");
-      const timeoutMs = systemPositiveInteger(input, "timeoutMs");
-      const restartTimeoutMs = systemPositiveInteger(input, "restartTimeoutMs");
-      const takeoverTimeoutMs = systemPositiveInteger(input, "takeoverTimeoutMs");
+      const permissionMode = permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE);
       const operation = new AbortController();
       const detachTurnAbort = forwardAbort(context.signal, operation);
       const channels = ctx.services.optional(CHANNELS_TRUSTED_CAPABILITY);
@@ -492,7 +456,7 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
         ? await channels.watchCancellation({
             principal: context.turn.principal,
             label: "self-improvement",
-            ttlMs: timeoutMs ?? 60 * 60_000,
+            ttlMs: 60 * 60_000,
           })
         : undefined;
       const detachChannelAbort = forwardAbort(cancellation?.signal, operation);
@@ -505,24 +469,13 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
           permissionMode,
           deferHandoff: true,
           signal: operation.signal,
-          ...(gates === undefined ? {} : { gates }),
-          ...(stateDir === undefined ? {} : { stateDir }),
-          ...(worktreeRoot === undefined ? {} : { worktreeRoot }),
-          ...(maxContinuations === undefined ? {} : { maxContinuations }),
-          ...(maxTurns === undefined ? {} : { maxTurns }),
-          ...(maxTokens === undefined ? {} : { maxTokens }),
-          ...(timeoutMs === undefined ? {} : { timeoutMs }),
-          ...(restartTimeoutMs === undefined ? {} : { restartTimeoutMs }),
-          ...(takeoverTimeoutMs === undefined ? {} : { takeoverTimeoutMs }),
         });
         context.deferAfterReply(async () => {
           await service.finalizeHandoff(result, {
-            ...(stateDir === undefined ? {} : { stateDir }),
-            ...(takeoverTimeoutMs === undefined ? {} : { takeoverTimeoutMs }),
             beforeHandoff: () => confirmRestartWithActiveWork(ctx, context.turn, context.jobId, "Self-improvement handoff"),
           });
           process.kill(process.pid, "SIGTERM");
-        }, handoffFinalizer(result, stateDir, takeoverTimeoutMs));
+        }, handoffFinalizer(result));
         return result;
       } finally {
         detachTurnAbort();
@@ -619,7 +572,7 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
               mode: permissionMode,
               workspace: repository,
               access: "write",
-              action: { id: "self-improvement.ensure-capability", effect: "system-write", resource: `capability:${feature}`, network: true },
+              action: { id: "self-improvement.ensure-capability", effect: "system-write", resource: `capability:${feature}@${repository}`, network: true },
               reason: `build missing reusable FRIDAY capability: ${feature}`,
             });
             const handle = await channels.watchCancellation({ principal: agentContext.turn!.principal, label: `building ${feature}` });
@@ -669,14 +622,22 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
     description: "Choose reuse, existing-plugin extension, MCP, distinct new plugin, or framework-neutral host placement. Generate code only after feasibility and explicit authorization.",
     parameters: Object.freeze({
       type: "object",
-      properties: { feature: { type: "string" }, objective: { type: "string" }, repository: { type: "string" } },
+      properties: {
+        feature: { type: "string", minLength: 1, maxLength: 240 },
+        objective: { type: "string", minLength: 1, maxLength: 8_192 },
+      },
       required: ["feature", "objective"],
       additionalProperties: false,
     }),
     permission() {
       // Feasibility is read-only. The implementation path performs a second,
       // explicit system-write/network authorization only after feasibility passes.
-      return { id: "self-improvement.feasibility", effect: "private-read", resource: "self-improvement:feasibility", network: false };
+      return {
+        id: "self-improvement.feasibility",
+        effect: "private-read",
+        resource: `self-improvement:feasibility:${configuredSelfRepository()}`,
+        network: false,
+      };
     },
     async execute(input, context) {
       const feature = systemString(input, "feature", { required: true, maximum: 240 })!;
@@ -686,7 +647,7 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
         requestedObjective,
         "Placement requirements: reuse an installed capability first; otherwise extend the closest owner; use MCP for external tool protocols; create a new plugin only for a distinct durable domain; use src/ only for framework-neutral host orchestration/lifecycle/security. Add deterministic feature/failure/security/unconfigured-startup/lifecycle and breaking-point tests; preserve architecture guards; never weaken unrelated gates; keep secrets in trusted credential/Vault/OAuth paths; and require explicit user authorization before code changes.",
       ].join("\n\n");
-      const repository = systemString(input, "repository", { maximum: 4_096 }) ?? configuredSelfRepository();
+      const repository = configuredSelfRepository();
       const provider = process.env.FRIDAY_MODEL_PROVIDER?.trim();
       const model = process.env.FRIDAY_MODEL_ID?.trim();
       if (!provider || !model) throw new Error("Capability feasibility analysis requires a configured main model");
@@ -738,7 +699,7 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
               mode: permissionMode,
               workspace: repository,
               access: "write",
-              action: { id: "self-improvement.ensure-capability", effect: "system-write", resource: `capability:${feature}`, network: true },
+              action: { id: "self-improvement.ensure-capability", effect: "system-write", resource: `capability:${feature}@${repository}`, network: true },
               reason: `build missing capability: ${feature}`,
             });
             const channels = ctx.services.optional(CHANNELS_TRUSTED_CAPABILITY);

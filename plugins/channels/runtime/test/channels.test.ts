@@ -874,7 +874,7 @@ describe("WhatsApp transport", () => {
     await transport.start((message) => { seen.push(message as ChannelInboundMessage); });
     try {
       const deadline = Date.now() + 2_000;
-      while (seen.length === 0 && Date.now() < deadline) {
+      while (seen.length < 2 && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
 
