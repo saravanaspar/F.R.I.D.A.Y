@@ -1,10 +1,13 @@
 import type { Capability } from "../capabilities/protocol.js";
 import { defineCapability } from "../capabilities/protocol.js";
 
-export type SubagentsModule = typeof import("@friday/subagents");
+type SubagentsRuntime = typeof import("@friday/subagents");
 
+/** Subagent creation, registry persistence, and model selection helpers. */
 export interface SubagentsService {
-  readonly api: SubagentsModule;
+  readonly SubagentManager: SubagentsRuntime["SubagentManager"];
+  readonly createSessionSubagentRegistryStore: SubagentsRuntime["createSessionSubagentRegistryStore"];
+  readonly findSubagentModelMatches: SubagentsRuntime["findSubagentModelMatches"];
 }
 
 export const SUBAGENTS_CAPABILITY: Capability<SubagentsService> =

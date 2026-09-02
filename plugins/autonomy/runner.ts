@@ -1,8 +1,7 @@
 import { homedir } from "node:os";
 import { reportOperationalError } from "@friday/operational-errors";
 import { join, resolve } from "node:path";
-import type { AgentEvent, AgentMessage, AgentTool, AssistantMessage } from "@friday/agent";
-import type { AgentService } from "../agent/contract.js";
+import type { AgentEvent, AgentMessage, AgentService, AgentTool, AssistantMessage } from "../agent/contract.js";
 import type { ModelCredentialService } from "../auth/contract.js";
 import type { ModelService } from "../model/contract.js";
 import type { PermissionMode } from "../permissions/contract.js";
@@ -13,8 +12,15 @@ import type { ToolsService } from "../tools/contract.js";
 import type {
   AutonomousRunOptions,
   AutonomousRunResult,
-  AutonomyModule,
 } from "./contract.js";
+
+type AutonomyRuntime = Pick<
+  typeof import("@friday/autonomy"),
+  | "createAutonomousRuntimeState"
+  | "nextAutonomousContinuation"
+  | "addAutonomousUsage"
+  | "refreshAutonomousQualityGates"
+>;
 
 const DEFAULT_AUTONOMOUS_SYSTEM_PROMPT =
   "You are operating autonomously. Work only inside the current workspace. Use host-observable evidence to finish the objective. Do not ask for human input while autonomous mode is enabled.";
@@ -70,20 +76,20 @@ function makeAutonomousTools(
 }
 
 function normalizeModel(models: ModelService, provider: string, modelId: string) {
-  const model = models.api.getModel(provider as never, modelId as never);
+  const model = models.getModel(provider as never, modelId as never);
   if (!model) throw new Error(`Unknown model: ${provider}/${modelId}`);
   return model;
 }
 
 export async function runAutonomousObjective(
-  autonomy: AutonomyModule,
+  autonomy: AutonomyRuntime,
   dependencies: AutonomousRunnerDependencies,
   options: AutonomousRunOptions,
 ): Promise<AutonomousRunResult> {
   const cwd = resolve(options.cwd);
   const root = stateRoot(options.stateDir);
   const model = normalizeModel(dependencies.model, options.provider, options.model);
-  const session = dependencies.sessions.api.SessionManager.create(cwd, join(root, "sessions"));
+  const session = dependencies.sessions.SessionManager.create(cwd, join(root, "sessions"));
   const gateCommands = options.gates?.map((gate) => gate.command) ?? [];
   const autonomousState = autonomy.createAutonomousRuntimeState(
     {
@@ -98,7 +104,7 @@ export async function runAutonomousObjective(
   );
   const tools = makeAutonomousTools(dependencies.tools, cwd, options.permissionMode);
   const messagesPath = session.getSessionFile();
-  const systemPrompt = dependencies.prompts.api.buildSystemPrompt({
+  const systemPrompt = dependencies.prompts.buildSystemPrompt({
     cwd,
     ...(messagesPath === undefined ? {} : { messagesPath }),
     selectedTools: tools.map((tool) => tool.name),
@@ -111,7 +117,7 @@ export async function runAutonomousObjective(
   // The Agent owns the turn loop; autonomous continuation is injected through
   // getContinuationMessages, message_end persists the transcript, and assistant
   // usage feeds the autonomy budget.
-  const agent = new dependencies.agent.api.Agent({
+  const agent = new dependencies.agent.Agent({
     initialState: {
       model: model as never,
       tools,
@@ -158,7 +164,7 @@ export async function runAutonomousObjective(
   } finally {
     options.signal?.removeEventListener("abort", onAbort);
     try {
-      dependencies.sessionResources.api.cleanupSessionResources(session.getSessionId());
+      dependencies.sessionResources.cleanupSessionResources(session.getSessionId());
     } catch (error) {
       reportOperationalError({ component: "autonomy", operation: `cleanup session ${session.getSessionId()}`, error });
     }

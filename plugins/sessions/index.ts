@@ -4,7 +4,10 @@ import { definePlugin } from "../capabilities/protocol.js";
 import { SESSIONS_CAPABILITY, type SessionsService } from "./contract.js";
 
 const sessionsPlugin: FridayPlugin = definePlugin({ id: "sessions", provides: [SESSIONS_CAPABILITY] }, (ctx) => {
-  const service: SessionsService = Object.freeze({ api: sessions });
+  const service: SessionsService = Object.freeze({
+    SessionManager: sessions.SessionManager,
+    readSessionOwnerScope: sessions.readSessionOwnerScope,
+  });
   ctx.services.provide(SESSIONS_CAPABILITY, service);
 });
 

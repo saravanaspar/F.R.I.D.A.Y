@@ -12,8 +12,8 @@ describe("session resources plugin", () => {
     await friday.activatePlugin(sessionResourcesPlugin);
     const service = requireCapability(SESSION_RESOURCES_CAPABILITY);
     const seen: Array<string | undefined> = [];
-    const unregister = service.api.registerSessionResourceCleanup((sessionId) => seen.push(sessionId));
-    service.api.cleanupSessionResources("s-1");
+    const unregister = service.registerSessionResourceCleanup((sessionId) => seen.push(sessionId));
+    service.cleanupSessionResources("s-1");
     unregister();
     expect(seen).toEqual(["s-1"]);
   });

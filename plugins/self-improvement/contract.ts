@@ -3,8 +3,6 @@ import { defineCapability } from "../capabilities/protocol.js";
 import type { AutonomousGateSpec, AutonomousRunOptions } from "../autonomy/contract.js";
 import type { TurnAttachment, TurnPrincipal } from "../turn-loop/contract.js";
 
-export type SelfImprovementModule = typeof import("@friday/self-improvement");
-
 export interface SelfImprovementContinuation {
   readonly id: string;
   readonly principal: TurnPrincipal;
@@ -79,7 +77,6 @@ export interface SelfImprovementMissionView {
 }
 
 export interface SelfImprovementService {
-  readonly api: SelfImprovementModule;
   selfImprove(options: SelfImproveRunOptions): Promise<SelfImproveRunResult>;
   preflightGenerationResume(generationId: string, stateDir?: string): Promise<void>;
   preflightRollbackRecovery(missionId: string, stateDir?: string): Promise<void>;

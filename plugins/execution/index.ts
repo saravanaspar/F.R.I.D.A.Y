@@ -12,13 +12,22 @@ import { EXECUTION_CAPABILITY, type ExecutionService } from "./contract.js";
 const executionPlugin: FridayPlugin = definePlugin({ id: "execution", requires: [SESSION_RESOURCES_CAPABILITY], provides: [EXECUTION_CAPABILITY] }, (ctx) => {
   const sessionResources = ctx.services.require(SESSION_RESOURCES_CAPABILITY);
   const resourceAccess: SessionResourceAccess = {
-    registerSessionResourceCleanup: sessionResources.api.registerSessionResourceCleanup,
+    registerSessionResourceCleanup: sessionResources.registerSessionResourceCleanup,
   };
   configureSessionResourceAccess(resourceAccess);
 
   const processes = new execution.ManagedProcessSupervisor();
   ctx.effect(() => processes.close());
-  const service: ExecutionService = Object.freeze({ api: execution, processes });
+  const service: ExecutionService = Object.freeze({
+    KernelManager: execution.KernelManager,
+    execCommand: execution.execCommand,
+    defaultKernelPythonPath: execution.defaultKernelPythonPath,
+    createLocalShellOperations: execution.createLocalShellOperations,
+    launchDetachedProcess: execution.launchDetachedProcess,
+    isProcessAlive: execution.isProcessAlive,
+    signalProcessGroupOrProcess: execution.signalProcessGroupOrProcess,
+    processes,
+  });
   ctx.services.provide(EXECUTION_CAPABILITY, service);
 });
 

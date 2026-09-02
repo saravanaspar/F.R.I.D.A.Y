@@ -1,10 +1,11 @@
 import type { Capability } from "../capabilities/protocol.js";
 import { defineCapability } from "../capabilities/protocol.js";
 
-export type CompactionModule = typeof import("@friday/compaction");
+type CompactionRuntime = typeof import("@friday/compaction");
 
+/** Session-history compaction exposed without leaking the whole implementation module. */
 export interface CompactionService {
-  readonly api: CompactionModule;
+  readonly compactSession: CompactionRuntime["compactSession"];
 }
 
 export const COMPACTION_CAPABILITY: Capability<CompactionService> =

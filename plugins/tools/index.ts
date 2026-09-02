@@ -23,8 +23,8 @@ const toolsPlugin: FridayPlugin = definePlugin({ id: "tools", requires: [EXECUTI
   const permissions = ctx.services.require(PERMISSIONS_CAPABILITY);
   const sandbox = ctx.services.require(SANDBOX_CAPABILITY);
   const access: ExecutionAccess = {
-    createKernel: (options) => new execution.api.KernelManager(options),
-    createLocalShellOperations: execution.api.createLocalShellOperations,
+    createKernel: (options) => new execution.KernelManager(options),
+    createLocalShellOperations: execution.createLocalShellOperations,
     managedProcesses: execution.processes,
   };
   configureExecutionAccess(access);
@@ -178,7 +178,6 @@ const toolsPlugin: FridayPlugin = definePlugin({ id: "tools", requires: [EXECUTI
   };
 
   const service: ToolsService = Object.freeze({
-    api: tools,
     createTool,
     createAllTools(cwd: string, options: SecureToolOptions = {}) {
       return {
@@ -188,6 +187,7 @@ const toolsPlugin: FridayPlugin = definePlugin({ id: "tools", requires: [EXECUTI
         process: createTool("process", cwd, options),
       };
     },
+    withManagedProcessRun: tools.withManagedProcessRun,
   });
   ctx.services.provide(TOOLS_CAPABILITY, service);
 });

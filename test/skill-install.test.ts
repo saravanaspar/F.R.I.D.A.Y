@@ -36,7 +36,15 @@ async function fixture() {
       async reply(text: string) { expect(text).toContain("Skill installation plan"); order.push("plan"); },
     }, deferAfterReply() {},
   } as SystemActionExecutionContext;
-  return { home, order, artifacts, permissions, context, service: { api: skills, revision: () => 0 } as SkillsService };
+  const service: SkillsService = {
+    loadSkills: skills.loadSkills,
+    loadSkillsFromDir: skills.loadSkillsFromDir,
+    getPythonSkillRuntimeInfo: skills.getPythonSkillRuntimeInfo,
+    expandSkillCommand: skills.expandSkillCommand,
+    parseFrontmatter: skills.parseFrontmatter,
+    revision: () => 0,
+  };
+  return { home, order, artifacts, permissions, context, service };
 }
 
 describe("skill package installation", () => {

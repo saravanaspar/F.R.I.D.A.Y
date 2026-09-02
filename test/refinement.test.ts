@@ -61,14 +61,12 @@ async function activateRoot() {
   await friday.activatePlugin(memoryPlugin, { defer: true });
   await friday.activatePlugin(definePlugin({ id: "test-refinement-model", provides: [MODEL_CAPABILITY] }, (ctx) => {
     ctx.services.provide(MODEL_CAPABILITY, {
-      api: {
-        getModel: (provider: string, id: string) => provider === "test" && id === "test-model" ? { provider, id, maxTokens: 8_192 } : undefined,
-        async completeSimple() {
-          return {
-            content: [{ type: "text", text: '{"summary":"Remember validation lesson","rationale":"Repeated across turns","expectedOutcome":"Reuse the lesson","edits":[{"action":"create","kind":"memory","id":"validation-lesson","title":"Validation lesson","content":"Validate before checkpointing."}]}' }],
-            stopReason: "stop",
-          };
-        },
+      getModel: (provider: string, id: string) => provider === "test" && id === "test-model" ? { provider, id, maxTokens: 8_192 } : undefined,
+      async completeSimple() {
+        return {
+          content: [{ type: "text", text: '{"summary":"Remember validation lesson","rationale":"Repeated across turns","expectedOutcome":"Reuse the lesson","edits":[{"action":"create","kind":"memory","id":"validation-lesson","title":"Validation lesson","content":"Validate before checkpointing."}]}' }],
+          stopReason: "stop",
+        };
       },
     } as unknown as ModelService);
   }), { defer: true });
@@ -88,8 +86,8 @@ describe("refinement plugin", () => {
   it("composes model and memory access through capabilities", async () => {
     const { home } = await activateRoot();
     const refinement = requireCapability(REFINEMENT_CAPABILITY);
-    const store = refinement.api.openMemory(home, "local");
-    const result = refinement.api.applyRefinementProposal(
+    const store = refinement.openMemory(home, "local");
+    const result = refinement.applyRefinementProposal(
       store,
       {
         summary: "Remember a decision",
@@ -117,8 +115,8 @@ describe("refinement plugin", () => {
     expect(replies[0]).toContain("create memory:validation-lesson");
     expect(authorizations).toHaveLength(1);
 
-    const memory = requireCapability(MEMORY_CAPABILITY).api;
-    const store = new memory.MemoryStore({ stateDir: memory.getGlobalMemoryStateDir(home), scope: "global" });
+    const memory = requireCapability(MEMORY_CAPABILITY);
+    const store = memory.openStore({ stateDir: memory.globalStateDir(home), scope: "global" });
     expect(store.get("memory", "validation-lesson")?.content).toBe("Validate before checkpointing.");
     store.close();
 
@@ -129,7 +127,7 @@ describe("refinement plugin", () => {
     expect(replies[0]).toContain("Refinement proposal");
     expect(authorizations).toHaveLength(2);
 
-    const reopened = new memory.MemoryStore({ stateDir: memory.getGlobalMemoryStateDir(home), scope: "global" });
+    const reopened = memory.openStore({ stateDir: memory.globalStateDir(home), scope: "global" });
     expect(reopened.get("memory", "validation-lesson")).toBeUndefined();
     reopened.close();
     const after = await history.execute({ limit: 10 }, context) as readonly { rollbackOf?: string }[];
@@ -165,12 +163,12 @@ describe("refinement plugin", () => {
     const rollback = actions.find((action) => action.id === "refinement.rollback")!;
     const context = { turn: testTurn([]), deferAfterReply: () => undefined };
     const applied = await apply.execute({}, context) as { id: string };
-    const memory = requireCapability(MEMORY_CAPABILITY).api;
+    const memory = requireCapability(MEMORY_CAPABILITY);
 
     const rollbackTurn: InboundTurn = {
       ...testTurn([]),
       reply: async () => {
-        const concurrent = new memory.MemoryStore({ stateDir: memory.getGlobalMemoryStateDir(home), scope: "global" });
+        const concurrent = memory.openStore({ stateDir: memory.globalStateDir(home), scope: "global" });
         concurrent.update("memory", "validation-lesson", {
           title: "Validation lesson",
           content: "A newer conversation changed this lesson.",
@@ -181,7 +179,7 @@ describe("refinement plugin", () => {
 
     await expect(rollback.execute({ id: applied.id }, { turn: rollbackTurn, deferAfterReply: () => undefined }))
       .rejects.toThrow("changed during confirmation");
-    const reopened = new memory.MemoryStore({ stateDir: memory.getGlobalMemoryStateDir(home), scope: "global" });
+    const reopened = memory.openStore({ stateDir: memory.globalStateDir(home), scope: "global" });
     expect(reopened.get("memory", "validation-lesson")?.content).toBe("A newer conversation changed this lesson.");
     reopened.close();
   });
@@ -200,8 +198,8 @@ describe("refinement plugin", () => {
     await expect(apply.execute({}, { turn: turnWithHistoryFailure, deferAfterReply: () => undefined }))
       .rejects.toThrow("Refinement history directory permissions are too broad");
 
-    const memory = requireCapability(MEMORY_CAPABILITY).api;
-    const store = new memory.MemoryStore({ stateDir: memory.getGlobalMemoryStateDir(home), scope: "global" });
+    const memory = requireCapability(MEMORY_CAPABILITY);
+    const store = memory.openStore({ stateDir: memory.globalStateDir(home), scope: "global" });
     expect(store.get("memory", "validation-lesson")).toBeUndefined();
     expect(store.snapshot().refinements).toEqual([]);
     store.close();

@@ -40,7 +40,7 @@ describe("auth plugin", () => {
     await friday.activatePlugin(authPlugin);
 
     const service = requireCapability(AUTH_CAPABILITY);
-    expect(service.api.getOAuthProviders().length).toBeGreaterThan(0);
+    expect(service.getOAuthProviders().length).toBeGreaterThan(0);
 
     uninstallCapabilityRegistry();
   });

@@ -30,9 +30,9 @@ describe("subagents plugin", () => {
 
       const sessions = requireCapability(SESSIONS_CAPABILITY);
       const subagents = requireCapability(SUBAGENTS_CAPABILITY);
-      const session = sessions.api.SessionManager.inMemory("/tmp/project");
-      const store = subagents.api.createSessionSubagentRegistryStore(session);
-      const runtimeHost: Parameters<typeof subagents.api.SubagentManager.create>[0]["runtimeHost"] = {
+      const session = sessions.SessionManager.inMemory("/tmp/project");
+      const store = subagents.createSessionSubagentRegistryStore(session);
+      const runtimeHost: Parameters<typeof subagents.SubagentManager.create>[0]["runtimeHost"] = {
         async create(options) {
           return {
             sessionId: `session-${options.id}`,
@@ -43,7 +43,7 @@ describe("subagents plugin", () => {
         async delete() {},
       };
 
-      const first = await subagents.api.SubagentManager.create({
+      const first = await subagents.SubagentManager.create({
         parentId: session.getSessionId(),
         parentArtifactDir: artifactDir,
         parentModel: { provider: "test", id: "parent" },
@@ -53,7 +53,7 @@ describe("subagents plugin", () => {
       const handle = await first.spawn("inspect the API", { name: "api-reviewer" });
       await waitFor(() => first.get(handle.childId)?.status === "completed");
 
-      const reopened = await subagents.api.SubagentManager.create({
+      const reopened = await subagents.SubagentManager.create({
         parentId: session.getSessionId(),
         parentArtifactDir: artifactDir,
         parentModel: { provider: "test", id: "parent" },

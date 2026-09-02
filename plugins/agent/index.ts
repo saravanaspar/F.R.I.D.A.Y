@@ -10,14 +10,17 @@ const agentPlugin: FridayPlugin = definePlugin({ id: "agent", requires: [MODEL_C
   const model = ctx.services.require(MODEL_CAPABILITY);
 
   const modelAccess: ModelAccess = {
-    streamSimple: model.api.streamSimple as ModelAccess["streamSimple"],
-    validateToolArguments: model.api.validateToolArguments as ModelAccess["validateToolArguments"],
+    streamSimple: model.streamSimple as ModelAccess["streamSimple"],
+    validateToolArguments: model.validateToolArguments as ModelAccess["validateToolArguments"],
     createAssistantMessageDiagnostic:
-      model.api.createAssistantMessageDiagnostic as ModelAccess["createAssistantMessageDiagnostic"],
+      model.createAssistantMessageDiagnostic as ModelAccess["createAssistantMessageDiagnostic"],
   };
   installModelAccess(modelAccess);
 
-  const service: AgentService = Object.freeze({ api: agent });
+  const service: AgentService = Object.freeze({
+    Agent: agent.Agent,
+    FRIDAY_MODEL_RETRY_MAX_RETRIES: agent.FRIDAY_MODEL_RETRY_MAX_RETRIES,
+  });
   ctx.services.provide(AGENT_CAPABILITY, service);
 });
 

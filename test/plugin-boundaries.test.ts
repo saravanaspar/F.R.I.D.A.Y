@@ -91,6 +91,43 @@ describe("plugin boundaries", () => {
     expect(pluginProtocol).not.toContain("registerCommand");
   });
 
+  it("keeps cross-plugin APIs explicit, typed, and contract-only", async () => {
+    const config = JSON.parse(await readFile(resolve("friday.config.json"), "utf8")) as { plugins: string[] };
+    const configured = config.plugins
+      .map((entry) => /^\.\/plugins\/([A-Za-z0-9._-]+)\/index\.ts$/.exec(entry)?.[1])
+      .filter((name): name is string => Boolean(name));
+
+    for (const pluginName of configured) {
+      const pluginRoot = resolve(`plugins/${pluginName}`);
+      if (pluginName !== "capabilities") {
+        const contractPath = resolve(pluginRoot, "contract.ts");
+        await expect(access(contractPath), `${pluginName} must expose a public contract.ts`).resolves.toBeUndefined();
+        const contract = await readFile(contractPath, "utf8");
+        expect(contract, contractPath).not.toMatch(/\breadonly\s+api\s*:/);
+        expect(contract, contractPath).not.toMatch(/\bapi\s*:\s*typeof\s+import\s*\(/);
+        expect(contract, contractPath).not.toMatch(/interface\s+\w+Service\s+extends\s+\w*Runtime\b/);
+      }
+
+      for (const path of await sourceFiles(pluginRoot)) {
+        if (path.replaceAll("\\", "/").includes("/runtime/")) continue;
+        const source = await readFile(path, "utf8");
+        const siblingImports = [...source.matchAll(/(?:from|import\()\s*["']@friday\/([A-Za-z0-9._-]+)/g)]
+          .map((match) => match[1]!)
+          .filter((packageName) => packageName !== pluginName && packageName !== "operational-errors");
+        expect(siblingImports, `${path} must consume sibling plugins through ../<plugin>/contract.ts`).toEqual([]);
+      }
+    }
+
+    const memoryContract = await readFile(resolve("plugins/memory/contract.ts"), "utf8");
+    expect(memoryContract).toContain("interface MemoryStoreService");
+    expect(memoryContract).toContain("openStore(");
+    expect(memoryContract).not.toContain("MemoryService {\n  readonly api");
+
+    const selfImprovementRunner = await readFile(resolve("plugins/self-improvement/runner.ts"), "utf8");
+    expect(selfImprovementRunner).toContain("plugins/*/contract.ts");
+    expect(selfImprovementRunner).toContain("ctx.services.require/optional");
+  });
+
   it("keeps operational-errors as a dependency-free utility package owned by Observability, not a plugin", async () => {
     await expect(access(resolve("plugins/operational-errors"))).rejects.toMatchObject({ code: "ENOENT" });
     const manifest = JSON.parse(await readFile(resolve("packages/operational-errors/package.json"), "utf8")) as { name?: string };
@@ -686,6 +723,7 @@ describe("plugin boundaries", () => {
     const modelManifest = getPluginManifest(modelPlugin)!;
     expect(observabilityManifest.requires.map((capability) => capability.id)).toContain("events");
     expect(modelManifest.optional.map((capability) => capability.id)).toContain("observability");
+    expect(modelManifest.provides.map((capability) => capability.id)).toEqual(["model", "model.registry"]);
   });
 
   it("keeps Webhooks as an inbound HTTP boundary instead of an orchestration plugin", async () => {
@@ -906,7 +944,7 @@ describe("plugin boundaries", () => {
       expect(source, path).not.toMatch(/(?:from|import\()\s*["']\.\.\/(?:agent|scheduler|mcp|integrations|self-improvement)\//);
     }
     const manifest = getPluginManifest(runtimeSettingsPlugin)!;
-    expect(manifest.requires.map((capability) => capability.id).sort()).toEqual(["lifecycle", "model", "permissions"]);
+    expect(manifest.requires.map((capability) => capability.id).sort()).toEqual(["lifecycle", "model", "model.registry", "permissions"]);
     expect(manifest.optional.map((capability) => capability.id).sort()).toEqual(["channels.trusted", "model-credentials"]);
     expect(manifest.provides.map((capability) => capability.id)).toEqual(["runtime-settings"]);
   });
@@ -963,7 +1001,7 @@ describe("plugin boundaries", () => {
     const autonomyRunner = await readFile(resolve("plugins/autonomy/runner.ts"), "utf8");
     expect(autonomyRunner).toContain('tools.createTool("bash"');
     expect(autonomyRunner).toContain('tools.createTool("edit"');
-    expect(autonomyRunner).not.toContain("tools.api.createTool");
+    expect(autonomyRunner).not.toContain("tools.api");
 
     const selfImprovementEntry = await readFile(resolve("plugins/self-improvement/index.ts"), "utf8");
     expect(selfImprovementEntry).toContain("SYSTEM_ACTION_CONTRIBUTION");

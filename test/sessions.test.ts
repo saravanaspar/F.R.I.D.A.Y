@@ -13,7 +13,7 @@ describe("sessions plugin", () => {
     await friday.activatePlugin(sessionsPlugin);
 
     const service = requireCapability(SESSIONS_CAPABILITY);
-    const session = service.api.SessionManager.inMemory("/tmp/project");
+    const session = service.SessionManager.inMemory("/tmp/project");
     const first = session.appendMessage({
       role: "user",
       content: [{ type: "text", text: "first" }],

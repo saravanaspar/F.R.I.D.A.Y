@@ -81,19 +81,22 @@ const refinementPlugin: FridayPlugin = definePlugin({
     return result;
   }
 
-  const completeSimple = model.api.completeSimple as unknown as refinement.RefinementModelAccess["completeSimple"];
+  const completeSimple = model.completeSimple as unknown as refinement.RefinementModelAccess["completeSimple"];
   refinement.installModelAccess({ completeSimple });
   refinement.installMemoryAccess({
     open: (stateDir, scope) =>
-      new memory.api.MemoryStore({ stateDir, scope }),
+      memory.openStore({ stateDir, scope }),
   });
 
-  const service: RefinementService = Object.freeze({ api: refinement });
+  const service: RefinementService = Object.freeze({
+    openMemory: refinement.openMemory,
+    applyRefinementProposal: refinement.applyRefinementProposal,
+  });
   ctx.services.provide(REFINEMENT_CAPABILITY, service);
 
   function globalStore(ownerScope: string | undefined) {
-    return new memory.api.MemoryStore({
-      stateDir: memory.api.getGlobalMemoryStateDir(ownerStateRoot(stateRoot(), ownerScope)),
+    return memory.openStore({
+      stateDir: memory.globalStateDir(ownerStateRoot(stateRoot(), ownerScope)),
       scope: "global",
     });
   }
@@ -103,9 +106,9 @@ const refinementPlugin: FridayPlugin = definePlugin({
   }
 
   function localStore(sessionArtifactDir: string) {
-    const stateDir = memory.api.getLocalMemoryStateDir(sessionArtifactDir);
+    const stateDir = memory.localStateDir(sessionArtifactDir);
     if (!stateDir) throw new Error("Automatic refinement requires a persistent session");
-    return new memory.api.MemoryStore({ stateDir, scope: "local" });
+    return memory.openStore({ stateDir, scope: "local" });
   }
 
   function assertAffectedEntriesUnchanged(
@@ -157,7 +160,7 @@ const refinementPlugin: FridayPlugin = definePlugin({
     const provider = process.env.FRIDAY_MODEL_PROVIDER?.trim();
     const modelId = process.env.FRIDAY_MODEL_ID?.trim();
     if (!provider || !modelId) throw new Error("Refinement requires a configured main model");
-    const selected = model.api.getModel(provider as never, modelId as never);
+    const selected = model.getModel(provider as never, modelId as never);
     if (!selected) throw new Error(`Unknown refinement model: ${provider}/${modelId}`);
     const apiKey = await ctx.services.optional(MODEL_CREDENTIALS_CAPABILITY)?.getApiKey(provider);
     return { selected: selected as refinement.RefinementModelLike, ...(apiKey ? { apiKey } : {}) };
@@ -209,7 +212,7 @@ const refinementPlugin: FridayPlugin = definePlugin({
       const global = globalStore(context.ownerScope);
       const local = localStore(context.sessionArtifactDir);
       try {
-        const combinedState = memory.api.mergeMemoryStates(global.snapshot(), local.snapshot());
+        const combinedState = memory.mergeStates(global.snapshot(), local.snapshot());
         const { selected, apiKey } = await modelForRefinement();
         const review = await refinement.reviewAutoRefine(
           trajectory,

@@ -1,3 +1,4 @@
+import * as modelRuntime from "@friday/model";
 import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -249,7 +250,7 @@ describe("Observability", () => {
         subject: "message:1",
         data: { rawText: "do-not-copy-event-payload" },
       });
-      models.api.getLogger("model-test").info("provider ready", { apiKey: "do-not-store", requestId: "req-1" });
+      modelRuntime.getLogger("model-test").info("provider ready", { apiKey: "do-not-store", requestId: "req-1" });
     });
 
     const eventLog = observability.logs({ component: "events", limit: 10 })[0];
@@ -264,7 +265,7 @@ describe("Observability", () => {
     expect(modelLog).toMatchObject({ traceId });
     expect(modelLog?.fields).toMatchObject({ apiKey: "[REDACTED]", requestId: "req-1" });
 
-    models.api.setLogSink(undefined);
+    modelRuntime.setLogSink(undefined);
     observability.close();
     await events.close();
   });

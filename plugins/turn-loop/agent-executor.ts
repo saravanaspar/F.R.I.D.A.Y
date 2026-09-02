@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AgentService } from "../agent/contract.js";
 import type { ModelCredentialService } from "../auth/contract.js";
-import type { MemoryService } from "../memory/contract.js";
+import type { MemoryRelationResult, MemorySearchResult, MemoryService } from "../memory/contract.js";
 import type { ModelService } from "../model/contract.js";
 import type { ObservabilityService } from "../observability/contract.js";
 import { ownerScopeAllows, ownerStateRoot, principalScope, type PrincipalOrigin } from "../principal-scope.js";
@@ -30,8 +30,8 @@ import type {
   TurnProgressUpdate,
 } from "./contract.js";
 
-type SessionManager = ReturnType<SessionsService["api"]["SessionManager"]["inMemory"]>;
-type AgentInstance = InstanceType<AgentService["api"]["Agent"]>;
+type SessionManager = ReturnType<SessionsService["SessionManager"]["inMemory"]>;
+type AgentInstance = InstanceType<AgentService["Agent"]>;
 type AgentEvent = Parameters<Parameters<AgentInstance["subscribe"]>[0]>[0];
 type AgentMessage = AgentInstance["state"]["messages"][number];
 type AgentTool = AgentInstance["state"]["tools"][number];
@@ -171,14 +171,14 @@ function resolveModel(
   if (!selected) {
     throw new Error("Agent model selection is required: set FRIDAY_MODEL_PROVIDER and FRIDAY_MODEL_ID");
   }
-  const model = models.api.getModel(selected.provider as never, selected.modelId as never);
+  const model = models.getModel(selected.provider as never, selected.modelId as never);
   if (!model) throw new Error(`Unknown model: ${selected.provider}/${selected.modelId}`);
   return model;
 }
 
 function availableModels(models: ModelService): Array<{ provider: string; id: string; name: string }> {
-  return models.api.getProviders().flatMap((provider) =>
-    models.api.getModels(provider as never).map((model) => ({
+  return models.getProviders().flatMap((provider) =>
+    models.getModels(provider as never).map((model) => ({
       provider: String(model.provider),
       id: String(model.id),
       name: String(model.name || model.id),
@@ -210,10 +210,10 @@ function loadSkills(
   cwd: string,
   disposers: Array<() => void>,
 ) {
-  if (!skillsService) return { skills: [] as ReturnType<SkillsService["api"]["loadSkills"]>["skills"], pythonPaths: [] as string[] };
+  if (!skillsService) return { skills: [] as ReturnType<SkillsService["loadSkills"]>["skills"], pythonPaths: [] as string[] };
   const userSkillsDir = join(stateRoot(), "skills");
   const projectSkillsDir = resolve(cwd, DEFAULT_PROJECT_SKILLS_DIR);
-  const result = skillsService.api.loadSkills({
+  const result = skillsService.loadSkills({
     cwd,
     skillPaths: [],
     includeDefaults: true,
@@ -227,7 +227,7 @@ function loadSkills(
     registerExternalMount(sandbox, cwd, skill.baseDir, disposers);
     return true;
   });
-  const pythonPaths = skillsService.api
+  const pythonPaths = skillsService
     .getPythonSkillRuntimeInfo(usable)
     .map((skill) => join(skill.packagePath, "src"));
   return { skills: usable, pythonPaths };
@@ -240,16 +240,16 @@ function relevantMemory(
   sessionArtifactDir?: string,
 ): string | undefined {
   if (!memory) return undefined;
-  const globalDir = memory.api.getGlobalMemoryStateDir(root);
-  const localDir = memory.api.getLocalMemoryStateDir(sessionArtifactDir);
-  const globalPath = memory.api.getMemoryStatePath(globalDir);
-  const localPath = localDir ? memory.api.getMemoryStatePath(localDir) : undefined;
+  const globalDir = memory.globalStateDir(root);
+  const localDir = memory.localStateDir(sessionArtifactDir);
+  const globalPath = memory.statePath(globalDir);
+  const localPath = localDir ? memory.statePath(localDir) : undefined;
   if (!existsSync(globalPath) && (!localPath || !existsSync(localPath))) return undefined;
 
-  const entries: ReturnType<InstanceType<typeof memory.api.MemoryStore>["search"]> = [];
-  const relations: ReturnType<InstanceType<typeof memory.api.MemoryStore>["queryRelations"]> = [];
+  const entries: MemorySearchResult[] = [];
+  const relations: MemoryRelationResult[] = [];
   if (existsSync(globalPath)) {
-    const store = new memory.api.MemoryStore({ stateDir: globalDir, scope: "global", embeddingProvider: null });
+    const store = memory.openStore({ stateDir: globalDir, scope: "global", semanticSearch: false });
     try {
       entries.push(...store.search(query, { limit: 4 }));
       relations.push(...store.queryRelations({ query, limit: 6 }));
@@ -258,7 +258,7 @@ function relevantMemory(
     }
   }
   if (localDir && localPath && existsSync(localPath)) {
-    const store = new memory.api.MemoryStore({ stateDir: localDir, scope: "local", embeddingProvider: null });
+    const store = memory.openStore({ stateDir: localDir, scope: "local", semanticSearch: false });
     try {
       entries.push(...store.search(query, { limit: 3 }));
       relations.push(...store.queryRelations({ query, limit: 4 }));
@@ -268,7 +268,7 @@ function relevantMemory(
   }
   entries.sort((left, right) => right.score - left.score);
   relations.sort((left, right) => right.score - left.score);
-  return memory.api.formatRelevantMemory(entries.slice(0, 5), relations.slice(0, 8), { maxCharacters: 2_400 });
+  return memory.formatRelevant(entries.slice(0, 5), relations.slice(0, 8), { maxCharacters: 2_400 });
 }
 
 function pythonEnvironment(paths: readonly string[]): Record<string, string> | undefined {
@@ -311,7 +311,7 @@ function contributionTools(
     if (!contribution.parameters || typeof contribution.parameters !== "object" || Array.isArray(contribution.parameters)) {
       throw new Error(`Agent tool ${name} parameters must be a JSON Schema object`);
     }
-    const parameters = model.api.Type.Unsafe<Record<string, unknown>>(contribution.parameters as never);
+    const parameters = model.Type.Unsafe<Record<string, unknown>>(contribution.parameters as never);
     const tool: AgentTool = {
       name,
       label: contribution.label.trim() || name,
@@ -429,7 +429,7 @@ export function createAgentTurnExecutor(
 
   const cleanupSession = (sessionId: string): void => {
     try {
-      dependencies.sessionResources.api.cleanupSessionResources(sessionId);
+      dependencies.sessionResources.cleanupSessionResources(sessionId);
     } catch (error) {
       reportOperationalError({ component: "turn-loop", operation: `cleanup resources for session ${sessionId}`, error });
     }
@@ -467,7 +467,7 @@ export function createAgentTurnExecutor(
     const optionalSandbox = dependencies.optional?.sandbox?.();
     const mountDisposers: Array<() => void> = [];
     const runtimeInputDisposers: Array<() => void | Promise<void>> = [];
-    let subagentManager: Awaited<ReturnType<SubagentsService["api"]["SubagentManager"]["create"]>> | undefined;
+    let subagentManager: Awaited<ReturnType<SubagentsService["SubagentManager"]["create"]>> | undefined;
     const disposeBuildResources = async (): Promise<void> => {
       await subagentManager?.dispose().catch((error: unknown) => {
         reportOperationalError({ component: "turn-loop", operation: "dispose subagent manager", error });
@@ -509,7 +509,7 @@ export function createAgentTurnExecutor(
       const pythonPaths = [...skillState.pythonPaths];
 
       if (optionalRlm) {
-        const rlmPythonPath = optionalRlm.api.getRlmPythonPath();
+        const rlmPythonPath = optionalRlm.getRlmPythonPath();
         registerExternalMount(optionalSandbox, cwd, rlmPythonPath, mountDisposers);
         pythonPaths.unshift(rlmPythonPath);
       }
@@ -525,7 +525,7 @@ export function createAgentTurnExecutor(
         maxDepth: number;
       }) => {
         const inheritedOwnerScope = session.getHeader()?.ownerScope;
-        const childSession = dependencies.sessions.api.SessionManager.create(cwd, childOptions.sessionDir, {
+        const childSession = dependencies.sessions.SessionManager.create(cwd, childOptions.sessionDir, {
           ...(inheritedOwnerScope === undefined ? {} : { ownerScope: inheritedOwnerScope }),
         });
         const child = await buildRuntime(childSession, {
@@ -560,25 +560,25 @@ export function createAgentTurnExecutor(
       let hostHandlers: NonNullable<ToolOptions["ipython"]>["hostHandlers"] | undefined;
       if (optionalRlm && optionalSubagents) {
         const models = availableModels(dependencies.model);
-        const runtimeHost: Parameters<typeof optionalSubagents.api.SubagentManager.create>[0]["runtimeHost"] = {
+        const runtimeHost: Parameters<typeof optionalSubagents.SubagentManager.create>[0]["runtimeHost"] = {
           create: createChildRuntime,
           async delete(_childId, runtime) {
             await runtime?.dispose?.();
           },
         };
-        const managerOptions: Parameters<typeof optionalSubagents.api.SubagentManager.create>[0] = {
+        const managerOptions: Parameters<typeof optionalSubagents.SubagentManager.create>[0] = {
           parentId: session.getSessionId(),
           depth: runtimeOptions.depth ?? 0,
           maxDepth: maxSubagentDepth,
           parentModel: { provider: String(model.provider), id: String(model.id), name: String(model.name || model.id) },
           models,
           runtimeHost,
-          registryStore: optionalSubagents.api.createSessionSubagentRegistryStore(session),
+          registryStore: optionalSubagents.createSessionSubagentRegistryStore(session),
         };
         const parentArtifactDir = session.getSessionArtifactDir();
         if (parentArtifactDir !== undefined) managerOptions.parentArtifactDir = parentArtifactDir;
-        subagentManager = await optionalSubagents.api.SubagentManager.create(managerOptions);
-        hostHandlers = optionalRlm.api.createRlmHostHandlers({ subagents: subagentManager, models });
+        subagentManager = await optionalSubagents.SubagentManager.create(managerOptions);
+        hostHandlers = optionalRlm.createRlmHostHandlers({ subagents: subagentManager, models });
       }
 
       const ipythonOptions: NonNullable<ToolOptions["ipython"]> = { sessionId: session.getSessionId() };
@@ -622,7 +622,7 @@ export function createAgentTurnExecutor(
               return rendered ? [rendered] : [];
             })
           : [];
-        const promptOptions: Parameters<PromptsService["api"]["buildSystemPrompt"]>[0] = {
+        const promptOptions: Parameters<PromptsService["buildSystemPrompt"]>[0] = {
           cwd,
           selectedTools: tools.map((tool) => tool.name),
           skills: promptSkills,
@@ -642,13 +642,7 @@ export function createAgentTurnExecutor(
         const messagesPath = session.getSessionFile();
         if (messagesPath !== undefined) promptOptions.messagesPath = messagesPath;
         if (runtimeOptions.parentName !== undefined) promptOptions.rlmParentAgent = runtimeOptions.parentName;
-        const promptsApi = dependencies.prompts.api as PromptsService["api"] & {
-          buildSystemPromptPlan?: (options: typeof promptOptions) => { prompt: string; stablePrefix?: string };
-        };
-        if (typeof promptsApi.buildSystemPromptPlan === "function") {
-          return promptsApi.buildSystemPromptPlan(promptOptions);
-        }
-        return { prompt: promptsApi.buildSystemPrompt(promptOptions) };
+        return dependencies.prompts.buildSystemPromptPlan(promptOptions);
       };
       const initialPromptPlan = buildPromptPlan(initialTools);
       const systemPrompt = initialPromptPlan.prompt;
@@ -666,7 +660,7 @@ export function createAgentTurnExecutor(
       }
       let ephemeralInputContext: string | undefined;
       let ephemeralImages: Array<{ type: "image"; data: string; mimeType: string }> = [];
-      const agent = new dependencies.agent.api.Agent({
+      const agent = new dependencies.agent.Agent({
         initialState,
         sessionId: session.getSessionId(),
         transformContext: async (messages) => {
@@ -721,7 +715,7 @@ export function createAgentTurnExecutor(
           }
         },
         getApiKey: async (provider) => dependencies.optional?.credentials?.()?.getApiKey(provider),
-        modelRetryMaxRetries: dependencies.agent.api.FRIDAY_MODEL_RETRY_MAX_RETRIES,
+        modelRetryMaxRetries: dependencies.agent.FRIDAY_MODEL_RETRY_MAX_RETRIES,
       });
 
       let pendingPersistedInputs: PersistedAgentInputMessage[] = [];
@@ -924,7 +918,7 @@ export function createAgentTurnExecutor(
               if (!output) throw new Error("Agent completed without an assistant text response");
               return output;
             };
-            const withManagedProcessRun = dependencies.tools.api.withManagedProcessRun;
+            const withManagedProcessRun = dependencies.tools.withManagedProcessRun;
             const textResult = typeof withManagedProcessRun !== "function"
               ? await executePrompt()
               : await withManagedProcessRun({
@@ -1021,7 +1015,7 @@ export function createAgentTurnExecutor(
     onSessionCreated?: ((sessionId: string) => Promise<void>) | undefined,
   ): Promise<CachedRuntime> => {
     if (destinationId === "session:new") {
-      const session = dependencies.sessions.api.SessionManager.create(defaultCwd, sessionsDir, {
+      const session = dependencies.sessions.SessionManager.create(defaultCwd, sessionsDir, {
         ownerScope: principalScope(origin),
       });
       await onSessionCreated?.(session.getSessionId());
@@ -1052,11 +1046,11 @@ export function createAgentTurnExecutor(
     }
     const sessionPath = join(sessionsDir, `${sessionId}.jsonl`);
     if (!existsSync(sessionPath)) throw new Error(`Routed session does not exist: ${sessionId}`);
-    const ownerScope = dependencies.sessions.api.readSessionOwnerScope(sessionPath);
+    const ownerScope = dependencies.sessions.readSessionOwnerScope(sessionPath);
     if (!ownerScopeAllows(ownerScope, origin)) {
       throw new Error(`Permission policy denied session access: ${sessionId}`);
     }
-    const session = dependencies.sessions.api.SessionManager.open(sessionPath, sessionsDir);
+    const session = dependencies.sessions.SessionManager.open(sessionPath, sessionsDir);
     if (session.getSessionId() !== sessionId) throw new Error(`Routed session id mismatch: ${sessionId}`);
     const runtime = await buildRuntime(session, { persistent: true });
     const entry: CachedRuntime = { runtime, lastUsedAt: Date.now(), busy: 0 };
@@ -1075,7 +1069,7 @@ export function createAgentTurnExecutor(
       if (disposed) throw new Error("Agent turn executor is disposed");
       context.signal?.throwIfAborted();
       if (context.decision.destination.kind === "transient") {
-        const session = dependencies.sessions.api.SessionManager.inMemory(defaultCwd, "", {
+        const session = dependencies.sessions.SessionManager.inMemory(defaultCwd, "", {
           ownerScope: principalScope(context.turn.principal),
         });
         const runtime = await buildRuntime(session, { persistent: false });

@@ -17,9 +17,9 @@ describe("memory plugin", () => {
       await friday.activatePlugin(capabilitiesPlugin);
       await friday.activatePlugin(memoryPlugin);
       const memory = requireCapability(MEMORY_CAPABILITY);
-      const store = new memory.api.MemoryStore({ stateDir: dir, scope: "global" });
+      const store = memory.openStore({ stateDir: dir, scope: "global" });
       store.create("memory", { id: "decision", title: "Decision", content: "Keep it small." });
-      const reopened = new memory.api.MemoryStore({ stateDir: dir, scope: "global" });
+      const reopened = memory.openStore({ stateDir: dir, scope: "global" });
       expect(reopened.get("memory", "decision")?.content).toBe("Keep it small.");
       expect(reopened.search("small decision")[0]?.entry.id).toBe("decision");
     } finally {

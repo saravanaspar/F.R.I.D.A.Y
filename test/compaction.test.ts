@@ -1,3 +1,4 @@
+import * as modelRuntime from "@friday/model";
 import { describe, expect, it } from "vitest";
 import { PluginTestHost } from "./helpers/plugin-host.js";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
@@ -24,10 +25,10 @@ describe("compaction plugin", () => {
       const models = requireCapability(MODEL_CAPABILITY);
       const sessions = requireCapability(SESSIONS_CAPABILITY);
       const compaction = requireCapability(COMPACTION_CAPABILITY);
-      const faux = models.api.registerFauxProvider();
+      const faux = modelRuntime.registerFauxProvider();
       try {
-        faux.setResponses([models.api.fauxAssistantMessage("## Goal\ncompressed history")]);
-        const session = sessions.api.SessionManager.inMemory("/tmp/project");
+        faux.setResponses([modelRuntime.fauxAssistantMessage("## Goal\ncompressed history")]);
+        const session = sessions.SessionManager.inMemory("/tmp/project");
         session.appendMessage({ role: "user", content: "old1", timestamp: Date.now() });
         session.appendMessage({
           role: "assistant",
@@ -49,7 +50,7 @@ describe("compaction plugin", () => {
           timestamp: Date.now(),
         });
 
-        const result = await compaction.api.compactSession(session, {
+        const result = await compaction.compactSession(session, {
           model: faux.getModel(),
           apiKey: "test",
           force: true,

@@ -107,7 +107,7 @@ describe("lifecycle plugin", () => {
       await friday.activatePlugin(lifecyclePlugin);
 
       const lifecycle = requireCapability(LIFECYCLE_CAPABILITY);
-      const manager = lifecycle.api.createLifecycleManager({
+      const manager = lifecycle.createLifecycleManager({
         stateDir,
         process: {
           pid: process.pid,

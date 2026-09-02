@@ -164,10 +164,10 @@ function plannerSystemPrompt(): string {
 export function createSystemModelPlanner(models: ModelService, credentials: () => ModelCredentialService | undefined = () => undefined): SystemTurnPlanner {
   return async (request) => {
     const selected = selectedModel();
-    const model = models.api.getModel(selected.provider as never, selected.modelId as never);
+    const model = models.getModel(selected.provider as never, selected.modelId as never);
     if (!model) throw new Error(`Unknown system model: ${selected.provider}/${selected.modelId}`);
     const apiKey = await credentials()?.getApiKey(selected.provider);
-    const response = await models.api.completeSimple(
+    const response = await models.completeSimple(
       model,
       {
         systemPrompt: plannerSystemPrompt(),
@@ -198,18 +198,18 @@ export function createSystemModelPlanner(models: ModelService, credentials: () =
       .join("\n")
       .trim();
     if (!text) throw new Error("System model returned no JSON action");
-    return normalizePlan(models.api.parseJsonWithRepair<unknown>(text));
+    return normalizePlan(models.parseJsonWithRepair<unknown>(text));
   };
 }
 
 export function createSystemModelPresenter(models: ModelService, credentials: () => ModelCredentialService | undefined = () => undefined): SystemPresenter {
   return async (request) => {
     const selected = selectedModel();
-    const model = models.api.getModel(selected.provider as never, selected.modelId as never);
+    const model = models.getModel(selected.provider as never, selected.modelId as never);
     if (!model) throw new Error(`Unknown system model: ${selected.provider}/${selected.modelId}`);
     const apiKey = await credentials()?.getApiKey(selected.provider);
     const serialized = outputText(request.output);
-    const response = await models.api.completeSimple(
+    const response = await models.completeSimple(
       model,
       {
         systemPrompt: [
@@ -229,9 +229,11 @@ export function createSystemModelPresenter(models: ModelService, credentials: ()
   };
 }
 
-export function createSystemActionInputValidator(models: ModelService): SystemActionInputValidator {
+export function createSystemActionInputValidator(
+  models: Pick<ModelService, "validateToolArguments">,
+): SystemActionInputValidator {
   return (action, input) => {
-    const validated = models.api.validateToolArguments(
+    const validated = models.validateToolArguments(
       {
         name: action.id,
         description: action.description,

@@ -8,7 +8,7 @@ import { AGENT_TOOL_CONTRIBUTION, type AgentExtensionJsonValue } from "../turn-l
 import { PERMISSIONS_CAPABILITY } from "../permissions/contract.js";
 import { ownerStateRoot, principalScope } from "../principal-scope.js";
 import { SYSTEM_ACTION_CONTRIBUTION, type SystemJsonObject } from "../system/contract.js";
-import { MEMORY_CAPABILITY, type MemoryService } from "./contract.js";
+import { MEMORY_CAPABILITY, type MemoryOpenOptions, type MemoryService } from "./contract.js";
 import { homedir } from "node:os";
 
 function rootDir(): string {
@@ -133,7 +133,21 @@ const memoryPlugin: FridayPlugin = definePlugin({
   optional: [PERMISSIONS_CAPABILITY],
   provides: [MEMORY_CAPABILITY],
 }, (ctx) => {
-  const service: MemoryService = Object.freeze({ api: memory });
+  const service: MemoryService = Object.freeze({
+    openStore(options: MemoryOpenOptions = {}) {
+      return new memory.MemoryStore({
+        ...(options.stateDir === undefined ? {} : { stateDir: options.stateDir }),
+        ...(options.scope === undefined ? {} : { scope: options.scope }),
+        ...(options.inMemory === undefined ? {} : { inMemory: options.inMemory }),
+        ...(options.semanticSearch === false ? { embeddingProvider: null } : {}),
+      });
+    },
+    globalStateDir: memory.getGlobalMemoryStateDir,
+    localStateDir: memory.getLocalMemoryStateDir,
+    statePath: memory.getMemoryStatePath,
+    formatRelevant: memory.formatRelevantMemory,
+    mergeStates: memory.mergeMemoryStates,
+  });
   ctx.services.provide(MEMORY_CAPABILITY, service);
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {

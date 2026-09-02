@@ -16,8 +16,8 @@ describe("execution plugin", () => {
     await friday.activatePlugin(executionPlugin);
 
     const service = requireCapability(EXECUTION_CAPABILITY);
-    expect(typeof service.api.KernelManager).toBe("function");
-    expect(typeof service.api.execCommand).toBe("function");
-    expect(typeof service.api.defaultKernelPythonPath).toBe("function");
+    expect(typeof service.KernelManager).toBe("function");
+    expect(typeof service.execCommand).toBe("function");
+    expect(typeof service.defaultKernelPythonPath).toBe("function");
   });
 });

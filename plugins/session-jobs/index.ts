@@ -161,7 +161,7 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
     provides: [SESSION_JOBS_CAPABILITY],
   }, async (ctx) => {
     const home = options.home ?? getFridayHome();
-    const sessions = ctx.services.require(SESSIONS_CAPABILITY).api;
+    const sessions = ctx.services.require(SESSIONS_CAPABILITY);
     const events = ctx.services.require(EVENTS_CAPABILITY);
     const sessionsDir = join(home, "sessions");
     const restartSuccessor = isLifecycleRestartEnvironment();

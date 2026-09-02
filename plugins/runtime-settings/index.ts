@@ -23,7 +23,11 @@ import { definePlugin } from "../capabilities/protocol.js";
 import { MODEL_CREDENTIALS_CAPABILITY } from "../auth/contract.js";
 import { CHANNELS_TRUSTED_CAPABILITY } from "../channels/trusted-contract.js";
 import { lifecycleHandoff, LIFECYCLE_CAPABILITY } from "../lifecycle/contract.js";
-import { MODEL_CAPABILITY } from "../model/contract.js";
+import {
+  MODEL_CAPABILITY,
+  MODEL_REGISTRY_CAPABILITY,
+  type ModelService,
+} from "../model/contract.js";
 import { PERMISSIONS_CAPABILITY } from "../permissions/contract.js";
 import {
   SYSTEM_ACTION_CONTRIBUTION,
@@ -90,7 +94,7 @@ function permissionMode(input: Readonly<SystemJsonObject>): RuntimePermissionMod
   throw new Error("permissionMode must be ask, auto, or full");
 }
 
-function assertKnownModel(model: typeof import("@friday/model"), provider: string, modelId: string, label: string): void {
+function assertKnownModel(model: ModelService, provider: string, modelId: string, label: string): void {
   const knownProvider = model.getProviders().find((candidate) => candidate === provider);
   if (!knownProvider) throw new Error(`Unknown ${label} provider: ${provider}`);
   if (!model.getModels(knownProvider).some((candidate) => candidate.id === modelId)) {
@@ -98,7 +102,7 @@ function assertKnownModel(model: typeof import("@friday/model"), provider: strin
   }
 }
 
-function validateSettings(model: typeof import("@friday/model"), settings: RuntimeSettings): void {
+function validateSettings(model: ModelService, settings: RuntimeSettings): void {
   assertKnownModel(model, settings.modelProvider, settings.modelId, "main");
   if (settings.routingProvider && settings.routingModelId) {
     assertKnownModel(model, settings.routingProvider, settings.routingModelId, "routing");
@@ -162,13 +166,14 @@ function systemMode(settings: RuntimeSettings | undefined): RuntimePermissionMod
 export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOptions = {}): FridayPlugin {
   return definePlugin({
     id: "runtime-settings",
-    requires: [MODEL_CAPABILITY, LIFECYCLE_CAPABILITY, PERMISSIONS_CAPABILITY],
+    requires: [MODEL_CAPABILITY, MODEL_REGISTRY_CAPABILITY, LIFECYCLE_CAPABILITY, PERMISSIONS_CAPABILITY],
     optional: [CHANNELS_TRUSTED_CAPABILITY, MODEL_CREDENTIALS_CAPABILITY],
     provides: [RUNTIME_SETTINGS_CAPABILITY],
   }, async (ctx) => {
-    const model = ctx.services.require(MODEL_CAPABILITY).api;
+    const model = ctx.services.require(MODEL_CAPABILITY);
+    const modelRegistry = ctx.services.require(MODEL_REGISTRY_CAPABILITY);
     const lifecycleService = ctx.services.require(LIFECYCLE_CAPABILITY);
-    const lifecycle = lifecycleService.api;
+    const lifecycle = lifecycleService;
     const handoff = lifecycleHandoff(lifecycleService);
     const permissions = ctx.services.require(PERMISSIONS_CAPABILITY);
     const home = options.home ?? getFridayHome();
@@ -201,8 +206,8 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
     }
 
     for (const custom of await readCustomModels(home)) {
-      model.registerModel(toCustomModelDescriptor(custom) as never, { replace: true });
-      ctx.effect(() => { model.unregisterModel(custom.provider, custom.modelId); });
+      modelRegistry.registerModel(toCustomModelDescriptor(custom) as never, { replace: true });
+      ctx.effect(() => { modelRegistry.unregisterModel(custom.provider, custom.modelId); });
     }
 
     let updateTail: Promise<void> = Promise.resolve();
@@ -558,7 +563,7 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
             ...(contextWindow === undefined ? {} : { contextWindow }),
             ...(maxTokens === undefined ? {} : { maxTokens }),
           }, home);
-          model.registerModel(toCustomModelDescriptor(configured) as never, { replace: true });
+          modelRegistry.registerModel(toCustomModelDescriptor(configured) as never, { replace: true });
 
           if (requireApiKey) {
             if (!credentials) throw new Error("Model credential service is unavailable");
@@ -600,14 +605,14 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
                 contextWindow: existing.contextWindow,
                 maxTokens: existing.maxTokens,
               }, home);
-              model.registerModel(toCustomModelDescriptor(existing) as never, { replace: true });
+              modelRegistry.registerModel(toCustomModelDescriptor(existing) as never, { replace: true });
             } else {
               try {
                 await removeCustomModel(provider, modelId, home);
               } catch (rollbackError) {
                 throw new AggregateError([error, rollbackError], "Custom-model setup failed and persisted-model rollback also failed");
               }
-              model.unregisterModel(provider, modelId);
+              modelRegistry.unregisterModel(provider, modelId);
             }
           }
           throw error;
@@ -657,7 +662,7 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
           throw new Error("Cannot remove a custom model while it is selected as the main or routing model");
         }
         const removed = await removeCustomModel(provider, modelId, home);
-        if (removed) model.unregisterModel(provider, modelId);
+        if (removed) modelRegistry.unregisterModel(provider, modelId);
         return { removed, provider, modelId };
       },
     });

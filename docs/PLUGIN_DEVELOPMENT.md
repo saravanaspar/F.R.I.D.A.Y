@@ -43,6 +43,22 @@ const plugin = definePlugin(
 
 The Plugin Kernel validates the complete graph and activation order. Never rely on the textual order in `friday.config.json` as orchestration.
 
+### Public API rule
+
+`plugins/<owner>/contract.ts` is the source of truth for cross-plugin reuse. A capability service exposes intentional semantic members directly; it must not hand consumers an entire implementation module through a generic `api` bag.
+
+```ts
+const memory = ctx.services.require(MEMORY_CAPABILITY);
+const store = memory.openStore({ stateDir, scope: "global" });
+const matches = store.search("release decision");
+```
+
+Do **not** write `memory.api.MemoryStore`, import `@friday/memory` from another plugin, or reach into `plugins/memory/runtime/*`. If the required semantic operation already exists in the contract, reuse it. If it does not, first decide whether extending the owning contract is the correct responsibility boundary before creating another implementation.
+
+This rule also applies to self-improvement. Before generating code, the feasibility reviewer receives a bounded catalog derived from the configured `contract.ts` files, and an autonomous candidate must inspect those contracts before editing. Existing capability calls are preferred over duplicate logic.
+
+For a new developer: search `plugins/*/contract.ts`, open the relevant `*Service` interface, add its capability to `requires` or `optional`, then obtain the typed service with `ctx.services.require(...)` or `ctx.services.optional(...)`. TypeScript/IDE completion is the authoritative method listing; do not maintain a second manual list of API method names in the plugin manifest.
+
 ## 2. Boot safely while unconfigured
 
 An integration must be able to activate without credentials or pairing state. Report an explicit `unconfigured` / `auth-required` status and wait for a trusted setup action. Do not make plugin activation depend on a secret already existing.

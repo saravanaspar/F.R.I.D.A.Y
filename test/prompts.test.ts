@@ -13,7 +13,7 @@ describe("prompts plugin", () => {
       await friday.activatePlugin(capabilitiesPlugin);
       await friday.activatePlugin(promptsPlugin);
       const prompts = requireCapability(PROMPTS_CAPABILITY);
-      const prompt = prompts.api.buildSystemPrompt({
+      const prompt = prompts.buildSystemPrompt({
         cwd: "/work",
         messagesPath: "/sessions/one.jsonl",
         selectedTools: ["ipython"],

@@ -1,3 +1,4 @@
+import * as modelRuntime from "@friday/model";
 import { describe, expect, it } from "vitest";
 import { PluginTestHost } from "./helpers/plugin-host.js";
 import capabilityCompositionPlugin from "../plugins/capabilities/index.js";
@@ -7,7 +8,7 @@ import {
   uninstallCapabilityRegistry,
 } from "../plugins/capabilities/protocol.js";
 import modelPlugin from "../plugins/model/index.js";
-import { MODEL_CAPABILITY } from "../plugins/model/contract.js";
+import { MODEL_CAPABILITY, MODEL_REGISTRY_CAPABILITY } from "../plugins/model/contract.js";
 import {
   OBSERVABILITY_CAPABILITY,
   type ObservabilityService,
@@ -28,12 +29,17 @@ describe("model plugin", () => {
 
     const service = requireCapability(MODEL_CAPABILITY);
 
-    expect(typeof service.api.stream).toBe("function");
-    expect(typeof service.api.complete).toBe("function");
-    expect(typeof service.api.getModel).toBe("function");
-    expect(typeof service.api.getProviders).toBe("function");
-    expect(service.api.getProviders()).toContain("deepseek");
-    expect(service.api.getModels("deepseek").length).toBeGreaterThan(0);
+    expect(typeof service.stream).toBe("function");
+    expect(typeof service.complete).toBe("function");
+    expect(typeof service.getModel).toBe("function");
+    expect(typeof service.getProviders).toBe("function");
+    expect(service.getProviders()).toContain("deepseek");
+    expect(service.getModels("deepseek").length).toBeGreaterThan(0);
+    expect((service as unknown as { registerModel?: unknown }).registerModel).toBeUndefined();
+
+    const registry = requireCapability(MODEL_REGISTRY_CAPABILITY);
+    expect(typeof registry.registerModel).toBe("function");
+    expect(typeof registry.unregisterModel).toBe("function");
 
     uninstallCapabilityRegistry();
   });
@@ -95,8 +101,8 @@ describe("model plugin", () => {
     await friday.activatePlugin(modelPlugin);
 
     const service = requireCapability(MODEL_CAPABILITY);
-    const stream = service.api.createAssistantMessageEventStream();
-    service.api.attachModelStreamTelemetry(stream, {
+    const stream = modelRuntime.createAssistantMessageEventStream();
+    modelRuntime.attachModelStreamTelemetry(stream, {
       id: "gpt-test",
       name: "GPT Test",
       api: "openai-responses",

@@ -1,7 +1,7 @@
 import type { Capability, Contribution } from "../capabilities/protocol.js";
 import { defineCapability, defineContribution } from "../capabilities/protocol.js";
 
-export type LifecycleModule = typeof import("@friday/lifecycle");
+type LifecycleRuntime = typeof import("@friday/lifecycle");
 
 export const LIFECYCLE_RESTART_STATUS_ENV = "FRIDAY_LIFECYCLE_RESTART_STATUS";
 
@@ -29,8 +29,18 @@ export interface LifecycleHandoffCoordinator {
   status(): Readonly<{ quiesced: readonly string[]; activated: readonly string[] }>;
 }
 
+/** Process replacement, executable activation, and restart handoff primitives. */
 export interface LifecycleService {
-  readonly api: LifecycleModule;
+  readonly createLifecycleManager: LifecycleRuntime["createLifecycleManager"];
+  readonly stageFridayExecutable: LifecycleRuntime["stageFridayExecutable"];
+  readonly removeFridayStagedExecutable: LifecycleRuntime["removeFridayStagedExecutable"];
+  readonly describeFridayExecutable: LifecycleRuntime["describeFridayExecutable"];
+  readonly activateFridayExecutable: LifecycleRuntime["activateFridayExecutable"];
+  readonly acknowledgeRestartFromEnvironment: LifecycleRuntime["acknowledgeRestartFromEnvironment"];
+  readonly waitForTakeoverReleaseFromEnvironment: LifecycleRuntime["waitForTakeoverReleaseFromEnvironment"];
+  readonly acknowledgeTakeoverFromEnvironment: LifecycleRuntime["acknowledgeTakeoverFromEnvironment"];
+  readonly rejectTakeoverFromEnvironment: LifecycleRuntime["rejectTakeoverFromEnvironment"];
+  readonly isRestartPredecessorAliveFromEnvironment: LifecycleRuntime["isRestartPredecessorAliveFromEnvironment"];
   /** Present in the host plugin; optional keeps embedded legacy compositions source-compatible. */
   readonly handoff?: LifecycleHandoffCoordinator | undefined;
 }

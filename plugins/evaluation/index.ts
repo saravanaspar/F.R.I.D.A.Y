@@ -16,7 +16,7 @@ function boundedAppend(current: string, chunk: string, maxChars: number): { text
 const evaluationPlugin: FridayPlugin = definePlugin({ id: "evaluation", requires: [EXECUTION_CAPABILITY, SANDBOX_CAPABILITY], provides: [EVALUATION_CAPABILITY] }, (ctx) => {
   const execution = ctx.services.require(EXECUTION_CAPABILITY);
   const sandbox = ctx.services.require(SANDBOX_CAPABILITY);
-  const shell = execution.api.createLocalShellOperations();
+  const shell = execution.createLocalShellOperations();
 
   evaluation.installExecutionAccess({
     async runProcess(command, args, options = {}) {
@@ -70,7 +70,7 @@ const evaluationPlugin: FridayPlugin = definePlugin({ id: "evaluation", requires
         }
       }
 
-      const result = await execution.api.execCommand(command, args, cwd, {
+      const result = await execution.execCommand(command, args, cwd, {
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
         ...(options.env === undefined ? {} : { env: { ...process.env, ...options.env } }),
@@ -90,7 +90,10 @@ const evaluationPlugin: FridayPlugin = definePlugin({ id: "evaluation", requires
     },
   });
 
-  const service: EvaluationService = Object.freeze({ api: evaluation });
+  const service: EvaluationService = Object.freeze({
+    runCommandEvaluation: evaluation.runCommandEvaluation,
+    runCommandEvaluationSuite: evaluation.runCommandEvaluationSuite,
+  });
   ctx.services.provide(EVALUATION_CAPABILITY, service);
 });
 

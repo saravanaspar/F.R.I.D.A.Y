@@ -1,10 +1,11 @@
 import type { Capability } from "../capabilities/protocol.js";
 import { defineCapability } from "../capabilities/protocol.js";
 
-export type GenerationsModule = typeof import("@friday/generations");
+type GenerationsRuntime = typeof import("@friday/generations");
 
+/** Durable generation lineage and promotion state. */
 export interface GenerationsService {
-  readonly api: GenerationsModule;
+  readonly createGenerationsManager: GenerationsRuntime["createGenerationsManager"];
 }
 
 export const GENERATIONS_CAPABILITY: Capability<GenerationsService> =

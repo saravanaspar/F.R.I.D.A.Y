@@ -17,16 +17,16 @@ const lifecyclePlugin: FridayPlugin = definePlugin({ id: "lifecycle", requires: 
   const execution = ctx.services.require(EXECUTION_CAPABILITY);
   lifecycle.installExecutionAccess({
     launchDetachedProcess(command, args, options) {
-      return execution.api.launchDetachedProcess(command, args, options);
+      return execution.launchDetachedProcess(command, args, options);
     },
     isProcessAlive(pid) {
-      return execution.api.isProcessAlive(pid);
+      return execution.isProcessAlive(pid);
     },
     terminateProcess(pid) {
-      execution.api.signalProcessGroupOrProcess(pid, "SIGTERM");
+      execution.signalProcessGroupOrProcess(pid, "SIGTERM");
     },
     signalProcess(pid, signal) {
-      execution.api.signalProcessGroupOrProcess(pid, signal);
+      execution.signalProcessGroupOrProcess(pid, signal);
     },
   });
 
@@ -47,7 +47,16 @@ const lifecyclePlugin: FridayPlugin = definePlugin({ id: "lifecycle", requires: 
   };
 
   const service: LifecycleService = Object.freeze({
-    api: lifecycle,
+    createLifecycleManager: lifecycle.createLifecycleManager,
+    stageFridayExecutable: lifecycle.stageFridayExecutable,
+    removeFridayStagedExecutable: lifecycle.removeFridayStagedExecutable,
+    describeFridayExecutable: lifecycle.describeFridayExecutable,
+    activateFridayExecutable: lifecycle.activateFridayExecutable,
+    acknowledgeRestartFromEnvironment: lifecycle.acknowledgeRestartFromEnvironment,
+    waitForTakeoverReleaseFromEnvironment: lifecycle.waitForTakeoverReleaseFromEnvironment,
+    acknowledgeTakeoverFromEnvironment: lifecycle.acknowledgeTakeoverFromEnvironment,
+    rejectTakeoverFromEnvironment: lifecycle.rejectTakeoverFromEnvironment,
+    isRestartPredecessorAliveFromEnvironment: lifecycle.isRestartPredecessorAliveFromEnvironment,
     handoff: Object.freeze({
       async quiesce(): Promise<void> {
         const errors: Error[] = [];

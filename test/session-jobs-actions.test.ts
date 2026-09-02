@@ -56,7 +56,7 @@ async function assemble(home: string, requestApproval: () => Promise<boolean>) {
     ctx.services.provide(EVENTS_CAPABILITY, { publish: () => ({}) } as never);
   }), { defer: true });
   await friday.activatePlugin(definePlugin({ id: "test-job-sessions", provides: [SESSIONS_CAPABILITY] }, (ctx) => {
-    ctx.services.provide(SESSIONS_CAPABILITY, { api: { SessionManager: { listAll: async () => [] } } } as never);
+    ctx.services.provide(SESSIONS_CAPABILITY, { SessionManager: { listAll: async () => [] } } as never);
   }), { defer: true });
   await friday.activatePlugin(definePlugin({ id: "test-job-channels", provides: [CHANNELS_TRUSTED_CAPABILITY] }, (ctx) => {
     ctx.services.provide(CHANNELS_TRUSTED_CAPABILITY, { requestApproval } as never);

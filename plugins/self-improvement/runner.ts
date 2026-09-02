@@ -14,9 +14,11 @@ import type {
   SelfImproveRunResult,
   SelfImprovementHandoffOptions,
   SelfImprovementGateSpec,
-  SelfImprovementModule,
   SelfImprovementService,
 } from "./contract.js";
+
+type SelfImprovementRuntime = typeof import("@friday/self-improvement");
+
 import {
   SelfImprovementMissionStore,
   type SelfImprovementMission,
@@ -26,7 +28,7 @@ const DEFAULT_RESTART_TIMEOUT_MS = 30_000;
 const DEFAULT_TAKEOVER_TIMEOUT_MS = 30 * 60_000;
 const SELF_IMPROVEMENT_AGENT_PROMPT = [
   "You are implementing a self-improvement candidate in an isolated Git worktree. Modify only this worktree. Do not edit .git metadata and do not commit; the host finalizes a verified commit after strict gates pass.",
-  "Obey the objective's explicit placement decision. Reuse an existing capability when possible; otherwise extend the closest owning plugin. Use an MCP integration for externally supplied tool protocols. Create a new plugin only for a genuinely distinct durable domain boundary. Put code in src/ only for framework-neutral boot, orchestration, lifecycle, or security invariants. Never weaken architecture tests.",
+  "Obey the objective's explicit placement decision. Before editing, search plugins/*/contract.ts and the relevant plugin manifests. Treat those typed contracts as FRIDAY's public reusable API catalog: if a required operation already exists, declare that capability in requires/optional and call it through ctx.services.require/optional instead of duplicating logic or importing sibling runtime implementation. Extend the closest owner's semantic contract only when the operation is genuinely absent. Use an MCP integration for externally supplied tool protocols. Create a new plugin only for a genuinely distinct durable domain boundary. Put code in src/ only for framework-neutral boot, orchestration, lifecycle, or security invariants. Never weaken architecture tests.",
   "For a new connector or integration, define an explicit capability/contribution boundary, lifecycle ownership, configuration/status surface, least-privilege authorization, secret handling through trusted credential/Vault mechanisms, and deterministic tests. The plugin must boot safely while unconfigured and expose an explicit unconfigured/auth-required status; credentials or OAuth/pairing are acquired only after the verified successor is running. Add a test proving unconfigured startup does not crash activation. Never embed credentials or make model-visible chat carry secrets.",
   "Preserve compatibility with existing plugin boundaries. Add tests that prove the new feature, its failure/security cases, and lifecycle cleanup. Do not weaken, skip, delete, or rewrite unrelated tests merely to make gates pass.",
   "Use bash and edit to inspect, implement, test, and repair the objective. Continue until the configured host gates pass.",
@@ -101,7 +103,7 @@ async function runStrictEvaluationCommand(
   evaluation: EvaluationService,
   spec: { readonly id: string; readonly command: string; readonly cwd: string; readonly timeoutMs: number; readonly network?: boolean },
 ): Promise<void> {
-  const suite = await evaluation.api.runCommandEvaluationSuite([{
+  const suite = await evaluation.runCommandEvaluationSuite([{
     ...spec,
     maxOutputChars: 12_000,
     ...(spec.network === undefined ? {} : { network: spec.network }),
@@ -141,7 +143,7 @@ async function runHostCommand(
   options: { readonly timeoutMs: number; readonly env?: Record<string, string | undefined>; readonly signal?: AbortSignal },
 ): Promise<void> {
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const result = await execution.api.execCommand(npm, [...args], repository, {
+  const result = await execution.execCommand(npm, [...args], repository, {
     timeout: options.timeoutMs,
     maxOutputBytes: 16 * 1024 * 1024,
     ...(options.env === undefined ? {} : { env: options.env }),
@@ -188,7 +190,7 @@ async function buildPromotedExecutable(
   });
   const built = join(repository, "build", "binary", process.platform === "win32" ? "friday.exe" : "friday");
   if (!existsSync(built)) throw new Error(`Self-improvement binary build did not produce ${built}`);
-  return lifecycle.api.stageFridayExecutable(built, { generationId, commit });
+  return lifecycle.stageFridayExecutable(built, { generationId, commit });
 }
 
 async function evaluateRepository(
@@ -196,7 +198,7 @@ async function evaluateRepository(
   repository: string,
   gates: readonly SelfImprovementGateSpec[],
 ): Promise<boolean> {
-  const result = await evaluation.api.runCommandEvaluationSuite(
+  const result = await evaluation.runCommandEvaluationSuite(
     gates.map((gate) => ({ ...gate, command: gate.command, cwd: repository })),
   );
   return result.results.length === gates.length
@@ -208,7 +210,7 @@ function missionStore(root: string): SelfImprovementMissionStore {
 }
 
 async function removeCandidateWorktree(
-  selfImprovement: SelfImprovementModule,
+  selfImprovement: SelfImprovementRuntime,
   worktrees: WorktreesService,
   mission: SelfImprovementMission,
   root: string,
@@ -217,7 +219,7 @@ async function removeCandidateWorktree(
   const candidate = selfManager.getCandidate(mission.candidateId);
   if (!candidate) return undefined;
   try {
-    await worktrees.api.removeWorktree({
+    await worktrees.removeWorktree({
       repository: mission.repository,
       directory: candidate.directory,
       force: true,
@@ -230,7 +232,7 @@ async function removeCandidateWorktree(
 }
 
 async function rollbackMission(
-  selfImprovement: SelfImprovementModule,
+  selfImprovement: SelfImprovementRuntime,
   dependencies: SelfImprovementRunnerDependencies,
   mission: SelfImprovementMission,
   error: unknown,
@@ -238,7 +240,7 @@ async function rollbackMission(
 ): Promise<Error[]> {
   const { generations, worktrees } = dependencies;
   const message = errorMessage(error);
-  const manager = generations.api.createGenerationsManager({
+  const manager = generations.createGenerationsManager({
     repository: mission.repository,
     stateDir: join(root, "generations"),
   });
@@ -286,7 +288,7 @@ async function rollbackMission(
 
   if (candidate) {
     try {
-      await worktrees.api.removeWorktree({
+      await worktrees.removeWorktree({
         repository: mission.repository,
         directory: candidate.directory,
         force: true,
@@ -299,7 +301,7 @@ async function rollbackMission(
 
   if (mission.targetExecutable) {
     try {
-      dependencies.lifecycle.api.removeFridayStagedExecutable(mission.targetExecutable);
+      dependencies.lifecycle.removeFridayStagedExecutable(mission.targetExecutable);
     } catch (cleanupError) {
       warnings.push(cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError)));
     }
@@ -330,7 +332,7 @@ function requireMissionForGeneration(root: string, generationId: string): SelfIm
 }
 
 export function createSelfImprovementRunner(
-  selfImprovement: SelfImprovementModule,
+  selfImprovement: SelfImprovementRuntime,
   dependencies: SelfImprovementRunnerDependencies,
 ): Pick<
   SelfImprovementService,
@@ -350,7 +352,7 @@ export function createSelfImprovementRunner(
       const gates = inferGates(repository, options.gates);
       const worktreeRoot = resolve(options.worktreeRoot ?? join(dirname(repository), ".friday-worktrees"));
       const { autonomy, evaluation, execution, lifecycle, sandbox, worktrees } = dependencies;
-      const primary = await worktrees.api.inspectWorktree({ repository, directory: repository });
+      const primary = await worktrees.inspectWorktree({ repository, directory: repository });
       if (!primary.clean) throw new Error("Autonomous self-improvement requires a clean primary checkout");
 
       const selfManager = selfImprovement.createSelfImprovementManager({ stateDir: getSelfImprovementMissionDir(root) });
@@ -366,7 +368,7 @@ export function createSelfImprovementRunner(
         // the lockfile before the model starts. Re-run this after edits so host
         // gates never depend on stale predecessor dependencies.
         await prepareCandidateEnvironment(evaluation, candidate.directory);
-        const trustedMounts = await worktrees.api.trustedWorktreeReadOnlyMounts({
+        const trustedMounts = await worktrees.trustedWorktreeReadOnlyMounts({
           repository,
           directory: candidate.directory,
         });
@@ -400,7 +402,7 @@ export function createSelfImprovementRunner(
         }
 
         await prepareCandidateEnvironment(evaluation, candidate.directory);
-        const committed = await worktrees.api.commitWorktree({
+        const committed = await worktrees.commitWorktree({
           repository,
           directory: candidate.directory,
           message: `friday: ${options.objective.slice(0, 120)}`,
@@ -431,7 +433,7 @@ export function createSelfImprovementRunner(
 
         const singleBinary = process.env.FRIDAY_SINGLE_BINARY === "1";
         const previousExecutable = singleBinary
-          ? lifecycle.api.describeFridayExecutable(process.execPath)
+          ? lifecycle.describeFridayExecutable(process.execPath)
           : undefined;
         const targetExecutable = singleBinary
           ? await buildPromotedExecutable(lifecycle, execution, repository, generationId, commit, options.signal)
@@ -484,7 +486,7 @@ export function createSelfImprovementRunner(
           );
         }
 
-        const lifecycleManager = lifecycle.api.createLifecycleManager({ stateDir: join(root, "lifecycle") });
+        const lifecycleManager = lifecycle.createLifecycleManager({ stateDir: join(root, "lifecycle") });
         try {
           const restart = await lifecycleManager.launchReplacement({
             ...(mission.targetExecutable === undefined ? {} : { executable: mission.targetExecutable.path }),
@@ -533,7 +535,7 @@ export function createSelfImprovementRunner(
       options: SelfImprovementHandoffOptions = {},
     ): Promise<void> {
       const root = getSelfImprovementStateRoot(options.stateDir);
-      const manager = lifecycle.api.createLifecycleManager({ stateDir: join(root, "lifecycle") });
+      const manager = lifecycle.createLifecycleManager({ stateDir: join(root, "lifecycle") });
       const compatibleManager = manager as typeof manager & {
         releaseForTakeover?: ((requestId: string) => unknown) | undefined;
         retireReplacement?: ((requestId: string, reason?: string) => Promise<unknown>) | undefined;
@@ -582,7 +584,7 @@ export function createSelfImprovementRunner(
       if (mission.status !== "restarting" && mission.status !== "resuming") {
         throw new Error(`Mission ${mission.id} cannot resume from status ${mission.status}`);
       }
-      const manager = dependencies.generations.api.createGenerationsManager({
+      const manager = dependencies.generations.createGenerationsManager({
         repository: mission.repository,
         stateDir: join(root, "generations"),
       });
@@ -592,7 +594,7 @@ export function createSelfImprovementRunner(
         throw new Error(`Restarted process is not running promoted generation ${generationId}`);
       }
       if (mission.targetExecutable) {
-        const running = dependencies.lifecycle.api.describeFridayExecutable(process.execPath);
+        const running = dependencies.lifecycle.describeFridayExecutable(process.execPath);
         if (running.path !== mission.targetExecutable.path || running.sha256 !== mission.targetExecutable.sha256) {
           throw new Error(`Restarted process is not executing the verified binary for generation ${generationId}`);
         }
@@ -614,7 +616,7 @@ export function createSelfImprovementRunner(
       const mission = missionStore(root).get(missionId);
       if (!mission) throw new Error(`Self-improvement mission ${missionId} not found`);
       if (!mission.fromGenerationId) throw new Error(`Mission ${missionId} has no previous generation`);
-      const manager = dependencies.generations.api.createGenerationsManager({
+      const manager = dependencies.generations.createGenerationsManager({
         repository: mission.repository,
         stateDir: join(root, "generations"),
       });
@@ -629,7 +631,7 @@ export function createSelfImprovementRunner(
       await runner.preflightGenerationResume(generationId, root);
       const mission = requireMissionForGeneration(root, generationId);
       const { generations, lifecycle } = dependencies;
-      const manager = generations.api.createGenerationsManager({
+      const manager = generations.createGenerationsManager({
         repository: mission.repository,
         stateDir: join(root, "generations"),
       });
@@ -647,7 +649,7 @@ export function createSelfImprovementRunner(
         if (!passed) throw new Error(`Promoted generation ${generationId} failed post-restart verification`);
         await manager.checkpointCurrent();
         if (mission.targetExecutable) {
-          lifecycle.api.activateFridayExecutable(mission.targetExecutable, {
+          lifecycle.activateFridayExecutable(mission.targetExecutable, {
             generationId: mission.targetGenerationId,
             commit: mission.targetCommit,
           });
@@ -667,8 +669,8 @@ export function createSelfImprovementRunner(
 
         let predecessorAlive = false;
         try {
-          lifecycle.api.rejectTakeoverFromEnvironment({ error });
-          predecessorAlive = lifecycle.api.isRestartPredecessorAliveFromEnvironment() === true;
+          lifecycle.rejectTakeoverFromEnvironment({ error });
+          predecessorAlive = lifecycle.isRestartPredecessorAliveFromEnvironment() === true;
         } catch (contextError) {
           reportOperationalError({ component: "self-improvement", operation: "inspect predecessor during rollback", error: contextError });
           // If restart context cannot be trusted, start a known-good process rather
@@ -678,13 +680,13 @@ export function createSelfImprovementRunner(
 
         let rollbackExecutable: string | undefined;
         if (mission.previousExecutable) {
-          const verifiedPrevious = lifecycle.api.describeFridayExecutable(mission.previousExecutable.path);
+          const verifiedPrevious = lifecycle.describeFridayExecutable(mission.previousExecutable.path);
           if (verifiedPrevious.sha256 !== mission.previousExecutable.sha256) {
             throw new Error("Previous FRIDAY executable changed after self-improvement began; refusing unverified rollback launch");
           }
           rollbackExecutable = verifiedPrevious.path;
         }
-        const lifecycleManager = lifecycle.api.createLifecycleManager({ stateDir: join(root, "lifecycle") });
+        const lifecycleManager = lifecycle.createLifecycleManager({ stateDir: join(root, "lifecycle") });
         const recovery = await lifecycleManager.launchReplacement({
           ...(rollbackExecutable === undefined ? {} : { executable: rollbackExecutable }),
           args: ["--rollback-recovered", mission.id, "--state-dir", root, "--permission", mission.permissionMode],

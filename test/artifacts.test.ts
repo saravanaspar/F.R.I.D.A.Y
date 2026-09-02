@@ -63,8 +63,7 @@ async function assemble(
   }), { defer: true });
   await friday.activatePlugin(definePlugin({ id: "test-artifact-execution", provides: [EXECUTION_CAPABILITY] }, (ctx) => {
     ctx.services.provide(EXECUTION_CAPABILITY, {
-      api: {
-        async execCommand(command: string, args: string[], cwd: string) {
+      async execCommand(command: string, args: string[], cwd: string) {
           if (execOverride) return execOverride(command, args, cwd);
           try {
             const result = await execFileAsync(command, args, { cwd, maxBuffer: 4 * 1024 * 1024 });
@@ -74,7 +73,6 @@ async function assemble(
             return { stdout: failure.stdout ?? "", stderr: failure.stderr ?? String(error), code: failure.code ?? 1, killed: false };
           }
         },
-      },
     } as never);
   }), { defer: true });
   await friday.activatePlugin(definePlugin({ id: "test-artifact-sandbox", provides: [SANDBOX_CAPABILITY] }, (ctx) => {

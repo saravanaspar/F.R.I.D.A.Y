@@ -45,8 +45,8 @@ const authPlugin: FridayPlugin = definePlugin({
 
   auth.configureModelCatalogAccess({
     getModels: (provider) => {
-      const knownProvider = model.api.getProviders().find((candidate) => candidate === provider);
-      return knownProvider ? model.api.getModels(knownProvider) : [];
+      const knownProvider = model.getProviders().find((candidate) => candidate === provider);
+      return knownProvider ? model.getModels(knownProvider) : [];
     },
   });
 
@@ -56,9 +56,9 @@ const authPlugin: FridayPlugin = definePlugin({
     const channels = ctx.services.optional(CHANNELS_TRUSTED_CAPABILITY);
     if (!channels) throw new Error("Model credential capture requires Channels trusted interaction support");
     const provider = safeProvider(input.provider);
-    const knownProvider = model.api.getProviders().find((candidate) => candidate === provider);
+    const knownProvider = model.getProviders().find((candidate) => candidate === provider);
     if (!knownProvider) throw new Error(`Unknown model provider: ${provider}`);
-    const models = model.api.getModels(knownProvider);
+    const models = model.getModels(knownProvider);
     const testModel = models.find((candidate) => candidate.featured) ?? models[0];
     if (!testModel) throw new Error(`No models are registered for provider ${provider}`);
     const ref = credentials.ref(provider);
@@ -72,7 +72,7 @@ const authPlugin: FridayPlugin = definePlugin({
       inputMode: "opaque-token",
       async validateSecret(secret: Uint8Array) {
         const apiKey = Buffer.from(secret).toString("utf8");
-        const response = await model.api.completeSimple(
+        const response = await model.completeSimple(
           testModel as never,
           { messages: [{ role: "user", content: "Reply only with OK.", timestamp: Date.now() }] },
           { apiKey, maxTokens: 4, temperature: 0 },
@@ -134,7 +134,14 @@ const authPlugin: FridayPlugin = definePlugin({
     },
   });
 
-  const service: AuthService = Object.freeze({ api: auth });
+  const service: AuthService = Object.freeze({
+    getOAuthProvider: auth.getOAuthProvider,
+    getOAuthProviders: auth.getOAuthProviders,
+    registerOAuthProvider: auth.registerOAuthProvider,
+    oauthErrorHtml: auth.oauthErrorHtml,
+    oauthSuccessHtml: auth.oauthSuccessHtml,
+    generatePKCE: auth.generatePKCE,
+  });
   ctx.services.provide(AUTH_CAPABILITY, service);
   ctx.services.provide(MODEL_CREDENTIALS_CAPABILITY, credentials);
 

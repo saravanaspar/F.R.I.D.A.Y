@@ -1,3 +1,4 @@
+import * as modelRuntime from "@friday/model";
 import { describe, expect, it } from "vitest";
 import { PluginTestHost } from "./helpers/plugin-host.js";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
@@ -27,11 +28,11 @@ describe("agent plugin", () => {
 
       const models = requireCapability(MODEL_CAPABILITY);
       const agents = requireCapability(AGENT_CAPABILITY);
-      const faux = models.api.registerFauxProvider();
+      const faux = modelRuntime.registerFauxProvider();
 
       try {
-        faux.setResponses([models.api.fauxAssistantMessage("hello from agent")]);
-        const agent = new agents.api.Agent({ initialState: { model: faux.getModel() } });
+        faux.setResponses([modelRuntime.fauxAssistantMessage("hello from agent")]);
+        const agent = new agents.Agent({ initialState: { model: faux.getModel() } });
         await agent.prompt("hello");
 
         expect(assistantText(agent.state.messages)).toBe("hello from agent");

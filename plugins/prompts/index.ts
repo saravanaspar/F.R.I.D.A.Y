@@ -4,7 +4,10 @@ import { definePlugin } from "../capabilities/protocol.js";
 import { PROMPTS_CAPABILITY, type PromptsService } from "./contract.js";
 
 const promptsPlugin: FridayPlugin = definePlugin({ id: "prompts", provides: [PROMPTS_CAPABILITY] }, (ctx) => {
-  const service: PromptsService = Object.freeze({ api: prompts });
+  const service: PromptsService = Object.freeze({
+    buildSystemPrompt: prompts.buildSystemPrompt,
+    buildSystemPromptPlan: prompts.buildSystemPromptPlan,
+  });
   ctx.services.provide(PROMPTS_CAPABILITY, service);
 });
 

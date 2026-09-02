@@ -11,7 +11,7 @@ const worktreesPlugin: FridayPlugin = definePlugin({ id: "worktrees", requires: 
     async runProcess(command, args, options) {
       options.signal?.throwIfAborted();
       try {
-        const result = await execution.api.execCommand(command, args, options.cwd, {
+        const result = await execution.execCommand(command, args, options.cwd, {
           ...(options.signal ? { signal: options.signal } : {}),
           ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
         });
@@ -34,7 +34,15 @@ const worktreesPlugin: FridayPlugin = definePlugin({ id: "worktrees", requires: 
     },
   });
 
-  const service: WorktreesService = Object.freeze({ api: worktrees });
+  const service: WorktreesService = Object.freeze({
+    createWorktree: worktrees.createWorktree,
+    inspectWorktree: worktrees.inspectWorktree,
+    listWorktrees: worktrees.listWorktrees,
+    resetWorktree: worktrees.resetWorktree,
+    removeWorktree: worktrees.removeWorktree,
+    trustedWorktreeReadOnlyMounts: worktrees.trustedWorktreeReadOnlyMounts,
+    commitWorktree: worktrees.commitWorktree,
+  });
   ctx.services.provide(WORKTREES_CAPABILITY, service);
 });
 

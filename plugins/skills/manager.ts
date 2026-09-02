@@ -13,7 +13,9 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { SkillsModule } from "./contract.js";
+import type { SkillsService } from "./contract.js";
+
+type SkillValidationService = Pick<SkillsService, "parseFrontmatter" | "loadSkillsFromDir">;
 
 const MAX_SKILL_FILE_BYTES = 256 * 1024;
 const MAX_SKILL_TOTAL_BYTES = 4 * 1024 * 1024;
@@ -95,7 +97,7 @@ function cleanContent(value: unknown, label: string, maximum = MAX_SKILL_FILE_BY
   return normalized;
 }
 
-function validateSkillFrontmatter(skills: SkillsModule, name: string, content: string): void {
+function validateSkillFrontmatter(skills: SkillValidationService, name: string, content: string): void {
   if (PROMPT_INJECTION.test(content)) throw new Error("SKILL.md contains policy-override or prompt-exfiltration language and was rejected by the managed-skill security scan");
   const parsed = skills.parseFrontmatter<Record<string, unknown>>(content).frontmatter;
   if (parsed.name !== name) throw new Error(`SKILL.md frontmatter name must exactly match ${name}`);
@@ -138,7 +140,7 @@ async function scanTree(root: string): Promise<{ files: number; bytes: number }>
   return { files, bytes };
 }
 
-async function validateSkill(skills: SkillsModule, root: string, name: string): Promise<void> {
+async function validateSkill(skills: SkillValidationService, root: string, name: string): Promise<void> {
   const skillPath = join(root, name, "SKILL.md");
   const content = await readFile(skillPath, "utf8");
   validateSkillFrontmatter(skills, name, content);
@@ -151,7 +153,7 @@ async function validateSkill(skills: SkillsModule, root: string, name: string): 
   if (severe.length > 0) throw new Error(`Skill ${name} has validation diagnostics: ${severe.map((item) => item.message).join("; ")}`);
 }
 
-async function withRollback<T>(root: string, name: string, operation: () => Promise<T>, validate = true, skills?: SkillsModule): Promise<T> {
+async function withRollback<T>(root: string, name: string, operation: () => Promise<T>, validate = true, skills?: SkillValidationService): Promise<T> {
   await mkdir(root, { recursive: true, mode: 0o700 });
   const target = join(root, name);
   await assertNoSymlinkAncestors(root, target);
@@ -255,7 +257,7 @@ export interface SkillManageInput {
   readonly replaceAll?: boolean | undefined;
 }
 
-export async function manageSkill(skills: SkillsModule, input: SkillManageInput): Promise<Record<string, unknown>> {
+export async function manageSkill(skills: SkillValidationService, input: SkillManageInput): Promise<Record<string, unknown>> {
   const root = userSkillsDir();
   const name = normalizeSkillName(input.name);
   const target = join(root, name);
@@ -339,7 +341,7 @@ export async function manageSkill(skills: SkillsModule, input: SkillManageInput)
   }, true, skills);
 }
 
-export async function viewSkill(skills: SkillsModule, name?: string, path?: string): Promise<Record<string, unknown>> {
+export async function viewSkill(skills: SkillValidationService, name?: string, path?: string): Promise<Record<string, unknown>> {
   const root = userSkillsDir();
   await mkdir(root, { recursive: true, mode: 0o700 });
   if (!name) {

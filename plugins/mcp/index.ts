@@ -180,11 +180,11 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
     }
 
     mcp.configureAuthAccess({
-      getOAuthProvider: (id) => auth.api.getOAuthProvider(id),
-      registerOAuthProvider: (provider) => auth.api.registerOAuthProvider(provider),
-      oauthErrorHtml: (message, details) => auth.api.oauthErrorHtml(message, details),
-      oauthSuccessHtml: (message) => auth.api.oauthSuccessHtml(message),
-      generatePKCE: () => auth.api.generatePKCE(),
+      getOAuthProvider: (id) => auth.getOAuthProvider(id),
+      registerOAuthProvider: (provider) => auth.registerOAuthProvider(provider),
+      oauthErrorHtml: (message, details) => auth.oauthErrorHtml(message, details),
+      oauthSuccessHtml: (message) => auth.oauthSuccessHtml(message),
+      generatePKCE: () => auth.generatePKCE(),
     });
     mcp.registerBuiltinMcpOAuthProviders();
 

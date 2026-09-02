@@ -53,7 +53,7 @@ function sessionLabel(session: { id: string; cwd: string; name?: string | undefi
 
 function createSessionCandidateProvider(sessions: SessionsService, sessionJobs: () => SessionJobsService | undefined) {
   return async ({ query, principal }: { readonly query: string; readonly principal: RoutingPrincipal }): Promise<readonly RoutingSessionCandidate[]> => {
-    const all = (await sessions.api.SessionManager.listAll(undefined, join(stateRoot(), "sessions")))
+    const all = (await sessions.SessionManager.listAll(undefined, join(stateRoot(), "sessions")))
       .filter((session) => ownerScopeAllows(session.ownerScope, principal));
     const activeBySession = new Map<string, ReturnType<SessionJobsService["list"]>[number][]>();
     for (const job of sessionJobs()?.list({ activeOnly: true, limit: 100 }) ?? []) {
@@ -99,10 +99,10 @@ function createSessionCandidateProvider(sessions: SessionsService, sessionJobs: 
 function createMemorySearch(memory: MemoryService) {
   return async ({ query, principal }: { readonly query: string; readonly principal: RoutingPrincipal }): Promise<readonly RoutingMemoryHint[]> => {
     const root = principalStateRoot(stateRoot(), principal);
-    const stateDir = memory.api.getGlobalMemoryStateDir(root);
-    const databasePath = memory.api.getMemoryStatePath(stateDir);
+    const stateDir = memory.globalStateDir(root);
+    const databasePath = memory.statePath(stateDir);
     if (!existsSync(databasePath) || !query.trim()) return Object.freeze([]);
-    const store = new memory.api.MemoryStore({ stateDir, scope: "global", embeddingProvider: null });
+    const store = memory.openStore({ stateDir, scope: "global", semanticSearch: false });
     try {
       return Object.freeze(store.search(query, { limit: MEMORY_HINT_LIMIT }).map((result) => Object.freeze({
         id: result.entry.id,
@@ -130,10 +130,10 @@ function selectedModel(environment: NodeJS.ProcessEnv = process.env): { provider
 function createClassifier(models: ModelService, credentials: () => ModelCredentialService | undefined): RoutingClassifier {
   return async ({ systemPrompt, userPrompt, signal }) => {
     const selected = selectedModel();
-    const model = models.api.getModel(selected.provider as never, selected.modelId as never);
+    const model = models.getModel(selected.provider as never, selected.modelId as never);
     if (!model) throw new Error(`Unknown routing model: ${selected.provider}/${selected.modelId}`);
     const apiKey = await credentials()?.getApiKey(selected.provider);
-    const response = await models.api.completeSimple(
+    const response = await models.completeSimple(
       model,
       {
         systemPrompt,
@@ -156,7 +156,7 @@ function createClassifier(models: ModelService, credentials: () => ModelCredenti
       .join("\n")
       .trim();
     if (!text) throw new Error("Routing model returned no JSON decision");
-    return models.api.parseJsonWithRepair<unknown>(text);
+    return models.parseJsonWithRepair<unknown>(text);
   };
 }
 

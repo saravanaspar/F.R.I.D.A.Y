@@ -17,7 +17,7 @@
   "scripts": {
     "clean": "rm -rf dist",
     "build": "tsgo -p tsconfig.build.json",
-    "test": "vitest run --config vitest.config.ts"
+    "test": "vitest run --config vitest.config.ts --configLoader runner --no-cache"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",

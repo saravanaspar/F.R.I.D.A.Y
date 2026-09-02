@@ -35,7 +35,7 @@ describe("rlm plugin", () => {
         { provider: "test", id: "parent", name: "Parent" },
         { provider: "test", id: "child", name: "Child" },
       ];
-      const manager = await subagents.api.SubagentManager.create({
+      const manager = await subagents.SubagentManager.create({
         parentArtifactDir: artifactDir,
         parentModel: models[0]!,
         models,
@@ -51,7 +51,7 @@ describe("rlm plugin", () => {
         },
       });
 
-      const handlers = rlm.api.createRlmHostHandlers({ subagents: manager, models });
+      const handlers = rlm.createRlmHostHandlers({ subagents: manager, models });
       const context = hostRequestContext();
       const admitted = await handlers["rlm.run"]!({
         type: "rlm.run",

@@ -210,9 +210,9 @@ function plannerSystemPrompt(): string {
 export function createSchedulerModelPlanner(models: ModelService): SchedulerTurnPlanner {
   return async (request) => {
     const selected = selectedModel();
-    const model = models.api.getModel(selected.provider as never, selected.modelId as never);
+    const model = models.getModel(selected.provider as never, selected.modelId as never);
     if (!model) throw new Error(`Unknown scheduler model: ${selected.provider}/${selected.modelId}`);
-    const response = await models.api.completeSimple(
+    const response = await models.completeSimple(
       model,
       {
         systemPrompt: plannerSystemPrompt(),
@@ -251,7 +251,7 @@ export function createSchedulerModelPlanner(models: ModelService): SchedulerTurn
       .join("\n")
       .trim();
     if (!text) throw new Error("Scheduler model returned no JSON plan");
-    return normalizePlan(models.api.parseJsonWithRepair<unknown>(text));
+    return normalizePlan(models.parseJsonWithRepair<unknown>(text));
   };
 }
 

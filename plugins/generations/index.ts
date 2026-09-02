@@ -11,7 +11,7 @@ const generationsPlugin: FridayPlugin = definePlugin({ id: "generations", requir
     async runProcess(command, args, options) {
       options.signal?.throwIfAborted();
       try {
-        const result = await execution.api.execCommand(command, args, options.cwd, {
+        const result = await execution.execCommand(command, args, options.cwd, {
           ...(options.signal ? { signal: options.signal } : {}),
           ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
         });
@@ -34,7 +34,7 @@ const generationsPlugin: FridayPlugin = definePlugin({ id: "generations", requir
     },
   });
 
-  const service: GenerationsService = Object.freeze({ api: generations });
+  const service: GenerationsService = Object.freeze({ createGenerationsManager: generations.createGenerationsManager });
   ctx.services.provide(GENERATIONS_CAPABILITY, service);
 });
 

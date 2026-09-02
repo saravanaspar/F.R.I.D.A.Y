@@ -1,10 +1,15 @@
 import type { Capability } from "../capabilities/protocol.js";
 import { defineCapability } from "../capabilities/protocol.js";
 
-export type SkillsModule = typeof import("@friday/skills");
+type SkillsRuntime = typeof import("@friday/skills");
 
+/** Skill loading, invocation parsing, and runtime metadata exposed to consumers. */
 export interface SkillsService {
-  readonly api: SkillsModule;
+  readonly loadSkills: SkillsRuntime["loadSkills"];
+  readonly loadSkillsFromDir: SkillsRuntime["loadSkillsFromDir"];
+  readonly getPythonSkillRuntimeInfo: SkillsRuntime["getPythonSkillRuntimeInfo"];
+  readonly expandSkillCommand: SkillsRuntime["expandSkillCommand"];
+  readonly parseFrontmatter: SkillsRuntime["parseFrontmatter"];
   /** In-process revision increments after trusted installs so cached Agent runtimes can refresh. */
   revision(): number;
 }

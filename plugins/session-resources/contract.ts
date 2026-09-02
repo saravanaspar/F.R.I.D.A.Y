@@ -1,10 +1,12 @@
 import type { Capability } from "../capabilities/protocol.js";
 import { defineCapability } from "../capabilities/protocol.js";
 
-export type SessionResourcesModule = typeof import("@friday/session-resources");
+type SessionResourcesRuntime = typeof import("@friday/session-resources");
 
+/** Session-scoped cleanup registration shared by long-lived runtime owners. */
 export interface SessionResourcesService {
-  readonly api: SessionResourcesModule;
+  readonly registerSessionResourceCleanup: SessionResourcesRuntime["registerSessionResourceCleanup"];
+  readonly cleanupSessionResources: SessionResourcesRuntime["cleanupSessionResources"];
 }
 
 export const SESSION_RESOURCES_CAPABILITY: Capability<SessionResourcesService> =

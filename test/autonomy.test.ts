@@ -48,12 +48,12 @@ describe("autonomy plugin", () => {
     await friday.activatePlugin(autonomyPlugin);
 
     const autonomy = requireCapability(AUTONOMY_CAPABILITY);
-    const passing = autonomy.api.createAutonomousRuntimeState({
+    const passing = autonomy.createAutonomousRuntimeState({
       enabled: true,
       maxContinuations: 1,
       gates: { commands: [`${process.execPath} -e "process.exit(0)"`] },
     });
-    const passingContinuation = await autonomy.api.nextAutonomousContinuation(
+    const passingContinuation = await autonomy.nextAutonomousContinuation(
       passing,
       { stopReason: "stop" },
       { cwd: process.cwd() },
@@ -65,7 +65,7 @@ describe("autonomy plugin", () => {
       ]),
     );
 
-    const failing = autonomy.api.createAutonomousRuntimeState({
+    const failing = autonomy.createAutonomousRuntimeState({
       enabled: true,
       maxContinuations: 1,
       gates: {
@@ -73,7 +73,7 @@ describe("autonomy plugin", () => {
         maxRetries: 2,
       },
     });
-    const failingContinuation = await autonomy.api.nextAutonomousContinuation(
+    const failingContinuation = await autonomy.nextAutonomousContinuation(
       failing,
       { stopReason: "stop" },
       { cwd: process.cwd() },

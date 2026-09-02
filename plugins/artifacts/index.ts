@@ -296,7 +296,7 @@ const artifactsPlugin: FridayPlugin = definePlugin({
       const dispose = async () => { if (!disposed) { disposed = true; await rm(workspace, { recursive: true, force: true }); } };
       const run = async (command: string, args: string[], network: boolean) => {
         const spec = sandbox.sandboxProcess({ command, args, cwd: workspace, workspace, access: "write", network, env: process.env });
-        const result = await execution.api.execCommand(spec.command, spec.args, spec.cwd, { env: spec.env, timeout: 120_000, ...(input.signal === undefined ? {} : { signal: input.signal }) });
+        const result = await execution.execCommand(spec.command, spec.args, spec.cwd, { env: spec.env, timeout: 120_000, ...(input.signal === undefined ? {} : { signal: input.signal }) });
         if (result.code !== 0) throw new Error(`${command} failed: ${(result.stderr || result.stdout).trim().slice(0, 2_000)}`);
       };
       try {

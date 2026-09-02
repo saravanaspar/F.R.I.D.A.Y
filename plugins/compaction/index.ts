@@ -9,14 +9,14 @@ const compactionPlugin: FridayPlugin = definePlugin({ id: "compaction", requires
   const model = ctx.services.require(MODEL_CAPABILITY);
   const sessions = ctx.services.require(SESSIONS_CAPABILITY);
 
-  const completeSimple = model.api.completeSimple as unknown as compaction.CompactionModelAccess["completeSimple"];
+  const completeSimple = model.completeSimple as unknown as compaction.CompactionModelAccess["completeSimple"];
   compaction.installModelAccess({ completeSimple });
   compaction.installSessionAccess({
     open: (path, cwdOverride) =>
-      sessions.api.SessionManager.open(path, undefined, cwdOverride) as unknown as compaction.CompactionSessionPort,
+      sessions.SessionManager.open(path, undefined, cwdOverride) as unknown as compaction.CompactionSessionPort,
   });
 
-  const service: CompactionService = Object.freeze({ api: compaction });
+  const service: CompactionService = Object.freeze({ compactSession: compaction.compactSession });
   ctx.services.provide(COMPACTION_CAPABILITY, service);
 });
 

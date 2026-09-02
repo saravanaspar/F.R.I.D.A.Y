@@ -35,7 +35,7 @@ describe("generations plugin", () => {
       await friday.activatePlugin(generationsPlugin);
 
       const generations = requireCapability(GENERATIONS_CAPABILITY);
-      const manager = generations.api.createGenerationsManager({ repository, stateDir });
+      const manager = generations.createGenerationsManager({ repository, stateDir });
       const first = await manager.checkpointCurrent({ label: "baseline" });
       expect(first.id).toBe("gen-000001");
 
@@ -60,7 +60,7 @@ describe("generations plugin", () => {
       const firstRef = await execFileAsync("git", ["rev-parse", "--verify", first.ref], { cwd: repository });
       expect(firstRef.stdout.trim()).toBe(first.commit);
 
-      const reopened = generations.api.createGenerationsManager({ repository, stateDir });
+      const reopened = generations.createGenerationsManager({ repository, stateDir });
       expect(reopened.getActiveGeneration()?.id).toBe(first.id);
       expect(reopened.listRollbackTargets()).toEqual([]);
     } finally {
@@ -95,7 +95,7 @@ describe("generations plugin", () => {
       await friday.activatePlugin(generationsPlugin);
 
       const generations = requireCapability(GENERATIONS_CAPABILITY);
-      const manager = generations.api.createGenerationsManager({ repository, stateDir });
+      const manager = generations.createGenerationsManager({ repository, stateDir });
       const baseline = await manager.checkpointCurrent({ label: "baseline" });
       expect(baseline.commit).toBe(baseCommit);
 

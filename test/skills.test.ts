@@ -40,13 +40,13 @@ describe("skills plugin", () => {
       "utf8",
     );
 
-    const { skills, diagnostics } = service.api.loadSkillsFromDir({ dir: root, source: "test" });
+    const { skills, diagnostics } = service.loadSkillsFromDir({ dir: root, source: "test" });
     expect(diagnostics).toEqual([]);
     expect(skills.map((skill) => skill.name)).toEqual(["review-code"]);
 
-    const expanded = service.api.expandSkillCommand("/skill:review-code focus on regressions", { skills });
+    const expanded = service.expandSkillCommand("/skill:review-code focus on regressions", { skills });
     expect(expanded).toContain("Inspect the diff and tests.");
     expect(expanded).toContain("focus on regressions");
-    expect("formatSkillsForPrompt" in service.api).toBe(false);
+    expect("formatSkillsForPrompt" in service).toBe(false);
   });
 });

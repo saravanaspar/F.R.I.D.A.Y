@@ -1,3 +1,4 @@
+import * as selfImprovementRuntime from "@friday/self-improvement";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -65,7 +66,7 @@ describe("self-improvement plugin", () => {
       await friday.activatePlugin(selfImprovementPlugin);
 
       const selfImprovement = requireCapability(SELF_IMPROVEMENT_CAPABILITY);
-      const manager = selfImprovement.api.createSelfImprovementManager({ stateDir });
+      const manager = selfImprovementRuntime.createSelfImprovementManager({ stateDir });
       const candidate = await manager.createCandidate({
         objective: "Promote a verified candidate without mutating the base during evaluation",
         repository,
@@ -102,12 +103,12 @@ describe("self-improvement plugin", () => {
       expect(await readFile(join(repository, "promoted.txt"), "utf8")).toBe("candidate\n");
 
       const generations = requireCapability(GENERATIONS_CAPABILITY);
-      const generationManager = generations.api.createGenerationsManager({ repository, stateDir: generationsStateDir });
+      const generationManager = generations.createGenerationsManager({ repository, stateDir: generationsStateDir });
       expect(generationManager.getActiveGeneration()?.id).toBe(promoted.promotedGenerationId);
       expect(generationManager.getActiveGeneration()?.commit).toBe(candidateHead);
       expect(generationManager.listGenerations()).toHaveLength(2);
 
-      const reopened = selfImprovement.api.createSelfImprovementManager({ stateDir });
+      const reopened = selfImprovementRuntime.createSelfImprovementManager({ stateDir });
       expect(reopened.getCandidate(candidate.id)?.status).toBe("promoted");
       const [pendingHandoff] = reopened.listGenerationHandoffs();
       expect(pendingHandoff).toMatchObject({
@@ -123,7 +124,7 @@ describe("self-improvement plugin", () => {
       const claimed = reopened.claimGenerationHandoff({ generationId: promoted.promotedGenerationId! });
       expect(claimed).toMatchObject({ status: "resuming", resumeAttempts: 1 });
 
-      const restarted = selfImprovement.api.createSelfImprovementManager({ stateDir });
+      const restarted = selfImprovementRuntime.createSelfImprovementManager({ stateDir });
       expect(restarted.getGenerationHandoff(claimed!.id)).toMatchObject({
         status: "pending",
         resumeAttempts: 1,

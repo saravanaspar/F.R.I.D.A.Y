@@ -121,7 +121,7 @@ async function runHelper(
     env: { ...process.env },
     interactive: input !== undefined,
   });
-  const result = await execution.api.execCommand(context.command, context.args, context.cwd, {
+  const result = await execution.execCommand(context.command, context.args, context.cwd, {
     env: context.env,
     timeout: EDIT_COMMAND_TIMEOUT_MS,
     maxOutputBytes: MAX_EDIT_COMMAND_OUTPUT_BYTES,

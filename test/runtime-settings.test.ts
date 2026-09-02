@@ -33,9 +33,7 @@ async function assemble(
   await friday.activatePlugin(modelPlugin, { defer: true });
   await friday.activatePlugin(definePlugin({ id: "test-lifecycle", provides: [LIFECYCLE_CAPABILITY] }, (ctx) => {
     ctx.services.provide(LIFECYCLE_CAPABILITY, {
-      api: {
-        createLifecycleManager: () => ({ launchReplacement, waitForTakeover: async () => undefined, retireReplacement }),
-      },
+      createLifecycleManager: () => ({ launchReplacement, waitForTakeover: async () => undefined, retireReplacement }),
     } as never);
   }), { defer: true });
   await friday.activatePlugin(definePlugin({ id: "test-permissions", provides: [PERMISSIONS_CAPABILITY] }, (ctx) => {
@@ -68,7 +66,7 @@ describe("runtime settings", () => {
     await friday.activatePlugin(sessionResourcesPlugin, { defer: true });
     await friday.activatePlugin(modelPlugin, { defer: true });
     await friday.completePluginBootstrap();
-    const model = requireCapability(MODEL_CAPABILITY).api;
+    const model = requireCapability(MODEL_CAPABILITY);
     const provider = model.getProviders()[0]!;
     const descriptor = model.getModels(provider as never)[0]!;
     await friday.dispose();
@@ -99,7 +97,7 @@ describe("runtime settings", () => {
     await friday.activatePlugin(sessionResourcesPlugin, { defer: true });
     await friday.activatePlugin(modelPlugin, { defer: true });
     await friday.completePluginBootstrap();
-    const model = requireCapability(MODEL_CAPABILITY).api;
+    const model = requireCapability(MODEL_CAPABILITY);
     const provider = model.getProviders()[0]!;
     const descriptor = model.getModels(provider as never)[0]!;
     await friday.dispose();
@@ -145,7 +143,7 @@ describe("runtime settings", () => {
     await friday.activatePlugin(sessionResourcesPlugin, { defer: true });
     await friday.activatePlugin(modelPlugin, { defer: true });
     await friday.completePluginBootstrap();
-    const model = requireCapability(MODEL_CAPABILITY).api;
+    const model = requireCapability(MODEL_CAPABILITY);
     const provider = model.getProviders()[0]!;
     const descriptor = model.getModels(provider as never)[0]!;
     await friday.dispose();

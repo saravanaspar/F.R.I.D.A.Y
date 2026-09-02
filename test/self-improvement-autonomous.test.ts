@@ -1,3 +1,4 @@
+import * as selfImprovementRuntime from "@friday/self-improvement";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -156,20 +157,18 @@ async function installSelfHostingHarness(
   await friday.activatePlugin(executionPlugin);
 
   provideCapability(EVALUATION_CAPABILITY, {
-    api: {
-      async runCommandEvaluation(spec: { id?: string; command: string; cwd?: string }) {
-        return passingEvaluation([{ ...spec, cwd: spec.cwd ?? process.cwd() }]).results[0]!;
-      },
-      async runCommandEvaluationSuite(specs: readonly { id?: string; command: string; cwd: string; network?: boolean }[]) {
-        evaluations.push(...specs.map((spec) => ({
-          ...(spec.id === undefined ? {} : { id: spec.id }),
-          command: spec.command,
-          ...(spec.network === undefined ? {} : { network: spec.network }),
-        })));
-        return passingEvaluation(specs);
-      },
-    } as never,
-  });
+    async runCommandEvaluation(spec: { id?: string; command: string; cwd?: string }) {
+      return passingEvaluation([{ ...spec, cwd: spec.cwd ?? process.cwd() }]).results[0]!;
+    },
+    async runCommandEvaluationSuite(specs: readonly { id?: string; command: string; cwd: string; network?: boolean }[]) {
+      evaluations.push(...specs.map((spec) => ({
+        ...(spec.id === undefined ? {} : { id: spec.id }),
+        command: spec.command,
+        ...(spec.network === undefined ? {} : { network: spec.network }),
+      })));
+      return passingEvaluation(specs);
+    },
+  } as never);
   await friday.activatePlugin(worktreesPlugin);
   await friday.activatePlugin(generationsPlugin);
 
@@ -196,30 +195,28 @@ async function installSelfHostingHarness(
     }
   }
 
-  provideCapability(AGENT_CAPABILITY, { api: { Agent: FakeAgent } as never });
+  provideCapability(AGENT_CAPABILITY, { Agent: FakeAgent } as never);
   provideCapability(MODEL_CAPABILITY, {
-    api: { getModel() { return { provider: "test", id: "model", reasoning: false }; } } as never,
-  });
-  provideCapability(PROMPTS_CAPABILITY, { api: { buildSystemPrompt() { return "system"; } } as never });
+    getModel() { return { provider: "test", id: "model", reasoning: false }; },
+  } as never);
+  provideCapability(PROMPTS_CAPABILITY, { buildSystemPrompt() { return "system"; } } as never);
   provideCapability(SESSIONS_CAPABILITY, {
-    api: {
-      SessionManager: {
-        create(cwd: string) {
-          activeCwd = cwd;
-          return {
-            getSessionId() { return "session-test"; },
-            getSessionFile() { return join(cwd, ".friday-session.jsonl"); },
-            appendMessage() {},
-          };
-        },
+    SessionManager: {
+      create(cwd: string) {
+        activeCwd = cwd;
+        return {
+          getSessionId() { return "session-test"; },
+          getSessionFile() { return join(cwd, ".friday-session.jsonl"); },
+          appendMessage() {},
+        };
       },
-    } as never,
-  });
+    },
+  } as never);
   provideCapability(TOOLS_CAPABILITY, {
-    api: {} as never,
     createTool(name: string) { return { name } as never; },
     createAllTools() { return {} as never; },
-  });
+    withManagedProcessRun(_run: unknown, operation: () => unknown) { return operation(); },
+  } as never);
   provideCapability(PERMISSIONS_CAPABILITY, {
     normalizeMode(value?: string) {
       return value === "auto" || value === "full" ? value : "ask";
@@ -240,8 +237,7 @@ async function installSelfHostingHarness(
     sandboxKernel(request) { return { command: "true", args: [], cwd: request.cwd, env: request.env }; },
   });
   provideCapability(LIFECYCLE_CAPABILITY, {
-    api: {
-      createLifecycleManager() {
+    createLifecycleManager() {
         return {
           async launchReplacement(options?: { executable?: string; args?: readonly string[] }) {
             launches.push({
@@ -266,9 +262,8 @@ async function installSelfHostingHarness(
       acknowledgeRestartFromEnvironment() {},
       acknowledgeTakeoverFromEnvironment() {},
       rejectTakeoverFromEnvironment() {},
-      isRestartPredecessorAliveFromEnvironment() { return true; },
-    } as never,
-  });
+    isRestartPredecessorAliveFromEnvironment() { return true; },
+  } as never);
 
   await friday.activatePlugin(autonomyPlugin);
   await friday.activatePlugin(selfImprovementPlugin);
@@ -297,7 +292,7 @@ describe("self-improvement autonomous composition", () => {
       }),
     ).rejects.toThrow(/trusted mount registration failed/);
 
-    const selfManager = service.api.createSelfImprovementManager({ stateDir: join(stateDir, "self-improvement") });
+    const selfManager = selfImprovementRuntime.createSelfImprovementManager({ stateDir: join(stateDir, "self-improvement") });
     const candidate = selfManager.listCandidates()[0];
     expect(candidate?.status).toBe("abandoned");
     expect(candidate ? existsSync(candidate.directory) : true).toBe(false);
@@ -329,13 +324,13 @@ describe("self-improvement autonomous composition", () => {
 
     await service.resumeGeneration(promoted.generationId);
 
-    const generations = requireCapability(GENERATIONS_CAPABILITY).api.createGenerationsManager({
+    const generations = requireCapability(GENERATIONS_CAPABILITY).createGenerationsManager({
       repository,
       stateDir: join(stateDir, "generations"),
     });
     expect(generations.getActiveGeneration()?.id).toBe(promoted.generationId);
     expect(new SelfImprovementMissionStore(join(stateDir, "self-improvement")).get(promoted.candidateId)?.status).toBe("completed");
-    const selfManager = service.api.createSelfImprovementManager({ stateDir: join(stateDir, "self-improvement") });
+    const selfManager = selfImprovementRuntime.createSelfImprovementManager({ stateDir: join(stateDir, "self-improvement") });
     expect(selfManager.getCandidate(promoted.candidateId)?.status).toBe("promoted");
     expect(
       selfManager
@@ -409,12 +404,12 @@ describe("self-improvement autonomous composition", () => {
     const head = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout.trim();
     expect(head).toBe(baseCommit);
     expect(existsSync(join(repository, "autonomous-change.txt"))).toBe(false);
-    const generations = requireCapability(GENERATIONS_CAPABILITY).api.createGenerationsManager({
+    const generations = requireCapability(GENERATIONS_CAPABILITY).createGenerationsManager({
       repository,
       stateDir: join(stateDir, "generations"),
     });
     expect(generations.getActiveGeneration()?.id).toBe("gen-000001");
-    const selfManager = service.api.createSelfImprovementManager({ stateDir: join(stateDir, "self-improvement") });
+    const selfManager = selfImprovementRuntime.createSelfImprovementManager({ stateDir: join(stateDir, "self-improvement") });
     const candidate = selfManager.listCandidates()[0]!;
     expect(candidate.status).toBe("rolled-back");
     expect(selfManager.listGenerationHandoffs()[0]?.status).toBe("failed");
@@ -444,7 +439,7 @@ describe("self-improvement autonomous composition", () => {
 
     const head = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout.trim();
     expect(head).toBe(baseCommit);
-    const generations = requireCapability(GENERATIONS_CAPABILITY).api.createGenerationsManager({
+    const generations = requireCapability(GENERATIONS_CAPABILITY).createGenerationsManager({
       repository,
       stateDir: join(stateDir, "generations"),
     });
@@ -477,12 +472,12 @@ describe("self-improvement autonomous composition", () => {
 
     const head = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout.trim();
     expect(head).toBe(baseCommit);
-    const generations = requireCapability(GENERATIONS_CAPABILITY).api.createGenerationsManager({
+    const generations = requireCapability(GENERATIONS_CAPABILITY).createGenerationsManager({
       repository,
       stateDir: join(stateDir, "generations"),
     });
     expect(generations.getActiveGeneration()?.id).toBe("gen-000001");
-    const selfManager = service.api.createSelfImprovementManager({ stateDir: join(stateDir, "self-improvement") });
+    const selfManager = selfImprovementRuntime.createSelfImprovementManager({ stateDir: join(stateDir, "self-improvement") });
     expect(selfManager.listCandidates()[0]?.status).toBe("rolled-back");
   });
 });

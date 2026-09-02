@@ -19,21 +19,23 @@ afterEach(() => uninstallCapabilityRegistry());
 
 async function assemble(options: { clean: boolean; feasible?: boolean; placement?: "reuse-existing" | "extend-plugin" | "mcp" | "new-plugin" | "host" }) {
   const order: string[] = [];
+  const feasibilityMessages: string[] = [];
   const friday = new PluginTestHost();
   await friday.activatePlugin(capabilitiesPlugin);
-  await friday.activatePlugin(definePlugin({ id: "test-si-autonomy", provides: [AUTONOMY_CAPABILITY] }, (ctx) => ctx.services.provide(AUTONOMY_CAPABILITY, { api: {} } as never)), { defer: true });
-  await friday.activatePlugin(definePlugin({ id: "test-si-evaluation", provides: [EVALUATION_CAPABILITY] }, (ctx) => ctx.services.provide(EVALUATION_CAPABILITY, { api: { runCommandEvaluationSuite: async () => [] } } as never)), { defer: true });
+  await friday.activatePlugin(definePlugin({ id: "test-si-autonomy", provides: [AUTONOMY_CAPABILITY] }, (ctx) => ctx.services.provide(AUTONOMY_CAPABILITY, {} as never)), { defer: true });
+  await friday.activatePlugin(definePlugin({ id: "test-si-evaluation", provides: [EVALUATION_CAPABILITY] }, (ctx) => ctx.services.provide(EVALUATION_CAPABILITY, { runCommandEvaluationSuite: async () => [] } as never)), { defer: true });
   await friday.activatePlugin(definePlugin({ id: "test-si-execution", provides: [EXECUTION_CAPABILITY] }, (ctx) => ctx.services.provide(EXECUTION_CAPABILITY, {
-    api: { async execCommand() { order.push("HOST-EXECUTION"); throw new Error("host execution should not start in this feasibility test"); } },
+    async execCommand() { order.push("HOST-EXECUTION"); throw new Error("host execution should not start in this feasibility test"); },
     processes: {},
   } as never)), { defer: true });
-  await friday.activatePlugin(definePlugin({ id: "test-si-generations", provides: [GENERATIONS_CAPABILITY] }, (ctx) => ctx.services.provide(GENERATIONS_CAPABILITY, { api: { createGenerationsManager: () => ({}) } } as never)), { defer: true });
-  await friday.activatePlugin(definePlugin({ id: "test-si-lifecycle", provides: [LIFECYCLE_CAPABILITY] }, (ctx) => ctx.services.provide(LIFECYCLE_CAPABILITY, { api: { acknowledgeRestartFromEnvironment: () => undefined } } as never)), { defer: true });
+  await friday.activatePlugin(definePlugin({ id: "test-si-generations", provides: [GENERATIONS_CAPABILITY] }, (ctx) => ctx.services.provide(GENERATIONS_CAPABILITY, { createGenerationsManager: () => ({}) } as never)), { defer: true });
+  await friday.activatePlugin(definePlugin({ id: "test-si-lifecycle", provides: [LIFECYCLE_CAPABILITY] }, (ctx) => ctx.services.provide(LIFECYCLE_CAPABILITY, { acknowledgeRestartFromEnvironment: () => undefined } as never)), { defer: true });
   await friday.activatePlugin(definePlugin({ id: "test-si-model", provides: [MODEL_CAPABILITY] }, (ctx) => ctx.services.provide(MODEL_CAPABILITY, {
-    api: {
       getModel: () => ({ provider: "test", id: "model" }),
-      async completeSimple() {
+      async completeSimple(_model: unknown, request: { readonly messages?: readonly { readonly content?: unknown }[] }) {
         order.push("feasibility-model");
+        const content = request.messages?.[0]?.content;
+        if (typeof content === "string") feasibilityMessages.push(content);
         return { content: [{ type: "text", text: JSON.stringify({
           feasible: options.feasible ?? true,
           reason: "placement reviewed",
@@ -44,20 +46,17 @@ async function assemble(options: { clean: boolean; feasible?: boolean; placement
         }) }], stopReason: "stop" };
       },
       parseJsonWithRepair: (text: string) => JSON.parse(text),
-    },
   } as never)), { defer: true });
   await friday.activatePlugin(definePlugin({ id: "test-si-permissions", provides: [PERMISSIONS_CAPABILITY] }, (ctx) => ctx.services.provide(PERMISSIONS_CAPABILITY, { normalizeMode: () => "ask" } as never)), { defer: true });
   await friday.activatePlugin(definePlugin({ id: "test-si-sandbox", provides: [SANDBOX_CAPABILITY] }, (ctx) => ctx.services.provide(SANDBOX_CAPABILITY, { assertAvailable: () => { order.push("sandbox-check"); } } as never)), { defer: true });
   await friday.activatePlugin(definePlugin({ id: "test-si-worktrees", provides: [WORKTREES_CAPABILITY] }, (ctx) => ctx.services.provide(WORKTREES_CAPABILITY, {
-    api: {
       async inspectWorktree() { order.push("baseline-check"); return { clean: options.clean }; },
       async createWorktree() { order.push("BUILD-STARTED"); throw new Error("build should not start in this test"); },
       async removeWorktree() { return undefined; },
-    },
   } as never)), { defer: true });
   await friday.activatePlugin(selfImprovementPlugin, { defer: true });
   await friday.completePluginBootstrap();
-  return { service: requireCapability(SELF_IMPROVEMENT_CAPABILITY), order };
+  return { service: requireCapability(SELF_IMPROVEMENT_CAPABILITY), order, feasibilityMessages };
 }
 
 const request = Object.freeze({ objective: "add stdio MCP support", cwd: process.cwd(), provider: "test", model: "model", permissionMode: "ask" as const });
@@ -71,6 +70,22 @@ describe("self-improvement feasibility gate", () => {
     expect(tool!.description).toContain("strict deterministic gates");
     await expect(tool!.execute({ feature: "example", implementationObjective: "Build example support." }))
       .rejects.toThrow(/originating user turn/);
+  });
+
+
+  it("supplies configured public capability contracts to feasibility review before proposing code", async () => {
+    const { service, feasibilityMessages } = await assemble({ clean: true, feasible: true });
+    await service.assessFeasibility({ ...request, objective: "reuse durable memory search and storage" });
+    expect(feasibilityMessages).toHaveLength(1);
+    const payload = JSON.parse(feasibilityMessages[0]!) as {
+      capabilityContracts?: { source?: string; contracts?: Array<{ plugin?: string; capabilities?: string[]; services?: string[]; publicApi?: string }> };
+    };
+    expect(payload.capabilityContracts?.source).toBe("configured-plugin-contracts");
+    const memory = payload.capabilityContracts?.contracts?.find((entry) => entry.plugin === "memory");
+    expect(memory?.capabilities).toContain("memory");
+    expect(memory?.services).toContain("MemoryService");
+    expect(memory?.publicApi).toContain("openStore");
+    expect(memory?.publicApi).toContain("formatRelevant");
   });
 
   it("stops before user messaging, authorization, or build when a code placement has a dirty baseline", async () => {

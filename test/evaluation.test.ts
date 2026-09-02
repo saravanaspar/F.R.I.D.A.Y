@@ -30,14 +30,14 @@ describe("evaluation plugin", () => {
     await friday.activatePlugin(evaluationPlugin);
 
     const evaluation = requireCapability(EVALUATION_CAPABILITY);
-    const passing = await evaluation.api.runCommandEvaluation({
+    const passing = await evaluation.runCommandEvaluation({
       id: "pass",
       command: `${process.execPath} -e "process.exit(0)"`,
       cwd: process.cwd(),
     });
     expect(passing.status).toBe("pass");
 
-    const failing = await evaluation.api.runCommandEvaluation({
+    const failing = await evaluation.runCommandEvaluation({
       id: "fail",
       command: `${process.execPath} -e "console.error('evaluation failed'); process.exit(1)"`,
       cwd: process.cwd(),

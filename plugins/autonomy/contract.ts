@@ -2,7 +2,7 @@ import type { Capability } from "../capabilities/protocol.js";
 import { defineCapability } from "../capabilities/protocol.js";
 import type { PermissionMode } from "../permissions/contract.js";
 
-export type AutonomyModule = typeof import("@friday/autonomy");
+type AutonomyRuntime = typeof import("@friday/autonomy");
 
 export interface AutonomousGateSpec {
   id?: string;
@@ -33,8 +33,10 @@ export interface AutonomousRunResult {
   gatesPassed: boolean;
 }
 
+/** Bounded autonomous execution primitives plus the high-level objective runner. */
 export interface AutonomyService {
-  readonly api: AutonomyModule;
+  readonly createAutonomousRuntimeState: AutonomyRuntime["createAutonomousRuntimeState"];
+  readonly nextAutonomousContinuation: AutonomyRuntime["nextAutonomousContinuation"];
   runObjective(options: AutonomousRunOptions): Promise<AutonomousRunResult>;
 }
 

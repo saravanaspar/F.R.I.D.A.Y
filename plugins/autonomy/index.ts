@@ -76,11 +76,11 @@ const autonomyPlugin: FridayPlugin = definePlugin({ id: "autonomy", requires: [A
   const sessionResources = bootstrap.services.require(SESSION_RESOURCES_CAPABILITY);
   const sessions = bootstrap.services.require(SESSIONS_CAPABILITY);
   const tools = bootstrap.services.require(TOOLS_CAPABILITY);
-  const shell = execution.api.createLocalShellOperations();
+  const shell = execution.createLocalShellOperations();
 
   autonomy.installEvaluationAccess({
     async evaluateCommand(command, options = {}) {
-      const result = await evaluation.api.runCommandEvaluation(
+      const result = await evaluation.runCommandEvaluation(
         {
           command,
           ...(options.cwd ? { cwd: options.cwd } : {}),
@@ -158,7 +158,7 @@ const autonomyPlugin: FridayPlugin = definePlugin({ id: "autonomy", requires: [A
         network: sandbox.networkMode === "unrestricted",
         env: process.env,
       });
-      const result = await execution.api.execCommand(context.command, context.args, context.cwd, {
+      const result = await execution.execCommand(context.command, context.args, context.cwd, {
         env: context.env,
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
@@ -179,7 +179,8 @@ const autonomyPlugin: FridayPlugin = definePlugin({ id: "autonomy", requires: [A
   });
 
   const service: AutonomyService = Object.freeze({
-    api: autonomy,
+    createAutonomousRuntimeState: autonomy.createAutonomousRuntimeState,
+    nextAutonomousContinuation: autonomy.nextAutonomousContinuation,
     runObjective(options: AutonomousRunOptions) {
       return runAutonomousObjective(
         autonomy,

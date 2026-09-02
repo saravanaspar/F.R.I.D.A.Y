@@ -35,21 +35,21 @@ describe("worktrees plugin", () => {
       await friday.activatePlugin(worktreesPlugin);
 
       const worktrees = requireCapability(WORKTREES_CAPABILITY);
-      const candidate = await worktrees.api.createWorktree({
+      const candidate = await worktrees.createWorktree({
         repository,
         root,
         name: "candidate",
         detached: true,
       });
       expect(await readFile(join(candidate.directory, "base.txt"), "utf8")).toBe("base\n");
-      expect((await worktrees.api.listWorktrees({ repository })).some((entry) => entry.directory === candidate.directory)).toBe(true);
+      expect((await worktrees.listWorktrees({ repository })).some((entry) => entry.directory === candidate.directory)).toBe(true);
 
       await writeFile(join(candidate.directory, "base.txt"), "changed\n");
       await writeFile(join(candidate.directory, "untracked.txt"), "remove me\n");
-      await expect(worktrees.api.resetWorktree({ repository, directory: candidate.directory })).resolves.toBe(true);
+      await expect(worktrees.resetWorktree({ repository, directory: candidate.directory })).resolves.toBe(true);
       expect(await readFile(join(candidate.directory, "base.txt"), "utf8")).toBe("base\n");
 
-      await expect(worktrees.api.removeWorktree({ repository, directory: candidate.directory, force: true })).resolves.toBe(true);
+      await expect(worktrees.removeWorktree({ repository, directory: candidate.directory, force: true })).resolves.toBe(true);
     } finally {
       await rm(repository, { recursive: true, force: true });
       await rm(root, { recursive: true, force: true });

@@ -1,7 +1,7 @@
 import type { Capability } from "../capabilities/protocol.js";
 import { defineCapability } from "../capabilities/protocol.js";
 
-export type AuthModule = typeof import("@friday/auth");
+type AuthRuntime = typeof import("@friday/auth");
 
 /**
  * Narrow transport-agnostic identity needed to bind an interactive model
@@ -21,8 +21,14 @@ export interface ModelCredentialCapture {
   readonly id: string;
 }
 
+/** Public OAuth helpers. Secret persistence remains behind the trusted credential capability. */
 export interface AuthService {
-  readonly api: AuthModule;
+  readonly getOAuthProvider: AuthRuntime["getOAuthProvider"];
+  readonly getOAuthProviders: AuthRuntime["getOAuthProviders"];
+  readonly registerOAuthProvider: AuthRuntime["registerOAuthProvider"];
+  readonly oauthErrorHtml: AuthRuntime["oauthErrorHtml"];
+  readonly oauthSuccessHtml: AuthRuntime["oauthSuccessHtml"];
+  readonly generatePKCE: AuthRuntime["generatePKCE"];
 }
 
 export interface ModelCredentialService {

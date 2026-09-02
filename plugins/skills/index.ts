@@ -22,7 +22,14 @@ const skillsPlugin: FridayPlugin = definePlugin({
   provides: [SKILLS_CAPABILITY],
 }, (ctx) => {
   let revision = 0;
-  const service: SkillsService = Object.freeze({ api: skills, revision: () => revision });
+  const service: SkillsService = Object.freeze({
+    loadSkills: skills.loadSkills,
+    loadSkillsFromDir: skills.loadSkillsFromDir,
+    getPythonSkillRuntimeInfo: skills.getPythonSkillRuntimeInfo,
+    expandSkillCommand: skills.expandSkillCommand,
+    parseFrontmatter: skills.parseFrontmatter,
+    revision: () => revision,
+  });
   ctx.services.provide(SKILLS_CAPABILITY, service);
 
   ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
@@ -58,7 +65,7 @@ const skillsPlugin: FridayPlugin = definePlugin({
     async execute(input) {
       const name = typeof input.name === "string" && input.name.trim() ? input.name : undefined;
       const path = typeof input.path === "string" && input.path.trim() ? input.path : undefined;
-      return { output: await viewSkill(skills, name, path) as unknown as AgentExtensionJsonValue };
+      return { output: await viewSkill(service, name, path) as unknown as AgentExtensionJsonValue };
     },
   });
 
@@ -105,7 +112,7 @@ const skillsPlugin: FridayPlugin = definePlugin({
         action: { id: "skills.manage", effect: "system-write", resource: `skills:${input.name}`, network: false },
         reason: `${action} reusable Skill ${input.name}`,
       });
-      const result = await manageSkill(skills, {
+      const result = await manageSkill(service, {
         action,
         name: input.name,
         ...(typeof input.description === "string" ? { description: input.description } : {}),

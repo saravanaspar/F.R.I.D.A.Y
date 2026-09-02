@@ -27,9 +27,7 @@ function directSandbox(): SandboxService {
   };
 }
 
-const execution = {
-  api: { execCommand },
-} as unknown as ExecutionService;
+const execution = { execCommand } as unknown as ExecutionService;
 
 describe.skipIf(process.platform === "win32")("secure edit operations", () => {
   it("rejects a parent-directory symlink swap between read and write", async () => {

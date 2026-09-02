@@ -12,7 +12,9 @@ import {
 } from "../plugins/system/executor.js";
 import type { TurnExecutionContext } from "../plugins/turn-loop/contract.js";
 
-const validateInput = createSystemActionInputValidator({ api: modelApi });
+const validateInput = createSystemActionInputValidator({
+  validateToolArguments: modelApi.validateToolArguments,
+});
 
 function context(text = "change a setting"): TurnExecutionContext {
   return {
@@ -69,8 +71,7 @@ describe("system turn executor", () => {
     const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
     const selected: Array<{ provider: string; id: string }> = [];
     const models = {
-      api: {
-        getModel(provider: string, id: string) {
+      getModel(provider: string, id: string) {
           selected.push({ provider, id });
           return { provider, id };
         },
@@ -80,8 +81,7 @@ describe("system turn executor", () => {
             stopReason: "stop",
           };
         },
-        parseJsonWithRepair(value: string) { return JSON.parse(value) as unknown; },
-      },
+      parseJsonWithRepair(value: string) { return JSON.parse(value) as unknown; },
     } as unknown as ModelService;
     try {
       process.env.FRIDAY_MODEL_PROVIDER = "main-provider";

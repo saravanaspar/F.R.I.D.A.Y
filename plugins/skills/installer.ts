@@ -123,7 +123,7 @@ export async function installSkills(input: SkillInstallInput, dependencies: {
     ...(dependencies.context.signal === undefined ? {} : { signal: dependencies.context.signal }),
   });
   try {
-    const loaded = dependencies.skills.api.loadSkillsFromDir({ dir: stage.sourceDir, source: "install-candidate" });
+    const loaded = dependencies.skills.loadSkillsFromDir({ dir: stage.sourceDir, source: "install-candidate" });
     const candidates = loaded.skills;
     if (candidates.length === 0) {
       const diagnostics = loaded.diagnostics.slice(0, 6).map((entry) => entry.message).join("; ");

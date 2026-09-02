@@ -53,6 +53,17 @@ describe("workspace and binary packaging discovery", () => {
     expect(operationalErrors).toBeLessThan(workspaces.findIndex((workspace) => workspace.name === "@friday/channels"));
   });
 
+  it("keeps workspace test runners from recreating node_modules inside plugins or packages", async () => {
+    const workspaces = runJson("scripts/workspace-packages.mjs", ["list", "--json"]) as WorkspaceRecord[];
+    for (const workspace of workspaces) {
+      const manifest = JSON.parse(await readFile(`${workspace.path}/package.json`, "utf8")) as { scripts?: Record<string, string> };
+      const testScript = manifest.scripts?.test;
+      if (testScript === undefined) continue;
+      expect(testScript).toContain("--configLoader runner");
+      expect(testScript).toContain("--no-cache");
+    }
+  });
+
   it("collects embedded runtime files from owner manifests with layout-independent targets", async () => {
     const assets = runJson("scripts/binary-assets.mjs", ["list", "--json"]) as AssetRecord[];
     expect(assets).toEqual(expect.arrayContaining([

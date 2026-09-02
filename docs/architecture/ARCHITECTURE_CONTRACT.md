@@ -78,6 +78,24 @@ receive dependencies by injection rather than reaching into a global service loc
 Adding an implementation of an existing extension point must not require editing
 host bootstrap, a central application plugin, or unrelated consumers.
 
+### Capability API Boundary
+
+Every cross-plugin singleton API is owned by the provider's `contract.ts`. The
+manifest declares **which** capabilities a plugin requires/optionally consumes/provides;
+the typed `*Service` interface declares **what** operations consumers may call.
+Consumers obtain those services through their activation context and must not import
+a sibling plugin's implementation package/runtime. Public services expose semantic
+members directly rather than a module-sized `api` escape hatch. Implementation-only
+classes, registries, transports, persistence helpers, and test fixtures remain behind
+the owner boundary.
+
+This contract surface is also FRIDAY's reuse catalog for self-improvement. Feasibility
+review must inspect configured capability contracts before proposing code, and an
+autonomous candidate must prefer a declared capability call over duplicating behavior.
+When the needed semantic operation is absent, extend the closest owning contract only
+if that responsibility genuinely belongs there; otherwise use an existing contribution
+seam, MCP boundary, or pass the Plugin Admission Test for a distinct plugin.
+
 ### Plugin Admission Test
 
 Before creating a new plugin, answer all four questions:

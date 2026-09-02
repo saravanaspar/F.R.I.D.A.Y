@@ -12,6 +12,7 @@ import modelPlugin from "../plugins/model/index.js";
 import memoryPlugin from "../plugins/memory/index.js";
 import { MEMORY_CAPABILITY } from "../plugins/memory/contract.js";
 import type { ObservabilityService } from "../plugins/observability/contract.js";
+import * as modelRuntime from "@friday/model";
 import { MODEL_CAPABILITY, type ModelService } from "../plugins/model/contract.js";
 import { principalStateRoot } from "../plugins/principal-scope.js";
 import promptsPlugin from "../plugins/prompts/index.js";
@@ -75,19 +76,16 @@ function channelTurn(id: string, text: string, senderId: string): InboundTurn {
 
 function withTestModel(
   models: ModelService,
-  registration: ReturnType<ModelService["api"]["registerFauxProvider"]>,
+  registration: ReturnType<typeof modelRuntime.registerFauxProvider>,
 ): ModelService {
   const registered = registration.getModel();
-  const api = new Proxy(models.api, {
-    get(target, property, receiver) {
-      if (property !== "getModel") return Reflect.get(target, property, receiver);
-      return (provider: string, modelId: string) => {
-        if (provider === String(registered.provider) && modelId === String(registered.id)) return registered;
-        return models.api.getModel(provider as never, modelId as never);
-      };
+  return Object.freeze({
+    ...models,
+    getModel(provider: string, modelId: string) {
+      if (provider === String(registered.provider) && modelId === String(registered.id)) return registered;
+      return models.getModel(provider as never, modelId as never);
     },
-  }) as ModelService["api"];
-  return Object.freeze({ api });
+  }) as ModelService;
 }
 
 afterEach(() => {
@@ -113,11 +111,10 @@ describe("Turn Loop agent executor", () => {
     await friday.activatePlugin(agentPlugin);
 
     const models = requireCapability(MODEL_CAPABILITY);
-    const faux = models.api.registerFauxProvider({ provider: "faux" });
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
     const testModels = withTestModel(models, faux);
     const toolCalls: Array<{ cwd: string; sessionId?: string }> = [];
     const tools = {
-      api: {},
       createTool() { throw new Error("not used"); },
       createAllTools(cwd: string, options?: { ipython?: { sessionId?: string } }) {
         toolCalls.push({ cwd, ...(options?.ipython?.sessionId === undefined ? {} : { sessionId: options.ipython.sessionId }) });
@@ -140,10 +137,10 @@ describe("Turn Loop agent executor", () => {
 
     try {
       faux.setResponses([
-        models.api.fauxAssistantMessage("first answer"),
-        models.api.fauxAssistantMessage("same session answer"),
-        models.api.fauxAssistantMessage("second session answer"),
-        models.api.fauxAssistantMessage("reopened answer"),
+        modelRuntime.fauxAssistantMessage("first answer"),
+        modelRuntime.fauxAssistantMessage("same session answer"),
+        modelRuntime.fauxAssistantMessage("second session answer"),
+        modelRuntime.fauxAssistantMessage("reopened answer"),
       ]);
 
       const first = await executor.execute({ turn: turn("m1", "first prompt"), decision: decision("session:new") });
@@ -192,18 +189,18 @@ describe("Turn Loop agent executor", () => {
     await friday.activatePlugin(modelPlugin);
     await friday.activatePlugin(agentPlugin);
     const models = requireCapability(MODEL_CAPABILITY);
-    const faux = models.api.registerFauxProvider({ provider: "faux" });
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
     const executor = createAgentTurnExecutor({
       agent: requireCapability(AGENT_CAPABILITY),
       model: withTestModel(models, faux),
       prompts: requireCapability(PROMPTS_CAPABILITY),
       sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
       sessions: requireCapability(SESSIONS_CAPABILITY),
-      tools: { api: {}, createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService,
+      tools: { createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService,
     }, { stateDir, maxCachedSessions: 2 });
 
     try {
-      faux.setResponses([models.api.fauxAssistantMessage("alice private answer")]);
+      faux.setResponses([modelRuntime.fauxAssistantMessage("alice private answer")]);
       const created = await executor.execute({
         turn: channelTurn("owner-1", "create my private session", "alice"),
         decision: decision("session:new"),
@@ -234,18 +231,18 @@ describe("Turn Loop agent executor", () => {
     const models = requireCapability(MODEL_CAPABILITY);
     const memory = requireCapability(MEMORY_CAPABILITY);
     const aliceTurn = channelTurn("memory-alice", "What is my private launch phrase?", "alice");
-    const aliceMemory = new memory.api.MemoryStore({
-      stateDir: memory.api.getGlobalMemoryStateDir(principalStateRoot(stateDir, aliceTurn.principal)),
+    const aliceMemory = memory.openStore({
+      stateDir: memory.globalStateDir(principalStateRoot(stateDir, aliceTurn.principal)),
       scope: "global",
-      embeddingProvider: null,
+      semanticSearch: false,
     });
     aliceMemory.create("memory", { id: "launch", title: "Private launch phrase", content: "Alice-only nebula launch phrase." });
     aliceMemory.close();
-    const faux = models.api.registerFauxProvider({ provider: "faux" });
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
     const contexts: string[] = [];
     faux.setResponses([
-      (context) => { contexts.push(JSON.stringify(context.messages)); return models.api.fauxAssistantMessage("alice answer"); },
-      (context) => { contexts.push(JSON.stringify(context.messages)); return models.api.fauxAssistantMessage("bob answer"); },
+      (context) => { contexts.push(JSON.stringify(context.messages)); return modelRuntime.fauxAssistantMessage("alice answer"); },
+      (context) => { contexts.push(JSON.stringify(context.messages)); return modelRuntime.fauxAssistantMessage("bob answer"); },
     ]);
     const executor = createAgentTurnExecutor({
       agent: requireCapability(AGENT_CAPABILITY),
@@ -253,7 +250,7 @@ describe("Turn Loop agent executor", () => {
       prompts: requireCapability(PROMPTS_CAPABILITY),
       sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
       sessions: requireCapability(SESSIONS_CAPABILITY),
-      tools: { api: {}, createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService,
+      tools: { createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService,
       optional: { memory: () => memory },
     }, { stateDir, maxCachedSessions: 2 });
 
@@ -284,10 +281,9 @@ describe("Turn Loop agent executor", () => {
     await friday.activatePlugin(agentPlugin);
 
     const models = requireCapability(MODEL_CAPABILITY);
-    const faux = models.api.registerFauxProvider({ provider: "faux" });
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
     const testModels = withTestModel(models, faux);
     const tools = {
-      api: {},
       createTool() { throw new Error("not used"); },
       createAllTools() { return {}; },
     } as unknown as ToolsService;
@@ -304,7 +300,7 @@ describe("Turn Loop agent executor", () => {
     }, { stateDir, maxCachedSessions: 2 });
 
     try {
-      faux.setResponses([models.api.fauxAssistantMessage("opened")]);
+      faux.setResponses([modelRuntime.fauxAssistantMessage("opened")]);
       const opened = await executor.execute({ turn: turn("c1", "open session"), decision: decision("session:new") });
       const sessionId = opened.sessionId!;
 
@@ -325,11 +321,11 @@ describe("Turn Loop agent executor", () => {
         },
       });
       faux.setResponses([
-        models.api.fauxAssistantMessage(
-          models.api.fauxToolCall("example_tool", { value: "hello" }),
+        modelRuntime.fauxAssistantMessage(
+          modelRuntime.fauxToolCall("example_tool", { value: "hello" }),
           { stopReason: "toolUse" },
         ),
-        models.api.fauxAssistantMessage("tool completed"),
+        modelRuntime.fauxAssistantMessage("tool completed"),
       ]);
 
       let releaseProgress!: () => void;
@@ -374,7 +370,7 @@ describe("Turn Loop agent executor", () => {
     await friday.activatePlugin(agentPlugin);
 
     const models = requireCapability(MODEL_CAPABILITY);
-    const faux = models.api.registerFauxProvider({ provider: "faux" });
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
     const testModels = withTestModel(models, faux);
     const contexts: string[] = [];
     const runtimeContexts: Array<{ sessionId: string; sessionArtifactDir?: string }> = [];
@@ -392,7 +388,7 @@ describe("Turn Loop agent executor", () => {
         };
       },
     };
-    const tools = { api: {}, createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService;
+    const tools = { createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService;
     const executor = createAgentTurnExecutor({
       agent: requireCapability(AGENT_CAPABILITY),
       model: testModels,
@@ -405,8 +401,8 @@ describe("Turn Loop agent executor", () => {
 
     try {
       faux.setResponses([
-        (context) => { contexts.push(JSON.stringify(context.messages)); return models.api.fauxAssistantMessage("first"); },
-        (context) => { contexts.push(JSON.stringify(context.messages)); return models.api.fauxAssistantMessage("second"); },
+        (context) => { contexts.push(JSON.stringify(context.messages)); return modelRuntime.fauxAssistantMessage("first"); },
+        (context) => { contexts.push(JSON.stringify(context.messages)); return modelRuntime.fauxAssistantMessage("second"); },
       ]);
       const opened = await executor.execute({ turn: turn("attach-1", "Analyze the attached file."), decision: decision("session:new") });
       const sessionId = opened.sessionId!;
@@ -448,11 +444,11 @@ describe("Turn Loop agent executor", () => {
 
     const models = requireCapability(MODEL_CAPABILITY);
     const memory = requireCapability(MEMORY_CAPABILITY);
-    const global = new memory.api.MemoryStore({ stateDir: memory.api.getGlobalMemoryStateDir(stateDir), scope: "global", embeddingProvider: null });
+    const global = memory.openStore({ stateDir: memory.globalStateDir(stateDir), scope: "global", semanticSearch: false });
     global.create("memory", { id: "cache-lesson", title: "Cache lesson", content: "Stable prefixes improve provider cache reuse." });
     global.close();
 
-    const faux = models.api.registerFauxProvider({ provider: "faux" });
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
     const testModels = withTestModel(models, faux);
     const contexts: string[] = [];
     const systemPrompts: string[] = [];
@@ -462,7 +458,7 @@ describe("Turn Loop agent executor", () => {
       observe() {}, log() {}, gauge() {}, currentTrace: () => undefined, startSpan: () => ({ context: { traceId: "t", spanId: "s" }, end() {} }),
       withSpan: (_input: unknown, operation: () => unknown) => operation(), logs: () => [], spans: () => [], metrics: () => [], status: () => ({ logCount: 0, spanCount: 0, metricSeriesCount: 0, maxLogRows: 0, maxSpanRows: 0, maxMetricSeries: 0, droppedLogs: 0, droppedSpans: 0, droppedMetrics: 0 }), close() {},
     } as unknown as ObservabilityService;
-    const tools = { api: {}, createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService;
+    const tools = { createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService;
     const executor = createAgentTurnExecutor({
       agent: requireCapability(AGENT_CAPABILITY),
       model: testModels,
@@ -475,8 +471,8 @@ describe("Turn Loop agent executor", () => {
 
     try {
       faux.setResponses([
-        (context) => { contexts.push(JSON.stringify(context.messages)); systemPrompts.push(context.systemPrompt ?? ""); return models.api.fauxAssistantMessage("first"); },
-        (context) => { contexts.push(JSON.stringify(context.messages)); systemPrompts.push(context.systemPrompt ?? ""); return models.api.fauxAssistantMessage("second"); },
+        (context) => { contexts.push(JSON.stringify(context.messages)); systemPrompts.push(context.systemPrompt ?? ""); return modelRuntime.fauxAssistantMessage("first"); },
+        (context) => { contexts.push(JSON.stringify(context.messages)); systemPrompts.push(context.systemPrompt ?? ""); return modelRuntime.fauxAssistantMessage("second"); },
       ]);
       const opened = await executor.execute({
         turn: turn("mem-1", "How do stable prefixes improve provider cache reuse?"),
@@ -484,7 +480,7 @@ describe("Turn Loop agent executor", () => {
       });
       const sessionId = opened.sessionId!;
 
-      const changed = new memory.api.MemoryStore({ stateDir: memory.api.getGlobalMemoryStateDir(stateDir), scope: "global", embeddingProvider: null });
+      const changed = memory.openStore({ stateDir: memory.globalStateDir(stateDir), scope: "global", semanticSearch: false });
       changed.update("memory", "cache-lesson", { title: "Cache lesson", content: "UPDATED memory is visible only in runtime context." });
       changed.close();
       await executor.execute({
@@ -526,10 +522,9 @@ describe("Turn Loop agent executor", () => {
     await friday.activatePlugin(agentPlugin);
 
     const models = requireCapability(MODEL_CAPABILITY);
-    const faux = models.api.registerFauxProvider({ provider: "faux" });
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
     const testModels = withTestModel(models, faux);
     const tools = {
-      api: {},
       createTool() { throw new Error("not used"); },
       createAllTools() { return {}; },
     } as unknown as ToolsService;
@@ -543,7 +538,7 @@ describe("Turn Loop agent executor", () => {
     }, { stateDir });
 
     try {
-      faux.setResponses([models.api.fauxAssistantMessage("utility answer")]);
+      faux.setResponses([modelRuntime.fauxAssistantMessage("utility answer")]);
       const result = await executor.execute({
         turn: turn("u1", "one off"),
         decision: {

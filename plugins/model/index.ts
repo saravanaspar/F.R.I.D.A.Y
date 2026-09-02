@@ -4,12 +4,17 @@ import type { FridayPlugin } from "../../src/plugin.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { OBSERVABILITY_CAPABILITY } from "../observability/contract.js";
 import { SESSION_RESOURCES_CAPABILITY } from "../session-resources/contract.js";
-import { MODEL_CAPABILITY, type ModelService } from "./contract.js";
+import {
+  MODEL_CAPABILITY,
+  MODEL_REGISTRY_CAPABILITY,
+  type ModelRegistryService,
+  type ModelService,
+} from "./contract.js";
 
 /** Exposes the model subsystem while resolving cross-plugin lifecycle services through capabilities. */
-const modelPlugin: FridayPlugin = definePlugin({ id: "model", requires: [SESSION_RESOURCES_CAPABILITY], optional: [OBSERVABILITY_CAPABILITY], provides: [MODEL_CAPABILITY] }, (ctx) => {
+const modelPlugin: FridayPlugin = definePlugin({ id: "model", requires: [SESSION_RESOURCES_CAPABILITY], optional: [OBSERVABILITY_CAPABILITY], provides: [MODEL_CAPABILITY, MODEL_REGISTRY_CAPABILITY] }, (ctx) => {
   const sessionResources = ctx.services.require(SESSION_RESOURCES_CAPABILITY);
-  sessionResources.api.registerSessionResourceCleanup(closeOpenAICodexWebSocketSessions);
+  sessionResources.registerSessionResourceCleanup(closeOpenAICodexWebSocketSessions);
 
   const observability = ctx.services.optional(OBSERVABILITY_CAPABILITY);
   if (observability) {
@@ -53,8 +58,25 @@ const modelPlugin: FridayPlugin = definePlugin({ id: "model", requires: [SESSION
   }
   ctx.effect(() => model.setLogSink(undefined));
 
-  const service: ModelService = Object.freeze({ api: model });
+  const service: ModelService = Object.freeze({
+    getModel: model.getModel,
+    getModels: model.getModels,
+    getProviders: model.getProviders,
+    complete: model.complete,
+    completeSimple: model.completeSimple,
+    stream: model.stream,
+    streamSimple: model.streamSimple,
+    validateToolArguments: model.validateToolArguments,
+    createAssistantMessageDiagnostic: model.createAssistantMessageDiagnostic,
+    parseJsonWithRepair: model.parseJsonWithRepair,
+    Type: model.Type,
+  });
   ctx.services.provide(MODEL_CAPABILITY, service);
+  const registry: ModelRegistryService = Object.freeze({
+    registerModel: model.registerModel,
+    unregisterModel: model.unregisterModel,
+  });
+  ctx.services.provide(MODEL_REGISTRY_CAPABILITY, registry);
 });
 
 export default modelPlugin;
