@@ -45,6 +45,13 @@ describe("operational failure reporting", () => {
     expect(redactSensitiveText(redacted, 10_000)).toBe(redacted);
   });
 
+  it("normalizes adversarial identifier input in linear bounded output", () => {
+    const adversarial = `${"-".repeat(50_000)}network${"-".repeat(50_000)}`;
+    const sanitized = sanitizeOperationalError(new Error("failed"), { code: adversarial });
+    expect(sanitized.code).toBe("network");
+    expect(sanitized.code.length).toBeLessThanOrEqual(64);
+  });
+
   it("identifies structured credential field names without hiding unrelated fields", () => {
     for (const key of ["access_token", "refreshToken", "client_secret", "authorization", "set-cookie", "private_key", "credential"]) {
       expect(isSensitiveFieldName(key)).toBe(true);

@@ -81,10 +81,13 @@ function stableIdentifier(value: unknown, fallback: string, maximum = 128): stri
   const normalized = String(value ?? "")
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9._:-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, maximum);
-  return /^[a-z0-9][a-z0-9._:-]*$/.test(normalized) ? normalized : fallback;
+    .replace(/[^a-z0-9._:-]+/g, "-");
+  let start = 0;
+  let end = normalized.length;
+  while (start < end && normalized.charCodeAt(start) === 45) start += 1;
+  while (end > start && normalized.charCodeAt(end - 1) === 45) end -= 1;
+  const identifier = normalized.slice(start, end).slice(0, maximum);
+  return /^[a-z0-9][a-z0-9._:-]*$/.test(identifier) ? identifier : fallback;
 }
 
 function inferredErrorClass(error: unknown): string {
