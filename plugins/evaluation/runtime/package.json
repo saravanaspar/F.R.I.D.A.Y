@@ -1,6 +1,6 @@
 {
   "name": "@friday/evaluation",
-  "version": "0.0.1",
+  "version": "1.0.0-dev",
   "description": "FRIDAY deterministic evaluation and result classification",
   "type": "module",
   "main": "./dist/index.js",

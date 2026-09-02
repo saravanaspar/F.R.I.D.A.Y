@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted, except the network-availability decision is superseded by ADR-0050.
 
 ## Context
 
@@ -14,19 +14,14 @@ on discovering a missing allowlist entry only after an expensive run fails.
 
 ## Decision
 
-### Detached work keeps outbound network availability
+### Detached work keeps outbound network availability (superseded by ADR-0050)
 
-Sandboxed model work and persistent kernels receive outbound network access by
-default. FRIDAY does not impose a default egress allowlist or interpret a tool's
-`network: false` metadata as a request to disable networking. Explicit callers
-may request a network-disabled execution, but ordinary detached work remains
-unrestricted. Permissions continues to authorize the action and use of
-credentials. Rootless Podman, narrow mounts, resource/PID/file ceilings, a
-read-only container root, dropped capabilities, and a pinned locally built image
-remain the host boundary.
-
-This supersedes the default network-off wording in ADR-0011 and ADR-0023. Those
-records remain useful history, but they are not the current availability policy.
+The following records the decision made by ADR-0045 at the time: sandboxed model
+work and persistent kernels received outbound network access by default, with no
+default egress allowlist. ADR-0050 supersedes that availability policy. The
+current secure default is `requested`: sandbox egress is disabled unless the
+action explicitly requests network access and Permissions approves that network
+authority. Persistent IPython therefore remains network-off by default.
 
 ### Memory is a bounded relationship graph
 
@@ -74,8 +69,9 @@ the authorization boundary.
 
 ## Consequences
 
-Remote detached tasks retain broad internet utility while host isolation and
-credential authorization remain explicit. Prompt cost scales with relevant
+The original broad-network consequence is superseded by ADR-0050: detached
+network work must now request and receive explicit network authority while host
+isolation and credential authorization remain explicit. Prompt cost scales with relevant
 memory rather than database size. Operators can attribute usage and distinguish
 real provider charges from estimates. Crashes and failed handoffs remain visible,
 state is recoverable, and a single host-native FRIDAY executable is releaseable.

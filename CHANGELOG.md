@@ -21,3 +21,24 @@ The initial release includes the self-hosted assistant runtime, durable sessions
   Events/Scheduler cooperative shutdown behavior.
 - Removed unreferenced model-runtime code, redundant direct dependencies, a
   duplicate script alias, and an unused upscaled brand asset.
+- Added the optional Voice plugin with OpenAI/Deepgram STT and OpenAI/ElevenLabs
+  TTS, Vault-backed credentials, artifact enrichment, and bounded untrusted
+  transcript persistence.
+- Added a dedicated persisted `FRIDAY_WORKSPACE`, stable `FRIDAY_HOME/tooling`
+  environments, rebuildable-runtime backup exclusions, packaged Linux SEA smoke
+  tests, and stronger Doctor deployment-readiness checks.
+- Hardened release installation with attested installer assets, candidate
+  preflight/rollback, and provenance verification before binary activation.
+- Replaced module-sized cross-plugin `service.api` bags with semantic typed
+  capability contracts; self-improvement now inspects configured ordinary
+  contracts and prefers existing actions/tools/capabilities or an MCP boundary before generating code.
+- Split custom-model registry mutation from ordinary model inference through the
+  `model.registry` capability.
+- Enforced dependency-tree-free `plugins/` and `packages/` workspaces; workspace
+  Vitest runs use a non-bundling config loader with persistent cache disabled so
+  tests do not recreate local `node_modules`.
+- Restored the secure sandbox default: network is disabled unless an action
+  explicitly requests network and receives approval; Doctor warns on an
+  unrestricted host override.
+- Added user-scoped Conditional Hooks for reusable turn/action/handover
+  conditions with bounded invocation counts.

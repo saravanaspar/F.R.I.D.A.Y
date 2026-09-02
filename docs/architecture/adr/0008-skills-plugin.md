@@ -35,4 +35,4 @@ Default user/project skill directories are supplied by callers. The plugin does 
 
 ## Consequences
 
-The skill implementation can be reused by future prompt, session, and execution composition plugins without making those subsystems part of skill discovery itself. Python skill metadata is preserved while actual Python environment preparation remains an execution/composition responsibility.
+The skill implementation is reusable by the current Turn Loop/prompt/session/execution composition without making those subsystems part of skill discovery itself. Python skill metadata is preserved while actual Python environment preparation remains an execution/composition responsibility.

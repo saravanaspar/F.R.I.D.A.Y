@@ -1,6 +1,6 @@
 {
   "name": "@friday/auth",
-  "version": "0.0.1",
+  "version": "1.0.0-dev",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",

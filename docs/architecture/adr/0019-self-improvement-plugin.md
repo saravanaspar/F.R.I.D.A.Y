@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Runtime-control wording amended by ADR-0038. and extended through restart-safe autonomous self-development.
+Accepted. Runtime-control wording amended by ADR-0038 and extended through restart-safe autonomous self-development.
 
 ## Context
 
@@ -88,6 +88,6 @@ records fail closed.
 Self-improvement is policy/orchestration, not a duplicate Git, evaluation,
 Agent or process implementation. `worktrees`, `evaluation`, `generations` and
 `lifecycle` remain independently testable/replaceable boundaries. Execution
-isolation and authorization are intentionally deferred to future plugins. There
-is no central application plugin to edit when an unrelated FRIDAY capability is
-added.
+isolation and authorization are supplied by the independent Sandbox and
+Permissions capabilities rather than being reimplemented here. There is no
+central application plugin to edit when an unrelated FRIDAY capability is added.

@@ -3,7 +3,9 @@
 ## Status
 
 Accepted. Supersedes ADR-0001's Command Handler decision and the Command Handler
-portions of ADR-0004 and ADR-0035.
+portions of ADR-0004 and ADR-0035. Installed command UX was later refined by
+ADR-0047; deployment workspace/runtime-environment placement was refined by
+ADR-0048.
 
 ## Context
 
@@ -34,7 +36,7 @@ Delete `src/command-handler.ts` and its dynamic command registry.
 The non-plugin host consists only of:
 
 - `src/cli.ts`: a fixed onboarding utility;
-- `src/runtime-env.ts`: bounded persistence/loading of non-secret runtime defaults;
+- `src/host/runtime-env.ts`: bounded persistence/loading of non-secret runtime defaults;
 - `src/onboarding.ts`: fixed first-run prompts plus explicit approved sandbox-image setup;
 - `src/runtime.ts`: the long-lived process shell that loads runtime defaults,
   starts configured plugins, waits for SIGINT/SIGTERM, and disposes them; and
@@ -46,8 +48,9 @@ The bootstrap API has no string-keyed methods and no command registration.
 Kernel v2 graph finalization and reverse shutdown through the generic bootstrap
 hooks.
 
-`npm run friday` and `npm run dev` launch `src/runtime.ts`. `npm run onboard`
-launches the fixed onboarding CLI.
+Current scripts reflect ADR-0047: `npm run dev` launches the runtime directly;
+`npm run friday` launches the fixed `src/friday.ts` command surface and defaults
+to runtime operation; `npm run onboard` is a compatibility alias for setup.
 
 ### Onboarding data
 

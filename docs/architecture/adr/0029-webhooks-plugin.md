@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. Listener startup is integrated with graph-ready lifecycle when Webhooks is explicitly enabled.
 
 ## Context
 
@@ -20,7 +20,7 @@ The first built-in route type is HMAC-SHA256. A trusted host registers a path, E
 
 Replay state and fixed-window rate counters live in plugin-owned SQLite with private permissions. A valid request publishes through Events using the verified nonce as the source-scoped dedupe key before the nonce is recorded. This ordering deliberately relies on Events' durable producer deduplication to close the crash window: if FRIDAY crashes after Event publication but before nonce persistence, a retry can only resolve to the same Event rather than create a duplicate. Once nonce state is durable, subsequent valid replays are rejected.
 
-The public `webhooks` capability exposes only route metadata and server status. Listener control, route registration and direct ingress belong to `webhooks.trusted`. The server is explicit and is not auto-started during bootstrap. Binding defaults to loopback; externally reachable binding is an explicit trusted host choice.
+The public `webhooks` capability exposes only route metadata and server status. Listener control, route registration and direct ingress belong to `webhooks.trusted`. The listener is opt-in rather than implicitly enabled: the default production plugin starts it only when `FRIDAY_WEBHOOKS_ENABLED` is explicitly enabled, and then uses Kernel graph-ready startup so downstream consumers are ready before ingress begins. Binding defaults to loopback; externally reachable binding is an explicit trusted host choice.
 
 Provider-specific schemes such as GitHub, Stripe, Slack or vendor JWT validation can be added later as trusted route authenticators/adapters without moving HTTP trust policy into Agent, MCP, Channels, Scheduler or Events.
 

@@ -1,6 +1,8 @@
 # ADR-0047: `friday` Runtime Command and Rerunnable `friday setup`
 
-Status: Accepted
+## Status
+
+Accepted.
 
 ## Context
 

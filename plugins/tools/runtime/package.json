@@ -1,6 +1,6 @@
 {
   "name": "@friday/tools",
-  "version": "0.0.1",
+  "version": "1.0.0-dev",
   "description": "FRIDAY coding tool definitions and execution facades",
   "type": "module",
   "main": "./dist/index.js",

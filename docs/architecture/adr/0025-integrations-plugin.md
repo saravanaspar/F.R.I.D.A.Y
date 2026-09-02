@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Host-boundary wording amended by ADR-0038..
+Accepted. Host-boundary wording amended by ADR-0038.
 
 ## Decision
 

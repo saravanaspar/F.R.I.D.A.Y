@@ -14,7 +14,7 @@ The default command is **read-only and non-interactive**:
 friday doctor
 ```
 
-It performs local checks only. It does not make outbound network requests and it does not read plaintext Vault secret values.
+It performs local checks only. It does not make outbound network requests and it does not read plaintext Vault secret values. It warns when the sandbox uses the non-default `FRIDAY_SANDBOX_NETWORK_MODE=unrestricted`; the secure default is `requested`, where egress remains off unless an action explicitly requests network and receives approval.
 
 Deployment checks use the persisted effective workspace rather than the caller's current directory. Doctor fails health if the workspace overlaps `FRIDAY_HOME`, if a required model/Voice credential is not durable for unattended restarts, or if an enabled WhatsApp channel lacks its stable sidecar tooling/host Node runtime.
 

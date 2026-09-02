@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. The runtime dispatch consumer is implemented by Turn Loop (ADR-0036).
 
 ## Context
 
@@ -45,4 +45,4 @@ The classifier has no model tools. Read-only retrieval happens in trusted host c
 
 Channels continues to own transport trust and sanitization. Sessions owns durable conversation state. Memory owns durable reusable knowledge. Model owns provider transport. Events owns occurrence history. Scheduler continues to own WHEN work executes. Routing owns semantic destination selection only.
 
-A later dispatch/orchestration slice can subscribe to the Routing capability's in-process routed-message stream and hand the original sanitized message to the selected session, transient utility, Scheduler or system-action owner. That later slice must preserve the destination/execution split rather than turning Routing into a god plugin.
+Turn Loop consumes Routing's in-process routed-message stream and hands the original sanitized message to the selected session, transient utility, Scheduler, or system-action owner. It preserves the destination/execution split rather than turning Routing into a god plugin.

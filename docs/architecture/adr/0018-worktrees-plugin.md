@@ -55,8 +55,8 @@ The plugin does not own:
 - restart/generation handoff
 - sessions, memory, refinement, scheduling, sandboxing or permissions
 
-Those remain separate replaceable concerns. The planned `self-improvement`
-plugin may consume `worktrees` together with `evaluation` and other host
+Those remain separate replaceable concerns. The `self-improvement` plugin
+(ADR-0019) consumes `worktrees` together with `evaluation` and other host
 capabilities.
 
 ## Consequences

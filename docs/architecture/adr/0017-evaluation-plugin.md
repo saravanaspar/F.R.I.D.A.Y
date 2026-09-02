@@ -30,4 +30,4 @@ The plugin does not own:
 
 `autonomy` consumes the evaluation capability for deterministic quality-gate execution while retaining its own continuation budgets, retry state and worktree-change suppression. This removes command-evaluation behavior from autonomy without moving autonomy policy into evaluation.
 
-Future self-improvement code may consume the same evaluation capability for candidate validation rather than creating a second test runner.
+Self-improvement consumes the same evaluation capability for candidate validation rather than creating a second test runner.

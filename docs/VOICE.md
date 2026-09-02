@@ -27,7 +27,7 @@ The transcript is bounded and wrapped as untrusted user content before it is add
 
 ## TTS
 
-TTS is exposed through the typed `voice` capability. It returns bounded MP3 chunks instead of assuming a particular transport. A future mobile companion, local voice surface, or audio-capable channel adapter can consume that capability without changing Turn Loop or Agent.
+TTS is exposed through the typed `voice` capability. It returns bounded MP3 chunks instead of assuming a particular transport. A future local voice surface or audio-capable channel adapter can consume that capability without changing Turn Loop or Agent.
 
 ## Security and privacy
 
@@ -36,4 +36,4 @@ TTS is exposed through the typed `voice` capability. It returns bounded MP3 chun
 - Audio attachments retain Artifacts size and private-file protections.
 - STT network/cost behavior is opt-in through `friday setup voice`.
 - The transcript is user data, not trusted host instruction text.
-- Wake-word detection is intentionally outside this plugin and should run locally on the client device.
+- Wake-word detection is intentionally outside this plugin; any future capture surface should keep that detection local rather than sending always-on microphone audio through Voice.

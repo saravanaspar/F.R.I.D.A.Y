@@ -1,6 +1,6 @@
 {
   "name": "@friday/execution",
-  "version": "0.0.1",
+  "version": "1.0.0-dev",
   "description": "FRIDAY persistent Python kernel and process execution",
   "type": "module",
   "main": "./dist/index.js",
@@ -25,7 +25,7 @@
     "test": "vitest run --config vitest.config.ts --configLoader runner --no-cache"
   },
   "dependencies": {
-    "@friday/operational-errors": "0.0.1",
+    "@friday/operational-errors": "1.0.0-dev",
     "uuid": "^14.0.0",
     "zeromq": "^6.1.2"
   },

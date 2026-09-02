@@ -48,6 +48,7 @@ Important expectations:
 5. Restart/self-improvement changes must preserve authenticated handoff and rollback behavior.
 6. New plugin dependencies should be explicit in the plugin manifest; config order must not become orchestration.
 7. Security-sensitive filesystem code should fail closed on malformed permissions, unsafe symlinks, or unexpected identities.
+8. Reusable sibling behavior should come from the owner's typed `contract.ts`; trusted companion contracts are authority boundaries, not convenience APIs.
 
 ## Making a change
 

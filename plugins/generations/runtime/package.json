@@ -1,6 +1,6 @@
 {
   "name": "@friday/generations",
-  "version": "0.0.1",
+  "version": "1.0.0-dev",
   "description": "FRIDAY durable generation checkpoints, safe descendant activation, and rollback planning",
   "type": "module",
   "main": "./dist/index.js",

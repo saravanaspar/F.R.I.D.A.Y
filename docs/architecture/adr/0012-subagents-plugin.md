@@ -32,6 +32,6 @@ The parent registry can be persisted through generic session custom entries.
 - agent-to-agent messaging;
 - scheduling, refinement, sandboxing, or permissions.
 
-The model-facing recursive API is a separate planned `rlm` plugin. It will
-translate its protocol into the generic `subagents` capability rather than
+The model-facing recursive API is the separate `rlm` plugin (ADR-0013). It
+translates its protocol into the generic `subagents` capability rather than
 reimplementing child lifecycle behavior.

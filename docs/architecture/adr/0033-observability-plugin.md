@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Operator-interface wording amended by ADR-0038.
+Accepted. Operator-interface wording was amended by ADR-0038; the separate Audit integrity boundary was subsequently delivered by ADR-0034.
 
 ## Context
 
@@ -10,7 +10,7 @@ FRIDAY now has durable Events, external network boundaries, autonomous execution
 
 Two existing mechanisms should be reused instead of duplicated. Events already records durable domain facts, and the Model runtime already exposes an injectable structured log sink. Neither is itself a general telemetry store: Events intentionally owns business occurrences and delivery semantics, while the Model logger is only a producer-side logging primitive.
 
-Observability must also remain distinct from the planned Audit boundary. Operational telemetry is volume-bounded and best-effort; security/audit evidence must later have stronger integrity and retention semantics.
+Observability must also remain distinct from the Audit boundary (ADR-0034). Operational telemetry is volume-bounded and best-effort; security/audit evidence has separate integrity and retention semantics.
 
 ## Decision
 
@@ -39,4 +39,4 @@ Runtime write failures in logging/metrics/spans do not fail the business operati
 
 FRIDAY gains one coherent local operational surface for recent logs, aggregate metrics and trace correlation without introducing an external collector dependency. Existing Events and Model logging are reused rather than copied.
 
-Retention means Observability is intentionally unsuitable as a compliance/security ledger. Audit remains a separate future boundary with integrity-sensitive semantics. More producers can adopt the capability incrementally without changing the non-plugin host or importing an Observability implementation package.
+Retention means Observability is intentionally unsuitable as a compliance/security ledger. Audit is a separate integrity-sensitive boundary (ADR-0034). More producers can adopt the capability incrementally without changing the non-plugin host or importing an Observability implementation package.

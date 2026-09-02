@@ -8,7 +8,7 @@ import { build } from "esbuild";
 import { discoverBinaryAssets } from "./binary-assets.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const buildVersion = process.env.FRIDAY_BUILD_VERSION?.trim() || "0.1.0-dev";
+const buildVersion = process.env.FRIDAY_BUILD_VERSION?.trim() || "1.0.0-dev";
 const outputRoot = resolve(projectRoot, process.env.FRIDAY_BINARY_OUTPUT_DIR || "build/binary");
 const staging = join(outputRoot, ".staging");
 const bundle = join(staging, "friday.cjs");

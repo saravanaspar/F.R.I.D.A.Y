@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. Trusted-consumer and credential-capture integrations were subsequently delivered by Channels, Auth, MCP, Webhooks, Voice, and the fixed setup surfaces.
 
 ## Context
 
@@ -19,7 +19,7 @@ Handler.
 ## Decision
 
 FRIDAY provides a `vault` plugin loaded after the sandbox boundary and before
-consumers that will eventually use credentials.
+credential-consuming plugins.
 
 The plugin intentionally exposes two different capability objects:
 
@@ -67,12 +67,13 @@ backend is **not** protection against compromise of the same trusted OS user or
 root. A future backend may use an OS keyring, hardware-backed key, or external
 secret manager without changing the capability boundary.
 
-Auth/MCP/Channels will later consume `vault.trusted` by reference. Model-facing
-routing and tools should receive only the ordinary `vault` capability. Plugin
-boundary tests prevent model-facing subsystems from importing the trusted
-capability contract.
+Auth, MCP, Channels, Webhooks, and Voice consume Vault-backed credentials through
+trusted host composition rather than exposing plaintext to model-facing code.
+Model-facing routing and tools receive only ordinary metadata-safe capability
+surfaces. Plugin-boundary tests prevent model-facing subsystems from importing
+trusted Vault authority.
 
-Credential capture is a separate later step. Dedicated CLI/channel capture must
-intercept credential payloads before model, Session, or Memory persistence and
-replace them with a sanitized marker. Until that capture path exists, users
-should not paste secrets into ordinary model-visible conversation input.
+Credential capture is implemented through protected channel/setup interactions:
+secret payloads are intercepted before model, Session, or Memory persistence and
+replaced with sanitized markers or opaque Vault references. Ordinary
+model-visible conversation input is still not a secret-entry surface.

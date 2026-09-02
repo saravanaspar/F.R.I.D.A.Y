@@ -36,6 +36,7 @@ Reports are especially valuable for:
 - Vault encryption, secret disclosure, or credential-capture bypass;
 - trusted channel principal spoofing or approval bypass;
 - permissions bypass for external/system/credential writes;
+- network access that bypasses the explicit network-bearing approval path (including `full` permission mode);
 - sandbox escape or unsafe host mounts;
 - path traversal, symlink races, or unsafe file replacement;
 - duplicate/replayed external side effects across retry/restart boundaries;

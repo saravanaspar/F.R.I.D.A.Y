@@ -1,6 +1,6 @@
 {
   "name": "@friday/model",
-  "version": "0.0.1",
+  "version": "1.0.0-dev",
   "description": "FRIDAY model subsystem with provider discovery, streaming, reasoning, and tool-call transport",
   "type": "module",
   "main": "./dist/index.js",
@@ -55,7 +55,7 @@
     "build": "tsgo -p tsconfig.build.json"
   },
   "dependencies": {
-    "@friday/operational-errors": "0.0.1",
+    "@friday/operational-errors": "1.0.0-dev",
     "@anthropic-ai/sdk": "^0.91.1",
     "@aws-sdk/client-bedrock-runtime": "^3.1095.0",
     "@google/genai": "^1.40.0",

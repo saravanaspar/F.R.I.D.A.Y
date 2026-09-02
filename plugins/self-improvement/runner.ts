@@ -181,7 +181,7 @@ async function buildPromotedExecutable(
   signal?: AbortSignal,
 ) {
   await preparePromotedHostEnvironment(execution, repository, signal);
-  const baseVersion = (process.env.FRIDAY_VERSION?.trim() || "0.1.0-dev").split("+")[0]!;
+  const baseVersion = (process.env.FRIDAY_VERSION?.trim() || "1.0.0-dev").split("+")[0]!;
   const suffix = generationId.replace(/[^A-Za-z0-9.-]/g, "").slice(0, 24) || "generation";
   await runHostCommand(execution, repository, ["run", "build:binary"], {
     timeoutMs: 30 * 60_000,

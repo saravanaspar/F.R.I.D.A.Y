@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Setup-interface wording amended by ADR-0038.
+Accepted. Setup-interface wording amended by ADR-0038. Network-approval semantics are reaffirmed and clarified by ADR-0050.
 
 ## Context
 
@@ -20,7 +20,7 @@ FRIDAY uses two plugins.
 - `ask`: reads are automatic; shell/edit writes require user approval.
 - `auto`: reads and workspace writes are automatic; network access still requires
   user approval.
-- `full`: workspace operations do not prompt for approval.
+- `full`: non-network workspace operations do not prompt for approval; explicit network use still requires approval.
 
 All modes reject paths outside the selected workspace.
 
@@ -35,9 +35,9 @@ with `--network=none`. Persistent IPython remains network-off and uses filesyste
 IPC sockets shared only through a per-kernel temporary directory; networked
 fetch/install work is performed through the permission-gated bash tool instead.
 Execution uses `--pull=never`; image acquisition is a separate explicit setup
-action. The fixed onboarding utility (`npm run onboard`, optionally with
-`--setup-sandbox`) and the permission-gated `sandbox.setup` System action first
-check rootless Podman and the configured local image. If the image already
+action. The fixed setup surface (`friday setup sandbox`) and the permission-gated
+`sandbox.setup` System action first check rootless Podman and the configured
+local image. If the image already
 exists it is reused unchanged; if only the image is missing, FRIDAY requires
 explicit approval before building it from the Sandbox-owned Containerfile declared
 in `plugins/sandbox/friday.binary-assets.json`
@@ -49,8 +49,8 @@ Model-generated bash calls do not declare their own authorization class. Shell
 commands are conservatively treated as workspace-write authority because a
 model-supplied label cannot reliably describe arbitrary shell effects. In
 `ask` mode that authority requires approval; `auto` explicitly authorizes
-autonomous workspace mutation. Network is a separate privilege request and
-requires approval in both `ask` and `auto`. Authorized bash and IPython execution receive a read-write workspace mount.
+autonomous workspace mutation. Network is a separate privilege request and requires approval in all modes,
+including `full` (ADR-0050). Authorized bash and IPython execution receive a read-write workspace mount.
 External read-only mounts are never accepted from model-controlled paths alone.
 A host consumer must register each source mount for the exact workspace and,
 when needed, an explicit target mountpoint inside that workspace. Sandbox never
@@ -76,8 +76,9 @@ access to the selected workspace, not unrestricted host access.
 The initial sandbox image is built locally from the Sandbox-owned Containerfile.
 Distribution and CI discover that source through `plugins/sandbox/friday.binary-assets.json`
 and includes Node.js 22/npm, Git, Python 3, IPython kernel support, dill, a native
-build toolchain, pkg-config, curl, jq, ripgrep, zip and unzip. Existing project
-`node_modules` remain part of the selected workspace; isolated self-improvement
-worktrees receive the primary checkout's dependencies through an explicit
-read-only trusted mount so normal test/typecheck/build commands can use local
-package binaries without exposing unrelated host paths.
+build toolchain, pkg-config, curl, jq, ripgrep, zip and unzip. Repository
+dependencies are installed once in the primary checkout's root-hoisted
+`node_modules`; plugin/package-local `node_modules` trees are forbidden. Isolated
+self-improvement worktrees receive the primary checkout's dependency tree through
+an explicit read-only trusted mount so normal test/typecheck/build commands can
+use local package binaries without exposing unrelated host paths.

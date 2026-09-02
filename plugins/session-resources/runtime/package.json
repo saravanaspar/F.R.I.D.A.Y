@@ -1,6 +1,6 @@
 {
   "name": "@friday/session-resources",
-  "version": "0.0.1",
+  "version": "1.0.0-dev",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -11,10 +11,14 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "clean": "rm -rf dist",
     "build": "tsgo -p tsconfig.build.json"
   },
-  "engines": { "node": ">=20.0.0" }
+  "engines": {
+    "node": ">=20.0.0"
+  }
 }

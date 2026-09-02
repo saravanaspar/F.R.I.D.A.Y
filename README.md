@@ -46,7 +46,8 @@ You can talk to the same assistant from a configured messaging channel, give it 
 | Long-running work | Runs persistent session jobs without forcing one conversation to wait for another task. |
 | Coding and automation | Uses execution tools, files, processes, sandboxes, integrations, and model-driven workflows. |
 | Multi-channel access | Receives and replies through Telegram, Discord, Slack, WhatsApp, Signal, Email, Teams, Google Chat, and SMS/Twilio. |
-| Voice | Optional speech-to-text and text-to-speech through OpenAI, Deepgram STT, or ElevenLabs TTS; audio transcripts enter the same trusted Turn Loop as text. |
+| Voice | Optional speech-to-text and text-to-speech through OpenAI, Deepgram STT, or ElevenLabs TTS; audio transcripts enter the same Turn Loop as text while remaining explicitly untrusted user content. |
+| Conditional hooks | Persists user-scoped conditions/instructions for turn, action, or handover phases with bounded invocation counts. |
 | Scheduling | Stores durable one-shot and recurring schedules in the user's configured IANA timezone. |
 | Memory | Keeps bounded preferences, habits, and graph-like relationships without stuffing the full history into every prompt. |
 | Skills | Installs and creates reusable skills that can be surfaced to the agent when relevant. |
@@ -61,13 +62,16 @@ You can talk to the same assistant from a configured messaging channel, give it 
 
 F.R.I.D.A.Y does not blindly rewrite itself after every conversation. When an explicitly requested capability is missing, the self-improvement path can:
 
-1. determine whether the capability is feasible;
-2. request the required authorization;
-3. create changes in an isolated worktree;
-4. run quality/evaluation gates;
-5. promote a verified generation;
-6. perform an authenticated two-process handoff; and
-7. resume the original request after the successor is ready.
+1. inspect installed actions/tools and capability contracts, and consider whether an MCP integration is the right existing boundary, before choosing new code;
+2. determine whether any genuinely missing capability is feasible and choose the owning placement;
+3. request explicit authorization before making code changes;
+4. create changes in an isolated worktree only when code is actually required;
+5. run quality/evaluation gates;
+6. promote a verified generation;
+7. perform an authenticated two-process handoff; and
+8. resume the original request after the successor is ready.
+
+When an existing action, tool, or typed capability already solves the request—or an existing MCP integration is the correct no-code boundary—F.R.I.D.A.Y can avoid the code-generation/restart path.
 
 If other foreground turns or background jobs are active at restart time, F.R.I.D.A.Y asks before pausing them and explains the recovery boundary.
 
@@ -163,7 +167,7 @@ On the first setup, F.R.I.D.A.Y requires:
 3. your IANA wall-clock timezone, for example `Asia/Kolkata`;
 4. at least **one enabled ingress channel** with one explicitly confirmed exact operator identity.
 
-Runtime defaults are not published until first-run channel setup and exact operator pairing are complete. `allowAll` may widen transport admission, but it never creates an operator implicitly. Secrets are validated and stored in Vault rather than written to `runtime.env`.
+Runtime defaults are not published until first-run channel setup and exact operator pairing are complete. `allowAll` may widen transport admission, but it never creates an operator implicitly. Secrets are never written to `runtime.env`. Setup normally validates and stores required provider credentials in Vault; if you explicitly keep an already-present environment credential environment-managed, Doctor reports that it is not durable for unattended/service restarts.
 
 Useful setup commands:
 
@@ -216,7 +220,7 @@ Email identity is derived from the parsed `From` address; F.R.I.D.A.Y does not c
 
 The `friday` runtime does not read terminal conversation input and registers no CLI channel. The command line is reserved for setup/onboarding compatibility, doctor, and bounded stopped-runtime maintenance.
 
-Voice is an optional plugin, not a second conversational runtime. `friday setup voice` configures provider/model/voice choices and verifies them with a tiny probe. Audio attachments are persisted by Artifacts once, then the Voice plugin enriches them with a bounded STT transcript marked as untrusted user content. TTS is exposed through the typed Voice capability for future mobile/voice transports; provider keys never belong on the mobile client.
+Voice is an optional plugin, not a second conversational runtime. `friday setup voice` configures provider/model/voice choices and verifies them with a tiny probe. Audio attachments are persisted by Artifacts once, then the Voice plugin enriches them with a bounded STT transcript marked as untrusted user content. TTS is exposed through the typed Voice capability for future audio-capable transports or local voice surfaces; provider keys remain host-side in Vault.
 
 ## How it fits together
 
@@ -267,7 +271,8 @@ The key design rule is separation of authority: model-facing plugins do not auto
 - **Execution / Sandbox** - process supervision, Python kernel execution, and rootless isolation.
 - **Vault** - authenticated encrypted secret persistence.
 - **Permissions** - effect-aware authorization for reads, writes, credentials, network, and system changes.
-- **Self Improvement** - candidate worktrees, evaluation, generations, promotion, rollback, and verified restart handoff.
+- **Self Improvement** - reuse-first action/tool/capability feasibility with MCP as an external-integration placement, candidate worktrees only when code is needed, evaluation, generations, promotion, rollback, and verified restart handoff.
+- **Conditional Hooks** - user-scoped reusable conditions/instructions with bounded invocation counts across turn/action/handover phases.
 - **Events / Audit / Observability** - operational delivery, tamper-evident audit data, logs, metrics, and model usage telemetry.
 
 </details>
@@ -369,7 +374,7 @@ friday backup verify BACKUP_ID
 friday backup restore BACKUP_ID --yes
 ```
 
-Encrypted backups use a per-backup scrypt-derived key, AES-256-GCM authenticated encryption for every file, and a keyed manifest authentication code. The passphrase is read from a hidden terminal; automation may use `FRIDAY_BACKUP_PASSPHRASE`. Unencrypted backups remain supported for local compatibility, but they may contain plaintext transcripts, memory, scheduler data, and operational state.
+Encrypted backups use a per-backup scrypt-derived key, AES-256-GCM authenticated encryption for every file, and a keyed manifest authentication code. The passphrase is read from a hidden terminal; automation may use `FRIDAY_BACKUP_PASSPHRASE`. Rebuildable `FRIDAY_HOME/.runtime` extraction bundles and `FRIDAY_HOME/tooling` environments are excluded from full-state backups; durable sessions, memory, scheduler/channel state, credentials, and other protected state remain in scope. Unencrypted backups remain supported for local compatibility and may therefore contain plaintext user/operational data.
 
 Vault recovery uses a separate passphrase-encrypted recovery kit:
 
@@ -382,7 +387,7 @@ The passphrase is read from a hidden terminal. For automation, use `FRIDAY_VAULT
 
 ## Releases
 
-Normal pushes and pull requests run verification but do not publish binaries. Releases are generated only when a version tag is pushed after the release commit has reached protected `main`. Development work should use a focused short-lived branch, merge through a PR, and delete the branch after merge.
+Normal pushes and pull requests run verification but do not publish binaries. Releases are created only by manually dispatching the **Release** workflow from the current tip of protected `main`; the workflow validates the requested version, rejects an existing/equivalent tag, builds and verifies the release, then creates the tag and GitHub Release itself. Development work should use a focused short-lived branch, merge through a PR, and delete the branch after merge.
 
 F.R.I.D.A.Y intentionally uses a small custom numeric tag format rather than SemVer: each `MAJOR.MINOR.PATCH` component accepts **1-6 digits**. Major/minor are integer-normalized. The patch component is decimal-style for release identity: trailing zeroes do not create a new release, while leading zeroes preserve precision.
 
@@ -393,7 +398,7 @@ v2.3.04     != v2.3.4
 v2.3.00004  != v2.3.04
 ```
 
-The release workflow rejects a tag if an equivalent canonical identity already exists. For the current release line, create the release tag only after the intended commit is merged to and synced with `main`:
+The release workflow rejects a requested version if an equivalent canonical tag already exists. For the current release line, dispatch the workflow only after the intended commit is merged to and synced with `main`; the workflow creates the tag itself after all release gates pass:
 
 ```bash
 git switch main

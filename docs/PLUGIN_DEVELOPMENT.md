@@ -45,7 +45,7 @@ The Plugin Kernel validates the complete graph and activation order. Never rely 
 
 ### Public API rule
 
-`plugins/<owner>/contract.ts` is the source of truth for cross-plugin reuse. A capability service exposes intentional semantic members directly; it must not hand consumers an entire implementation module through a generic `api` bag.
+`plugins/<owner>/contract.ts` is the source of truth for the owner's ordinary reusable cross-plugin API. A capability service exposes intentional semantic members directly; it must not hand consumers an entire implementation module through a generic `api` bag. Security-sensitive owners may additionally expose deliberately narrow companion authority contracts (for example `trusted-contract.ts`); those are not general reuse surfaces and must not be imported merely to avoid using the ordinary contract.
 
 ```ts
 const memory = ctx.services.require(MEMORY_CAPABILITY);
@@ -57,7 +57,7 @@ Do **not** write `memory.api.MemoryStore`, import `@friday/memory` from another 
 
 This rule also applies to self-improvement. Before generating code, the feasibility reviewer receives a bounded catalog derived from the configured `contract.ts` files, and an autonomous candidate must inspect those contracts before editing. Existing capability calls are preferred over duplicate logic.
 
-For a new developer: search `plugins/*/contract.ts`, open the relevant `*Service` interface, add its capability to `requires` or `optional`, then obtain the typed service with `ctx.services.require(...)` or `ctx.services.optional(...)`. TypeScript/IDE completion is the authoritative method listing; do not maintain a second manual list of API method names in the plugin manifest.
+For a new developer: search `plugins/*/contract.ts`, open the relevant `*Service` interface, add its capability to `requires` or `optional`, then obtain the typed service with `ctx.services.require(...)` or `ctx.services.optional(...)`. TypeScript/IDE completion is the authoritative method listing; do not maintain a second manual list of API method names in the plugin manifest. The self-improvement reuse catalog intentionally reads these ordinary contracts rather than privilege-escalating through trusted companion APIs.
 
 ## 2. Boot safely while unconfigured
 
@@ -75,7 +75,7 @@ Use trusted credential/Vault capabilities and opaque secret references. Consume 
 
 Every externally meaningful read/write, credential mutation, system mutation, or network-bearing action must describe its effect accurately. Model prose does not grant authority.
 
-For model-facing commands that need internet access, expose an explicit `network: true` request. Sandbox egress is off by default; Permissions routes a network-bearing action through the normal approval path and exact originating trusted-channel principal.
+For model-facing commands that need internet access, expose an explicit `network: true` request. Sandbox egress is off by default; Permissions routes a network-bearing action through the normal approval path and exact originating trusted-channel principal **even in `full` mode**. A host may deliberately override the sandbox to unrestricted networking, but Doctor warns because `requested` is the secure default.
 
 Do not hide network access inside an action whose permission metadata claims it is offline.
 
@@ -143,7 +143,7 @@ npm run verify
 
 ## 10. Adding a built-in plugin
 
-Follow the existing plugin directory shape and manifest/package conventions. If the plugin is built in, update the discovery source expected by `scripts/generate-builtin-plugins.mjs` and regenerate rather than hand-editing generated output.
+Follow the existing plugin directory shape and manifest/package conventions. A folder under `plugins/` is **not** discovered automatically: `friday.config.json` is the installed built-in plugin list. Add the new `./plugins/<name>/index.ts` entry there, then run `npm run generate:builtin-plugins`. The generated `src/builtin-plugins.ts` is used by the single-executable distribution and must never be hand-edited. Source mode dynamically imports the same configured entrypoints; the SEA runtime resolves those logical entries from the generated bundled registry.
 
 Run `npm run check:architecture` after every dependency-edge change. Direct sibling runtime imports, undeclared capabilities, or hidden host-domain logic are architecture regressions even if unit tests happen to pass.
 

@@ -1,6 +1,8 @@
 # ADR 0048: Isolate the deployment workspace and keep mutable tooling outside immutable SEA bundles
 
-**Status:** Accepted
+## Status
+
+Accepted.
 
 ## Context
 

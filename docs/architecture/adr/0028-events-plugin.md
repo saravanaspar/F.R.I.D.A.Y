@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted as the durable occurrence and delivery boundary.
+Accepted as the durable occurrence and delivery boundary. Worker lifecycle was integrated with graph-ready startup by ADR-0038.
 
 ## Decision
 
@@ -51,14 +51,14 @@ Durable consumer type filters are immutable after creation. This makes cursor se
 
 ## Worker lifecycle
 
-The plugin exposes an explicit foreground delivery worker with bounded polling, deliveries-per-tick, concurrency and lease duration. It is not auto-started during plugin bootstrap because downstream consumers must first register their handlers. `events worker` runs the worker until SIGINT/SIGTERM and then stops polling gracefully after the current delivery pass.
+The plugin owns a bounded delivery worker with configurable polling, deliveries-per-tick, concurrency, and lease duration. In the default FRIDAY composition the worker registers graph-ready startup, so downstream consumers have installed their handlers before polling begins; focused/test compositions may disable automatic worker start. Shutdown stops polling through the plugin lifecycle rather than an operator worker subcommand.
 
 Process supervision remains outside Events.
 
-## Boundaries and future integration
+## Boundaries and integration
 
 Events passes the top-level plugin rule: it has a reusable capability contract, many independent producers/consumers, substantial durable behavior and a strong reliability boundary.
 
-Channels, Scheduler, Webhooks, Vault, Generations and future MCP bridge code may publish events through the capability. Routing, Scheduler triggers and automation/workflows may consume them. Those plugins keep ownership of their own domain behavior. Events neither imports those implementations nor directly invokes an Agent.
+Current producers/consumers include Channels, Webhooks, MCP, Routing, Session Jobs, Turn Loop, Observability, and Alerts according to their own contracts. Those plugins keep ownership of their domain behavior. Additional plugins may use Events when they need durable occurrences or delivery, but Events neither imports those implementations nor directly invokes an Agent.
 
-Scheduler remains **WHEN** something becomes eligible to run. Events remains **WHAT happened**. Webhooks will later authenticate and validate arbitrary external HTTP input before publishing a validated event; that network/security boundary does not belong here.
+Scheduler remains **WHEN** something becomes eligible to run. Events remains **WHAT happened**. Webhooks (ADR-0029) authenticates and validates arbitrary external HTTP input before publishing a validated event; that network/security boundary does not belong here.

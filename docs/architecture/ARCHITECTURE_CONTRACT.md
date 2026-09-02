@@ -80,14 +80,17 @@ host bootstrap, a central application plugin, or unrelated consumers.
 
 ### Capability API Boundary
 
-Every cross-plugin singleton API is owned by the provider's `contract.ts`. The
+The provider's `contract.ts` owns its ordinary reusable cross-plugin API. The
 manifest declares **which** capabilities a plugin requires/optionally consumes/provides;
 the typed `*Service` interface declares **what** operations consumers may call.
 Consumers obtain those services through their activation context and must not import
 a sibling plugin's implementation package/runtime. Public services expose semantic
-members directly rather than a module-sized `api` escape hatch. Implementation-only
-classes, registries, transports, persistence helpers, and test fixtures remain behind
-the owner boundary.
+members directly rather than a module-sized `api` escape hatch. Security-sensitive
+owners may expose explicitly named companion authority contracts such as
+`trusted-contract.ts`; those are narrow privilege boundaries, not general reuse APIs,
+and are intentionally excluded from the self-improvement contract catalog.
+Implementation-only classes, registries, transports, persistence helpers, and test
+fixtures remain behind the owner boundary.
 
 This contract surface is also FRIDAY's reuse catalog for self-improvement. Feasibility
 review must inspect configured capability contracts before proposing code, and an
@@ -137,9 +140,10 @@ discovers those manifests; it must not contain plugin-internal asset paths. CI
 must invoke repository scripts such as `npm run verify` and
 `npm run build:sandbox-image` instead of naming plugin-internal paths directly.
 Moving an asset therefore changes its owner declaration, not the central binary
-builder or CI workflow. Native third-party addons that are selected from
-`node_modules` remain distribution-layer exceptions because FRIDAY does not own
-their package layout.
+builder or CI workflow. Native third-party addons selected from the **root-hoisted** `node_modules` remain
+distribution-layer exceptions because FRIDAY does not own their package layout.
+Plugin/package-local dependency trees are forbidden: `plugins/**/node_modules` and
+`packages/**/node_modules` must remain absent, including after workspace tests.
 
 Long-lived workers/transports are plugin-lifecycle owned. They register generic
 `afterReady` work so external ingress or durable consumers begin only after the
@@ -291,18 +295,19 @@ actions, with a conversational default of 10 and bounded explicit limits.
 Proactive channel alerts use a separate Events-metadata subscription capability;
 they must not forward raw log streams or Event payload data by default.
 
-## Unattended Network Availability Rule
+## Explicit Network Request Rule
 
-Detached sandbox executions and persistent kernels have outbound network access
-by default. The runtime must not silently convert ordinary tool metadata into a
-network-off container or apply a default destination allowlist. An explicit
-host caller may request network-disabled isolation, but the default for
-unattended work remains unrestricted egress.
+The secure sandbox default is `requested`: outbound networking is disabled unless
+the caller marks the action `network: true`. A network-bearing action must pass the
+normal Permissions approval path **even in `full` mode**; channel-originated approval
+is bound to the exact trusted principal/conversation. Persistent IPython kernels do
+not request network and therefore remain network-off under the secure default.
 
-This availability guarantee does not bypass Permissions for the requested
-action or credential consumption. Rootless isolation, narrow authorized mounts,
-resource/PID/file ceilings, a read-only container root, dropped capabilities and
-a pinned locally built image remain mandatory.
+An operator may deliberately set `FRIDAY_SANDBOX_NETWORK_MODE=unrestricted`, but
+that is an explicit host override rather than the default and Doctor warns about it.
+No network setting bypasses workspace/mount containment, credential authority,
+resource/PID/file ceilings, the read-only container root, dropped capabilities, or
+the pinned locally built image.
 
 ## Relevant Memory Rule
 

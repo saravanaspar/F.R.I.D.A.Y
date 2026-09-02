@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Operator-interface wording amended by ADR-0038.
+Accepted. Operator-interface wording was amended by ADR-0038; network-prompt semantics are amended by ADR-0050.
 
 ## Context
 
@@ -20,7 +20,7 @@ The existing modes keep their workspace meaning while sensitive effects become e
 
 - `ask`: workspace reads are automatic; all mutations, external reads, credential changes, system writes, and network use require approval.
 - `auto`: workspace writes may proceed automatically, but external reads/writes, credential changes, system writes, and network use still require approval.
-- `full`: an operator identity may proceed without prompts, while the workspace containment boundary still applies.
+- `full`: an operator identity may proceed without prompts for non-network operations, while the workspace containment boundary still applies; explicit network use always requires approval (ADR-0050).
 
 Permissions also owns a private trusted-channel-identity registry under the stable FRIDAY home at `permissions/trusted_identities.json`; mission-scoped `FRIDAY_STATE_DIR` overrides are deliberately ignored for this authorization state. Records are keyed by the authenticated transport tuple `(channel, accountId, senderId)`; conversation and thread ids are deliberately excluded because they identify request context, not a person. State is atomically replaced and kept at mode `0600`; malformed state fails closed.
 

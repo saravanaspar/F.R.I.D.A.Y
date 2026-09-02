@@ -10,18 +10,19 @@ FRIDAY's Plugin Kernel already declares `requires`, `optional`, and `provides` a
 
 ## Decision
 
-1. `plugins/<owner>/contract.ts` is the only public cross-plugin API for that owner.
+1. `plugins/<owner>/contract.ts` is the ordinary reusable cross-plugin API for that owner. Narrow companion contracts such as `trusted-contract.ts` may exist for explicitly privileged host authority; they are not general reuse surfaces.
 2. Capability services expose intentional members directly. A generic module-sized `api` property is forbidden.
 3. Consumers declare the capability in `requires`/`optional` and obtain it through `ctx.services.require`/`optional`.
-4. Non-runtime plugin code may import its own implementation package and the dependency-free operational-error utility, but may not import a sibling plugin implementation package. Sibling interaction goes through the sibling contract.
+4. Non-runtime plugin code may import its own implementation package and the dependency-free operational-error utility, but may not import a sibling plugin implementation package. Ordinary sibling interaction goes through the sibling's semantic contract; privileged interaction uses a narrow authority contract only when the architecture explicitly grants it.
 5. Implementation-specific types may be referenced by an owning contract when they are part of the stable public data shape, but concrete storage/transport/runtime ownership stays private.
 6. Memory uses a structural `MemoryStoreService` plus `MemoryService.openStore` instead of exposing the concrete `MemoryStore` class, allowing a future backend such as MemPalace to implement the same semantic boundary.
-7. Self-improvement feasibility receives a bounded source-derived catalog of configured capability contracts and must consider reuse before code generation. Autonomous self-improvement candidates must search `plugins/*/contract.ts` before editing.
-8. Architecture tests enforce these rules.
+7. Self-improvement feasibility receives a bounded source-derived catalog of configured ordinary `contract.ts` capability surfaces and must consider reuse before code generation. Trusted/admin companion contracts are intentionally excluded from that reuse catalog. Autonomous self-improvement candidates must search `plugins/*/contract.ts` before editing.
+8. Privilege-specific operations should use a separate capability instead of broadening a common service. `model.registry`, for example, owns custom-model registration/removal while ordinary `model` remains the inference/read surface.
+9. Architecture tests enforce these rules.
 
 ## Consequences
 
-- New contributors can discover reusable APIs from one predictable file and get normal TypeScript completion.
+- New contributors can discover ordinary reusable APIs from one predictable file and get normal TypeScript completion; trusted/admin authority stays visibly separate.
 - Plugin manifests remain concise; method names are not duplicated in `requires`/`provides` metadata.
 - Consumers are insulated from implementation refactors and alternate providers become practical where the semantic contract is implementation-neutral.
 - Self-improvement has a concrete API inventory for reuse-first placement decisions.
