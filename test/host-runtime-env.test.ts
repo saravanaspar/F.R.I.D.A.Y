@@ -1,8 +1,8 @@
-import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadRuntimeEnvironment } from "../src/host/runtime-env.js";
+import { loadRuntimeEnvironment, prepareRuntimeWorkspace } from "../src/host/runtime-env.js";
 
 const roots: string[] = [];
 
@@ -20,6 +20,56 @@ async function runtimeHome(contents: string): Promise<string> {
 }
 
 describe("host runtime environment", () => {
+
+  it("creates and enters the persisted dedicated workspace before plugin activation", async () => {
+    const home = await runtimeHome([
+      'FRIDAY_MODEL_PROVIDER="openai"',
+      'FRIDAY_MODEL_ID="gpt-5"',
+      'FRIDAY_PERMISSION_MODE="ask"',
+      'FRIDAY_TIMEZONE="UTC"',
+      `FRIDAY_WORKSPACE=${JSON.stringify(join(tmpdir(), `friday-host-workspace-${process.pid}-${Date.now()}`))}`,
+      "",
+    ].join("\n"));
+    const environment: NodeJS.ProcessEnv = { FRIDAY_HOME: home };
+    await loadRuntimeEnvironment({ home, environment });
+    const workspace = environment.FRIDAY_WORKSPACE!;
+    roots.push(workspace);
+    const previous = process.cwd();
+    try {
+      await expect(prepareRuntimeWorkspace(environment)).resolves.toBe(workspace);
+      expect(process.cwd()).toBe(workspace);
+    } finally {
+      process.chdir(previous);
+    }
+  });
+
+  it("rejects a workspace that overlaps protected FRIDAY state", async () => {
+    const home = await runtimeHome([
+      'FRIDAY_MODEL_PROVIDER="openai"',
+      'FRIDAY_MODEL_ID="gpt-5"',
+      'FRIDAY_PERMISSION_MODE="ask"',
+      'FRIDAY_TIMEZONE="UTC"',
+      "",
+    ].join("\n"));
+    const environment: NodeJS.ProcessEnv = { FRIDAY_HOME: home, FRIDAY_WORKSPACE: join(home, "workspace") };
+    await expect(prepareRuntimeWorkspace(environment)).rejects.toThrow(/must not overlap FRIDAY_HOME/);
+  });
+
+  it("rejects a workspace that reaches protected state through a symlinked parent", async () => {
+    const home = await runtimeHome([
+      'FRIDAY_MODEL_PROVIDER="openai"',
+      'FRIDAY_MODEL_ID="gpt-5"',
+      'FRIDAY_PERMISSION_MODE="ask"',
+      'FRIDAY_TIMEZONE="UTC"',
+      "",
+    ].join("\n"));
+    const redirect = await mkdtemp(join(tmpdir(), "friday-workspace-redirect-"));
+    roots.push(redirect);
+    const linkedHome = join(redirect, "linked-home");
+    await symlink(home, linkedHome, "dir");
+    const environment: NodeJS.ProcessEnv = { FRIDAY_HOME: home, FRIDAY_WORKSPACE: join(linkedHome, "workspace") };
+    await expect(prepareRuntimeWorkspace(environment)).rejects.toThrow(/after resolving filesystem links/);
+  });
   it("loads the onboarding timezone into the runtime process environment", async () => {
     const home = await runtimeHome([
       'FRIDAY_MODEL_PROVIDER="openai"',

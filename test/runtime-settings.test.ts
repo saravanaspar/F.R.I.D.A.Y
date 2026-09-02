@@ -1,6 +1,6 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { definePlugin, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
@@ -47,6 +47,20 @@ async function assemble(
 }
 
 describe("runtime settings", () => {
+
+  it("persists a dedicated workspace default outside FRIDAY state", async () => {
+    const home = await mkdtemp(join(tmpdir(), "friday-runtime-settings-workspace-")); roots.push(home);
+    await saveRuntimeSettings({
+      modelProvider: "openai",
+      modelId: "gpt-5",
+      permissionMode: "ask",
+      timezone: "UTC",
+    }, home);
+    const expectedWorkspace = join(dirname(home), "FRIDAY-workspace");
+    await expect(readRuntimeSettings(home)).resolves.toMatchObject({ workspaceRoot: expectedWorkspace });
+    const persisted = await readFile(join(home, "runtime.env"), "utf8");
+    expect(persisted).toContain(`FRIDAY_WORKSPACE=${JSON.stringify(expectedWorkspace)}`);
+  });
   it("keeps the predecessor alive until a successful change has been replied to", async () => {
     const home = await mkdtemp(join(tmpdir(), "friday-runtime-settings-")); roots.push(home);
     const friday = new PluginTestHost();

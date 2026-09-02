@@ -1,6 +1,6 @@
 import { chmod, mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runOnboarding as runOnboardingRaw, type OnboardingOptions } from "../src/onboarding.js";
 import { maybeManageChannels } from "../src/onboarding-channels.js";
@@ -84,6 +84,7 @@ describe("FRIDAY onboarding", () => {
       FRIDAY_MODEL_ID: "gpt-test",
       FRIDAY_PERMISSION_MODE: "ask",
       FRIDAY_TIMEZONE: expect.any(String),
+      FRIDAY_WORKSPACE: join(dirname(home), "FRIDAY-workspace"),
     });
     expect(text).not.toMatch(/(?:API_KEY|TOKEN|PASSWORD|CREDENTIAL)=/i);
     expect((await stat(path)).mode & 0o077).toBe(0);
@@ -202,6 +203,7 @@ describe("FRIDAY onboarding", () => {
       modelId: "stored-model",
       permissionMode: "auto",
       timezone: expect.any(String),
+      workspaceRoot: join(dirname(home), "FRIDAY-workspace"),
       selfRepository: "/srv/friday-source",
     });
   });

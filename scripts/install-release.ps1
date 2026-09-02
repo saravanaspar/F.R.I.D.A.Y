@@ -22,11 +22,22 @@ if ($LASTEXITCODE -ne 0) {
     Fail 'WSL2 is installed but not ready. Start/configure a Linux distribution, then rerun this installer.'
 }
 
-$InstallerUrl = "https://raw.githubusercontent.com/$Repository/main/scripts/install-release.sh"
-# Repository is constrained by ValidatePattern, so it is safe to embed in this
-# fixed POSIX command. The actual binary is installed inside the default WSL2
-# distribution, where FRIDAY's POSIX private-file guarantees are enforced.
-$Command = "command -v curl >/dev/null 2>&1 || { echo 'friday installer: curl is required inside WSL2' >&2; exit 1; }; curl --proto '=https' --tlsv1.2 -fsSL '$InstallerUrl' | sh -s -- '$Repository'"
+$InstallerUrl = "https://github.com/$Repository/releases/latest/download/install-release.sh"
+# The bootstrap installer is itself a release artifact. Build the WSL command
+# from a literal here-string so PowerShell never expands shell variables such as
+# $tmp or command substitutions before WSL receives them. Repository is bounded
+# by ValidatePattern above, so placeholder substitution cannot inject shell syntax.
+$Command = @'
+set -eu
+command -v curl >/dev/null 2>&1 || { echo 'friday installer: curl is required inside WSL2' >&2; exit 1; }
+command -v gh >/dev/null 2>&1 || { echo 'friday installer: GitHub CLI (gh) is required inside WSL2' >&2; exit 1; }
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+curl --proto '=https' --tlsv1.2 -fsSL '__INSTALLER_URL__' -o "$tmp"
+gh attestation verify "$tmp" --repo '__REPOSITORY__' --cert-identity 'https://github.com/__REPOSITORY__/.github/workflows/release.yml@refs/heads/main' --source-ref 'refs/heads/main' --deny-self-hosted-runners >/dev/null
+sh "$tmp" '__REPOSITORY__'
+'@
+$Command = $Command.Replace('__INSTALLER_URL__', $InstallerUrl).Replace('__REPOSITORY__', $Repository)
 
 Write-Host "Installing F.R.I.D.A.Y inside the default WSL2 Linux distribution..."
 & wsl.exe sh -lc $Command

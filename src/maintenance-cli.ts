@@ -1,6 +1,7 @@
 import { open, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { VaultStore, getVaultStateDir } from "@friday/vault";
+import { getFridayWorkspace } from "../plugins/runtime-settings/runtime-env.js";
 import {
   createStateBackup,
   getStateBackupRoot,
@@ -164,7 +165,7 @@ export async function runBackupCli(args: readonly string[]): Promise<void> {
 export async function runVaultRecoveryCli(args: readonly string[]): Promise<void> {
   const [command, ...rest] = args;
   const stateDir = optionValue(rest, "--vault-directory") ?? getVaultStateDir();
-  const vault = new VaultStore({ stateDir: resolve(stateDir), workspaceRoot: process.cwd() });
+  const vault = new VaultStore({ stateDir: resolve(stateDir), workspaceRoot: getFridayWorkspace(process.env) });
   if (command === "create") {
     ensureKnown(rest, ["--out", "--vault-directory"], []);
     const output = optionValue(rest, "--out");

@@ -23,8 +23,11 @@ systemctl --user daemon-reload
 systemctl --user enable --now friday
 ```
 
-The example uses the user's home directory as its working directory. If FRIDAY
-should work primarily in another workspace, create an override:
+The example uses the dedicated `~/FRIDAY-workspace` working directory. `friday setup`
+creates and persists this workspace as `FRIDAY_WORKSPACE`; protected state remains in
+`~/.friday` and must never overlap the writable model/tool workspace. To use a different
+dedicated workspace, set `FRIDAY_WORKSPACE` before rerunning setup and keep the systemd
+working directory aligned with that persisted value via an override:
 
 ```bash
 systemctl --user edit friday
@@ -32,10 +35,12 @@ systemctl --user edit friday
 
 ```ini
 [Service]
-WorkingDirectory=/absolute/path/to/workspace
+WorkingDirectory=/absolute/path/to/dedicated-workspace
+Environment=FRIDAY_WORKSPACE=/absolute/path/to/dedicated-workspace
 ```
 
-Then reload/restart:
+Do not point the workspace at `$HOME`, `FRIDAY_HOME`, or a parent of either protected
+state directory. Then reload/restart:
 
 ```bash
 systemctl --user daemon-reload

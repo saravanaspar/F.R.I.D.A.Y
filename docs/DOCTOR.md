@@ -16,6 +16,8 @@ friday doctor
 
 It performs local checks only. It does not make outbound network requests and it does not read plaintext Vault secret values.
 
+Deployment checks use the persisted effective workspace rather than the caller's current directory. Doctor fails health if the workspace overlaps `FRIDAY_HOME`, if a required model/Voice credential is not durable for unattended restarts, or if an enabled WhatsApp channel lacks its stable sidecar tooling/host Node runtime.
+
 For automation:
 
 ```bash
@@ -35,9 +37,9 @@ friday doctor --fix
 | Section | Examples |
 | --- | --- |
 | Installation | platform support, runtime mode, FRIDAY_HOME existence/privacy |
-| Configuration | model/runtime settings, ingress channels, canonical self-improvement checkout |
-| Security | permission mode, channel exposure, Vault metadata/key boundary, sandbox network policy |
-| Tooling | Git, npm, source Node pin, Python bootstrap/runtime, rootless Podman sandbox |
+| Configuration | model/runtime settings, durable model credential, optional Voice credentials, ingress channels, canonical self-improvement checkout |
+| Security | dedicated workspace/state isolation, permission mode, channel exposure, Vault metadata/key boundary, sandbox network policy |
+| Tooling | Git, npm, source Node pin, stable execution-Python tooling, WhatsApp sidecar readiness, rootless Podman sandbox |
 | Recovery | encrypted state backups, fatal crash records, free disk space |
 
 Each check has one of four levels:

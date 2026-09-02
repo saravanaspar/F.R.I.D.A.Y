@@ -24,6 +24,24 @@ afterEach(async () => {
 });
 
 describe("full-state backup", () => {
+
+  it("excludes rebuildable runtime bundles and tooling from durable state backups", async () => {
+    const parent = await temp();
+    const home = join(parent, "home");
+    const backups = join(parent, "backups");
+    await mkdir(join(home, ".runtime", "bundle-old"), { recursive: true, mode: 0o700 });
+    await mkdir(join(home, "tooling", "execution-python", "venv"), { recursive: true, mode: 0o700 });
+    await writeFile(join(home, ".runtime", "bundle-old", "asset"), "rebuildable", { mode: 0o600 });
+    await writeFile(join(home, "tooling", "execution-python", "venv", "python"), "rebuildable", { mode: 0o600 });
+    await writeFile(join(home, "state.json"), "durable", { mode: 0o600 });
+
+    const manifest = await createStateBackup({
+      environment: { FRIDAY_HOME: home } as NodeJS.ProcessEnv,
+      backupRoot: backups,
+      idFactory: () => "exclude-rebuildable",
+    });
+    expect(manifest.entries.map((entry) => `${entry.root}/${entry.path}`)).toEqual(["home/state.json"]);
+  });
   it("derives a sibling hidden backup directory without duplicating a leading dot", async () => {
     const parent = await temp();
     expect(getStateBackupRoot({ FRIDAY_HOME: join(parent, ".friday") } as NodeJS.ProcessEnv)).toBe(

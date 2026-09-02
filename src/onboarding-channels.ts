@@ -251,6 +251,7 @@ export async function maybeManageChannels(
   home: string,
   force?: boolean,
   requireEnabled = false,
+  workspaceRoot?: string,
 ): Promise<void> {
   const current = await readSavedChannels(home);
   const configuredCount = Object.values(current.channels).filter((channel) => channel?.enabled).length;
@@ -273,7 +274,10 @@ export async function maybeManageChannels(
   if (!requireEnabled && force !== true && !await askConfirm(io, configuredCount ? "Manage channels now?" : "Configure an ingress channel now?", false)) return;
   const vaultModule = await import("@friday/vault");
   const environment: NodeJS.ProcessEnv = { ...process.env, FRIDAY_HOME: home };
-  const vault = new vaultModule.VaultStore({ stateDir: vaultModule.getVaultStateDir(environment), workspaceRoot: process.cwd() });
+  const vault = new vaultModule.VaultStore({
+    stateDir: vaultModule.getVaultStateDir(environment),
+    workspaceRoot: workspaceRoot ?? resolve(home, "..", "FRIDAY-workspace"),
+  });
 
   for (;;) {
     const state = await readSavedChannels(home);

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { reportOperationalError, reportUnlessExpectedAbort } from "@friday/operational-errors";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,10 +46,32 @@ function defaultFridayHome(): string {
   return configured ? configured : join(homedir(), ".friday");
 }
 
-function defaultBridgeDir(): string {
+function whatsappAssetSourceDir(): string {
   const bundled = process.env.FRIDAY_BUNDLED_ROOT?.trim();
   if (bundled) return join(bundled, "channels", "whatsapp");
   return join(dirname(dirname(dirname(fileURLToPath(import.meta.url)))), "bridge", "whatsapp");
+}
+
+function defaultBridgeDir(): string {
+  const tooling = join(defaultFridayHome(), "tooling", "whatsapp");
+  const source = whatsappAssetSourceDir();
+  const manifestFiles = ["bridge.mjs", "package.json", "package-lock.json"] as const;
+  if (manifestFiles.every((name) => existsSync(join(tooling, name)))) {
+    const sourceAvailable = manifestFiles.every((name) => existsSync(join(source, name)));
+    if (sourceAvailable && manifestFiles.some((name) => !readFileSync(join(tooling, name)).equals(readFileSync(join(source, name))))) {
+      throw new Error("WhatsApp bridge tooling is stale for this FRIDAY build; run friday setup whatsapp");
+    }
+  }
+  return tooling;
+}
+
+export function resolveWhatsAppNodeExecutable(
+  environment: NodeJS.ProcessEnv = process.env,
+  currentExecutable = process.execPath,
+): string {
+  const configured = environment.FRIDAY_NODE_EXECUTABLE?.trim();
+  if (configured) return configured;
+  return environment.FRIDAY_SINGLE_BINARY === "1" ? "node" : currentExecutable;
 }
 
 
@@ -171,7 +193,7 @@ export class WhatsAppChannelTransport implements ChannelTransport {
   }
 
   async #launchBridge(signal: AbortSignal): Promise<void> {
-    this.#child = spawn(process.execPath, [join(this.#bridgeDir, "bridge.mjs"), "--port", String(this.#port), "--session", this.#sessionDir], {
+    this.#child = spawn(resolveWhatsAppNodeExecutable(), [join(this.#bridgeDir, "bridge.mjs"), "--port", String(this.#port), "--session", this.#sessionDir], {
       cwd: this.#bridgeDir,
       env: childEnvironment(this.#bridgeSecret),
       stdio: ["ignore", "inherit", "inherit"],

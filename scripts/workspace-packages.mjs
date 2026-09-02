@@ -183,13 +183,26 @@ export function checkWorkspacePackages(root = projectRoot) {
 }
 
 export function findWorkspaceNodeModules(root = projectRoot) {
-  return Object.freeze(checkWorkspacePackages(root)
-    .map((workspace) => ({
-      name: workspace.name,
-      relativePath: `${workspace.relativePath}/node_modules`,
-      path: resolve(workspace.path, "node_modules"),
-    }))
-    .filter((entry) => existsSync(entry.path)));
+  checkWorkspacePackages(root);
+  const found = new Map();
+  const visit = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const child = resolve(directory, entry.name);
+      if (entry.name === "node_modules") {
+        const relativePath = relative(root, child).replaceAll("\\", "/");
+        found.set(child, Object.freeze({ name: relativePath, relativePath, path: child }));
+        continue;
+      }
+      if (entry.name === ".git" || entry.name === "dist" || entry.name === "build") continue;
+      visit(child);
+    }
+  };
+  for (const scope of workspaceSearchRoots(root)) {
+    const directory = resolve(root, scope);
+    if (existsSync(directory)) visit(directory);
+  }
+  return Object.freeze([...found.values()].sort((left, right) => left.relativePath.localeCompare(right.relativePath)));
 }
 
 export function checkWorkspaceNodeModules(root = projectRoot) {
@@ -197,7 +210,7 @@ export function checkWorkspaceNodeModules(root = projectRoot) {
   if (localInstalls.length === 0) return localInstalls;
   const paths = localInstalls.map((entry) => `  - ${entry.relativePath}`).join("\n");
   throw new Error(
-    `Workspace-local node_modules directories are not allowed:\n${paths}\n` +
+    `Plugin/package-local node_modules directories are not allowed:\n${paths}\n` +
     "Run `npm run clean:workspace-node-modules`, then install dependencies once from the repository root with `npm ci`.",
   );
 }
@@ -244,7 +257,7 @@ function main() {
   }
   if (command === "check-node-modules") {
     checkWorkspaceNodeModules();
-    process.stdout.write("Workspace node_modules check: PASS (root-hoisted install only)\n");
+    process.stdout.write("Workspace node_modules check: PASS (plugins/packages are dependency-tree free)\n");
     return;
   }
   if (command === "clean-node-modules") {

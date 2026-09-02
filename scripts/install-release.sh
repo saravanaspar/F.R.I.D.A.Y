@@ -42,8 +42,11 @@ tmp="$tmp_dir/$binary"
 sum="$tmp_dir/${asset}.sha256"
 provenance="$tmp_dir/$provenance_asset"
 target_tmp=""
+previous_tmp=""
+target="$install_dir/$binary"
 cleanup() {
   [ -n "$target_tmp" ] && rm -f "$target_tmp" 2>/dev/null || true
+  [ -n "$previous_tmp" ] && rm -f "$previous_tmp" 2>/dev/null || true
   rm -rf "$tmp_dir" 2>/dev/null || true
 }
 trap cleanup EXIT HUP INT TERM
@@ -90,11 +93,32 @@ if ! gh attestation verify "$tmp" \
 fi
 cat "$tmp" > "$target_tmp"
 chmod 0755 "$target_tmp"
-mv -f "$target_tmp" "$install_dir/$binary"
-target_tmp=""
+# Execute the exact candidate before replacing a known-good installation.
+if ! "$target_tmp" --version >/dev/null; then
+  echo "FRIDAY candidate binary failed its local execution preflight; existing installation was left unchanged" >&2
+  exit 1
+fi
 
-"$install_dir/$binary" --version
-printf '\nInstalled %s\n' "$install_dir/$binary"
+if [ -e "$target" ]; then
+  previous_tmp="$(mktemp "${install_dir%/}/.friday-previous.XXXXXXXX")"
+  cat "$target" > "$previous_tmp"
+  chmod 0755 "$previous_tmp"
+fi
+mv -f "$target_tmp" "$target"
+target_tmp=""
+if ! "$target" --version; then
+  echo "FRIDAY activation failed; restoring the previous installation" >&2
+  if [ -n "$previous_tmp" ]; then
+    mv -f "$previous_tmp" "$target"
+    previous_tmp=""
+  else
+    rm -f "$target"
+  fi
+  exit 1
+fi
+[ -n "$previous_tmp" ] && rm -f "$previous_tmp"
+previous_tmp=""
+printf '\nInstalled %s\n' "$target"
 case ":${PATH:-}:" in
   *":$install_dir:"*) ;;
   *) printf 'Add %s to PATH, then run: friday setup\n' "$install_dir" ;;

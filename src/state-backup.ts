@@ -410,6 +410,9 @@ async function copyTree(
     const children = await readdir(sourceDirectory, { withFileTypes: true });
     children.sort((left, right) => left.name.localeCompare(right.name));
     for (const child of children) {
+      if (root.kind === "home" && sourceDirectory === root.source && (child.name === ".runtime" || child.name === "tooling")) {
+        continue;
+      }
       const sourcePath = join(sourceDirectory, child.name);
       const relativePath = portableRelative(relative(root.source, sourcePath));
       const destinationPath = join(destinationDirectory, child.name);

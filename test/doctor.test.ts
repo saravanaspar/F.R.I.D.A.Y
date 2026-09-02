@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { saveSavedChannels } from "../plugins/channels/config.js";
+import { modelCredentialVaultRef } from "../plugins/auth/model-credential-ref.js";
+import { VaultStore, getVaultStateDir } from "@friday/vault";
 import { saveRuntimeSettings } from "../plugins/runtime-settings/runtime-env.js";
 import { collectDoctorChecks, formatDoctorReport } from "../src/doctor.js";
 
@@ -38,6 +40,7 @@ afterEach(async () => {
 describe("friday doctor", () => {
   it("reports configured runtime, ingress, security boundaries, source checkout, tooling, and recovery health", async () => {
     const home = await temp("friday-doctor-home-");
+    const workspace = await temp("friday-doctor-workspace-");
     const repository = await sourceFixture();
 
     await saveRuntimeSettings({
@@ -45,8 +48,11 @@ describe("friday doctor", () => {
       modelId: "gpt-5",
       permissionMode: "ask",
       timezone: "UTC",
+      workspaceRoot: workspace,
       selfRepository: repository,
     }, home);
+    const vault = new VaultStore({ stateDir: getVaultStateDir({ FRIDAY_HOME: home }), workspaceRoot: workspace });
+    vault.create({ ref: modelCredentialVaultRef("openai"), kind: "model-api-key", secret: "doctor-test-key" });
     await saveSavedChannels({ telegram: { enabled: true, allowAll: false, allowedSenderIds: ["owner"] } }, home);
 
     const environment = { ...process.env, FRIDAY_HOME: home, FRIDAY_SANDBOX_NETWORK_MODE: "requested" };
@@ -54,6 +60,10 @@ describe("friday doctor", () => {
     const byId = new Map(checks.map((entry) => [entry.id, entry]));
     expect(byId.get("home")?.level).toBe("ok");
     expect(byId.get("runtime-settings")?.level).toBe("ok");
+    expect(byId.get("workspace")).toMatchObject({ level: "ok" });
+    expect(byId.get("model-credential")).toMatchObject({ level: "ok" });
+    expect(byId.get("voice")).toMatchObject({ level: "info" });
+    expect(byId.get("whatsapp-tooling")).toMatchObject({ level: "info" });
     expect(byId.get("channels")).toMatchObject({ level: "ok" });
     expect(byId.get("channel-access")).toMatchObject({ level: "ok" });
     expect(byId.get("permission-mode")).toMatchObject({ level: "ok", message: "ask" });
@@ -87,11 +97,13 @@ describe("friday doctor", () => {
 
   it("warns when a channel accepts all senders, full permissions are enabled, or sandbox networking is unrestricted", async () => {
     const home = await temp("friday-doctor-risk-home-");
+    const workspace = await temp("friday-doctor-risk-workspace-");
     await saveRuntimeSettings({
       modelProvider: "openai",
       modelId: "gpt-5",
       permissionMode: "full",
       timezone: "UTC",
+      workspaceRoot: workspace,
     }, home);
     await saveSavedChannels({ telegram: { enabled: true, allowAll: true } }, home);
 
@@ -104,4 +116,23 @@ describe("friday doctor", () => {
     expect(checks.find((entry) => entry.id === "channel-access")?.level).toBe("warn");
     expect(checks.find((entry) => entry.id === "sandbox-network")?.level).toBe("warn");
   });
+  it("fails health when the configured workspace overlaps protected FRIDAY state", async () => {
+    const home = await temp("friday-doctor-overlap-home-");
+    const workspace = join(home, "workspace");
+    await mkdir(workspace, { recursive: true, mode: 0o700 });
+    await saveRuntimeSettings({
+      modelProvider: "openai",
+      modelId: "gpt-5",
+      permissionMode: "ask",
+      timezone: "UTC",
+      workspaceRoot: workspace,
+    }, home);
+
+    const checks = await collectDoctorChecks({ ...process.env, FRIDAY_HOME: home });
+    expect(checks.find((entry) => entry.id === "workspace")).toMatchObject({
+      level: "error",
+      message: "overlaps FRIDAY state",
+    });
+  });
+
 });

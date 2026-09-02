@@ -47,6 +47,7 @@ const SETTINGS_ENV_KEYS = [
   "FRIDAY_ROUTING_MODEL_ID",
   "FRIDAY_PERMISSION_MODE",
   "FRIDAY_TIMEZONE",
+  "FRIDAY_WORKSPACE",
   "FRIDAY_SELF_REPOSITORY",
 ] as const;
 
@@ -136,6 +137,7 @@ function publicSettings(settings: RuntimeSettings | undefined): Record<string, u
       : { provider: settings.modelProvider, modelId: settings.modelId, dedicated: false },
     permissionMode: settings.permissionMode,
     timezone: settings.timezone,
+    workspaceRoot: settings.workspaceRoot ?? null,
     selfRepository: settings.selfRepository ?? null,
   };
 }

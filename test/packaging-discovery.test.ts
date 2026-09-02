@@ -94,4 +94,46 @@ describe("workspace and binary packaging discovery", () => {
     expect(binaryBuilder).not.toContain("bridge/email/email_bridge.py");
     expect(binaryBuilder).not.toContain("plugins/rlm/runtime/python");
   });
+  it("keeps deployment workspace isolation, installer provenance, and Linux SEA smoke checks release-enforced", async () => {
+    const [service, readme, release, ci, installer, runtime, memory, channelsManifest] = await Promise.all([
+      readFile("deploy/systemd/friday.service", "utf8"),
+      readFile("README.md", "utf8"),
+      readFile(".github/workflows/release.yml", "utf8"),
+      readFile(".github/workflows/ci.yml", "utf8"),
+      readFile("scripts/install-release.sh", "utf8"),
+      readFile("src/runtime.ts", "utf8"),
+      readFile("plugins/memory/index.ts", "utf8"),
+      readFile("plugins/channels/runtime/package.json", "utf8"),
+    ]);
+    expect(service).toContain("WorkingDirectory=-%h/FRIDAY-workspace");
+    expect(service).not.toContain("WorkingDirectory=%h\n");
+    expect(readme).not.toContain("raw.githubusercontent.com/saravanaspar/F.R.I.D.A.Y/main/scripts/install-release.sh");
+    expect(readme).toContain("releases/latest/download/install-release.sh");
+    expect(release).toContain("release/install-release.sh");
+    expect(release).toContain("scripts/smoke-release-binary.sh");
+    expect(ci).toContain("linux-binary-smoke");
+    expect(ci).toContain("scripts/smoke-release-binary.sh");
+    expect(installer.indexOf('"$target_tmp" --version')).toBeGreaterThanOrEqual(0);
+    expect(installer.indexOf('"$target_tmp" --version')).toBeLessThan(installer.indexOf('mv -f "$target_tmp" "$target"'));
+    expect(installer).toContain("restoring the previous installation");
+    const bootstrapConfigAssignment = "process.env.FRIDAY_BOOTSTRAP_CONFIG = bootstrapConfigPath;";
+    const workspacePreparation = "await prepareRuntimeWorkspace(process.env);";
+    expect(runtime).toContain(bootstrapConfigAssignment);
+    expect(runtime).toContain(workspacePreparation);
+    expect(runtime.indexOf(bootstrapConfigAssignment)).toBeLessThan(runtime.indexOf(workspacePreparation));
+    expect(memory).toContain('join(homedir(), ".friday")');
+    expect(JSON.parse(channelsManifest) as { scripts?: Record<string, string> }).not.toHaveProperty("scripts.setup:whatsapp");
+  });
+
+  it("keeps Node runtime typings on the shipped Node 22 major across all workspaces", async () => {
+    const nodeVersion = (await readFile(".node-version", "utf8")).trim();
+    expect(nodeVersion.startsWith("22.")).toBe(true);
+    const workspaces = runJson("scripts/workspace-packages.mjs", ["list", "--json"]) as WorkspaceRecord[];
+    for (const workspace of [{ path: "", name: "friday" }, ...workspaces]) {
+      const manifest = JSON.parse(await readFile(workspace.path ? `${workspace.path}/package.json` : "package.json", "utf8")) as { devDependencies?: Record<string, string> };
+      const nodeTypes = manifest.devDependencies?.["@types/node"];
+      if (nodeTypes !== undefined) expect(nodeTypes).toMatch(/^\^22\./u);
+    }
+  });
+
 });

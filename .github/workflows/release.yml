@@ -180,6 +180,11 @@ jobs:
           test -f "build/release/${{ matrix.asset }}.sha256"
           test "$(build/release/${{ matrix.asset }} --version)" = "$FRIDAY_BUILD_VERSION"
 
+      - name: Smoke packaged Linux runtime
+        if: startsWith(matrix.asset, 'friday-linux-')
+        shell: bash
+        run: scripts/smoke-release-binary.sh "build/release/${{ matrix.asset }}"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.asset }}
@@ -244,6 +249,14 @@ jobs:
           path: release
           merge-multiple: true
 
+      - name: Stage verified installer assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/install-release.sh release/install-release.sh
+          cp scripts/install-release.ps1 release/install-release.ps1
+          chmod 0755 release/install-release.sh
+
       - name: Verify complete release payload
         shell: bash
         run: |
@@ -261,7 +274,9 @@ jobs:
             (cd release && sha256sum -c "$asset.sha256")
           done
           test -s release/friday-sbom.spdx.json
-          (cd release && sha256sum "${expected[@]}" friday-sbom.spdx.json > SHA256SUMS)
+          test -s release/install-release.sh
+          test -s release/install-release.ps1
+          (cd release && sha256sum "${expected[@]}" friday-sbom.spdx.json install-release.sh install-release.ps1 > SHA256SUMS)
 
       - name: Attest release binaries and SBOM
         id: provenance
@@ -273,6 +288,9 @@ jobs:
             release/friday-darwin-x64
             release/friday-darwin-arm64
             release/friday-sbom.spdx.json
+            release/install-release.sh
+            release/install-release.ps1
+            release/SHA256SUMS
 
       - name: Include offline-verifiable provenance bundle
         shell: bash

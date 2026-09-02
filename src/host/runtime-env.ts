@@ -1,6 +1,6 @@
-import { lstat, readFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const RUNTIME_ENV_FILE = "runtime.env";
 const RUNTIME_ENV_KEYS = Object.freeze([
@@ -10,6 +10,7 @@ const RUNTIME_ENV_KEYS = Object.freeze([
   "FRIDAY_ROUTING_MODEL_ID",
   "FRIDAY_PERMISSION_MODE",
   "FRIDAY_TIMEZONE",
+  "FRIDAY_WORKSPACE",
   "FRIDAY_SELF_REPOSITORY",
 ] as const);
 
@@ -28,6 +29,46 @@ function nonEmpty(value: string | undefined, label: string, maximum = 256): stri
 export function getFridayHome(environment: NodeJS.ProcessEnv = process.env): string {
   const configured = environment.FRIDAY_HOME?.trim();
   return resolve(configured || join(homedir(), ".friday"));
+}
+
+
+function defaultWorkspaceForHome(home: string): string {
+  return join(dirname(resolve(home)), "FRIDAY-workspace");
+}
+
+function inside(parent: string, child: string): boolean {
+  const value = relative(resolve(parent), resolve(child));
+  return value === "" || (value !== ".." && !value.startsWith(`..${sep}`) && !isAbsolute(value));
+}
+
+export function getFridayWorkspace(environment: NodeJS.ProcessEnv = process.env): string {
+  const configured = environment.FRIDAY_WORKSPACE?.trim();
+  const workspace = resolve(configured || defaultWorkspaceForHome(getFridayHome(environment)));
+  if (workspace.length > 4_096 || /[\r\n\0]/.test(workspace)) throw new Error("FRIDAY_WORKSPACE is invalid");
+  return workspace;
+}
+
+export async function prepareRuntimeWorkspace(environment: NodeJS.ProcessEnv = process.env): Promise<string> {
+  const home = getFridayHome(environment);
+  const workspace = getFridayWorkspace(environment);
+  if (inside(home, workspace) || inside(workspace, home)) {
+    throw new Error(`FRIDAY workspace must not overlap FRIDAY_HOME: workspace=${workspace}; home=${home}`);
+  }
+  await mkdir(workspace, { recursive: true, mode: 0o700 });
+  const info = await lstat(workspace);
+  if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`FRIDAY workspace must be a real directory: ${workspace}`);
+  if (process.platform !== "win32" && (info.mode & 0o077) !== 0) await chmod(workspace, info.mode & ~0o077);
+  const canonicalWorkspace = await realpath(workspace);
+  let canonicalHome = resolve(home);
+  try { canonicalHome = await realpath(home); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (inside(canonicalHome, canonicalWorkspace) || inside(canonicalWorkspace, canonicalHome)) {
+    throw new Error(`FRIDAY workspace must not overlap FRIDAY_HOME after resolving filesystem links: workspace=${canonicalWorkspace}; home=${canonicalHome}`);
+  }
+  environment.FRIDAY_WORKSPACE = canonicalWorkspace;
+  process.chdir(canonicalWorkspace);
+  return canonicalWorkspace;
 }
 
 function runtimeEnvironmentPath(home: string): string {
@@ -97,6 +138,11 @@ function validateRuntimeEnvironment(parsed: Partial<Record<SupportedKey, string>
     } catch {
       throw new Error(`Invalid IANA timezone: ${JSON.stringify(timezone)}`);
     }
+  }
+
+  const workspace = parsed.FRIDAY_WORKSPACE?.trim();
+  if (workspace && (workspace.length > 4_096 || /[\r\n\0]/.test(workspace))) {
+    throw new Error("FRIDAY workspace path is invalid");
   }
 
   const selfRepository = parsed.FRIDAY_SELF_REPOSITORY?.trim();

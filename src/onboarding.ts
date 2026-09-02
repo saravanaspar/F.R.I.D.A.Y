@@ -6,7 +6,9 @@ import {
   upsertCustomModel,
 } from "../plugins/runtime-settings/custom-models.js";
 import {
+  ensureFridayWorkspace,
   getFridayHome,
+  getFridayWorkspace,
   loadRuntimeEnvironment,
   normalizeRuntimePermissionMode,
   normalizeRuntimeTimezone,
@@ -15,7 +17,7 @@ import {
   type RuntimePermissionMode,
   type RuntimeSettings,
 } from "../plugins/runtime-settings/runtime-env.js";
-import { modelCredentialVaultRef } from "../plugins/auth/model-credential-ref.js";
+import { modelCredentialVaultRef, modelProviderTypicallyNeedsApiKey } from "../plugins/auth/model-credential-ref.js";
 import { createTerminalOnboardingIO } from "./terminal-setup-ui.js";
 
 export interface OnboardingSandboxProbeResult {
@@ -178,13 +180,7 @@ function showWarning(io: OnboardingIO, message: string): void {
   if (io.warning) io.warning(message);
   else io.write(`${message}\n`);
 }
-const COMMON_API_KEY_PROVIDERS = new Set([
-  "openai", "anthropic", "google", "deepseek", "xai", "groq", "cerebras", "openrouter",
-  "mistral", "minimax", "minimax-cn", "moonshotai", "moonshotai-cn", "huggingface", "fireworks",
-  "opencode", "opencode-go", "kimi-coding", "zai", "azure-openai-responses", "vercel-ai-gateway",
-  "cloudflare-workers-ai", "cloudflare-ai-gateway", "xiaomi", "xiaomi-token-plan-cn",
-  "xiaomi-token-plan-ams", "xiaomi-token-plan-sgp",
-]);
+
 
 function strictApiKey(value: string): string {
   const token = value.trim();
@@ -213,17 +209,47 @@ async function maybeConfigureProviderCredential(
 
   const vault = await import("@friday/vault");
   const environment: NodeJS.ProcessEnv = { ...process.env, FRIDAY_HOME: home };
+  const workspaceRoot = getFridayWorkspace(environment);
   const store = new vault.VaultStore({
     stateDir: vault.getVaultStateDir(environment),
-    workspaceRoot: process.cwd(),
+    workspaceRoot,
   });
   const ref = modelCredentialVaultRef(provider);
   const exists = store.exists(ref);
   const ambientCredential = model.getEnvApiKey(provider);
   const credentialState = exists ? "stored securely in Vault" : ambientCredential ? "available from your environment" : "not configured";
   showInfo(io, `Credential · ${credentialState}`);
-  if (!exists && ambientCredential) return;
-  const defaultYes = provider.startsWith("custom:") || COMMON_API_KEY_PROVIDERS.has(provider);
+  if (!exists && ambientCredential) {
+    const persistAmbient = await confirm(
+      io,
+      `Save the ${provider} credential from your environment into FRIDAY Vault for unattended/service restarts?`,
+      true,
+    );
+    if (persistAmbient) {
+      const bytes = Buffer.from(ambientCredential, "utf8");
+      try {
+        const response = await task(io, `Verifying ${provider} environment credential`, () => model.completeSimple(
+          descriptor as never,
+          { messages: [{ role: "user", content: "Reply only with OK.", timestamp: Date.now() }] },
+          { apiKey: ambientCredential, maxTokens: 4, temperature: 0 },
+        ));
+        if (response.stopReason === "error" || response.stopReason === "aborted") {
+          throw new Error(response.errorMessage || `${provider} rejected the environment credential`);
+        }
+        store.create({ ref, kind: "model-api-key", secret: bytes });
+        showSuccess(io, `Credential verified and saved for ${provider}`);
+        return;
+      } catch (error) {
+        showWarning(io, `Environment credential was not saved · ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        bytes.fill(0);
+      }
+    } else {
+      showWarning(io, `${provider} remains environment-managed; unattended services must inject the same credential.`);
+      return;
+    }
+  }
+  const defaultYes = modelProviderTypicallyNeedsApiKey(provider);
   const approved = await confirm(
     io,
     exists ? `Replace the saved ${provider} API key?` : `Add an API key for ${provider}?`,
@@ -300,9 +326,10 @@ async function configureCustomSelection(
   };
 
   const vault = await import("@friday/vault");
+  const environment: NodeJS.ProcessEnv = { ...process.env, FRIDAY_HOME: home };
   const store = new vault.VaultStore({
-    stateDir: vault.getVaultStateDir({ ...process.env, FRIDAY_HOME: home }),
-    workspaceRoot: process.cwd(),
+    stateDir: vault.getVaultStateDir(environment),
+    workspaceRoot: getFridayWorkspace(environment),
   });
   const ref = modelCredentialVaultRef(candidate.provider);
   const exists = store.exists(ref);
@@ -589,6 +616,7 @@ function summary(io: OnboardingIO, settings: RuntimeSettings): void {
       `Routing     ${routing}`,
       `Permissions ${settings.permissionMode}`,
       `Timezone    ${settings.timezone}`,
+      `Workspace   ${settings.workspaceRoot ?? "default"}`,
       "Run `friday` to start.",
     ]);
     return;
@@ -600,6 +628,7 @@ function summary(io: OnboardingIO, settings: RuntimeSettings): void {
     `  Routing model: ${routing}`,
     `  Permissions:   ${settings.permissionMode}`,
     `  Timezone:      ${settings.timezone}`,
+    `  Workspace:     ${settings.workspaceRoot ?? "default"}`,
     "",
   ].join("\n"));
 }
@@ -611,8 +640,10 @@ export async function runOnboarding(options: OnboardingOptions = {}): Promise<On
     const processEnvironment = process.env;
     const home = options.home ?? getFridayHome(processEnvironment);
     const stored = await readRuntimeSettings(home);
-    const environment: NodeJS.ProcessEnv = { ...processEnvironment };
+    const environment: NodeJS.ProcessEnv = { ...processEnvironment, FRIDAY_HOME: home };
     await loadRuntimeEnvironment({ home, environment });
+    if (stored?.workspaceRoot) environment.FRIDAY_WORKSPACE = stored.workspaceRoot;
+    const workspaceRoot = await ensureFridayWorkspace(environment, home);
     const catalog = options.catalog ?? await defaultCatalog(home);
     if (io.isInteractive) banner(io, stored !== undefined);
 
@@ -657,6 +688,7 @@ export async function runOnboarding(options: OnboardingOptions = {}): Promise<On
       ...routing,
       permissionMode,
       timezone,
+      workspaceRoot,
       // Rerunning general setup must not silently forget the canonical source
       // checkout previously saved for self-improvement.
       ...(stored?.selfRepository ? { selfRepository: stored.selfRepository } : {}),
@@ -668,13 +700,13 @@ export async function runOnboarding(options: OnboardingOptions = {}): Promise<On
       // runtime.env behind and let the next setup invocation bypass the
       // first-run channel requirement.
       const { maybeManageChannels } = await import("./onboarding-channels.js");
-      await maybeManageChannels(io, home, options.configureChannels !== false, true);
+      await maybeManageChannels(io, home, options.configureChannels !== false, true, workspaceRoot);
     }
     const path = await saveRuntimeSettings(settings, home);
     showInfo(io, `Settings saved · ${path}`);
     if (!firstRun && options.configureChannels !== false && (io.isInteractive || options.configureChannels === true)) {
       const { maybeManageChannels } = await import("./onboarding-channels.js");
-      await maybeManageChannels(io, home, options.configureChannels, false);
+      await maybeManageChannels(io, home, options.configureChannels, false, workspaceRoot);
     }
     await maybeSetupSandbox(options, io);
     summary(io, settings);

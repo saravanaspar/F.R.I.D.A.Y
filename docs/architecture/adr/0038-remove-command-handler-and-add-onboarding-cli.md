@@ -55,8 +55,11 @@ Onboarding may persist only non-secret defaults under `FRIDAY_HOME/runtime.env`:
 
 - `FRIDAY_MODEL_PROVIDER`;
 - `FRIDAY_MODEL_ID`;
-- optional `FRIDAY_ROUTING_PROVIDER` + `FRIDAY_ROUTING_MODEL_ID`; and
-- `FRIDAY_PERMISSION_MODE`.
+- optional `FRIDAY_ROUTING_PROVIDER` + `FRIDAY_ROUTING_MODEL_ID`;
+- `FRIDAY_PERMISSION_MODE`;
+- `FRIDAY_TIMEZONE`;
+- `FRIDAY_WORKSPACE`, a dedicated writable workspace that must not overlap protected state; and
+- optional `FRIDAY_SELF_REPOSITORY`.
 
 The file is private and loaded before dynamic plugin import. Explicit process
 environment values take precedence. Rerunning onboarding edits the same typed

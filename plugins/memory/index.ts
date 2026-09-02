@@ -9,9 +9,10 @@ import { PERMISSIONS_CAPABILITY } from "../permissions/contract.js";
 import { ownerStateRoot, principalScope } from "../principal-scope.js";
 import { SYSTEM_ACTION_CONTRIBUTION, type SystemJsonObject } from "../system/contract.js";
 import { MEMORY_CAPABILITY, type MemoryService } from "./contract.js";
+import { homedir } from "node:os";
 
 function rootDir(): string {
-  return process.env.FRIDAY_STATE_DIR?.trim() || process.env.FRIDAY_HOME?.trim() || process.cwd();
+  return process.env.FRIDAY_STATE_DIR?.trim() || process.env.FRIDAY_HOME?.trim() || join(homedir(), ".friday");
 }
 
 function stringValue(value: unknown, label: string, required = true): string | undefined {

@@ -80,11 +80,20 @@ If other foreground turns or background jobs are active at restart time, F.R.I.D
 On Linux or macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/saravanaspar/F.R.I.D.A.Y/main/scripts/install-release.sh \
-  | sh -s -- saravanaspar/F.R.I.D.A.Y
+tmp="$(mktemp)"
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/saravanaspar/F.R.I.D.A.Y/releases/latest/download/install-release.sh \
+  -o "$tmp"
+gh attestation verify "$tmp" \
+  --repo saravanaspar/F.R.I.D.A.Y \
+  --cert-identity https://github.com/saravanaspar/F.R.I.D.A.Y/.github/workflows/release.yml@refs/heads/main \
+  --source-ref refs/heads/main \
+  --deny-self-hosted-runners
+sh "$tmp" saravanaspar/F.R.I.D.A.Y
+rm -f "$tmp"
 ```
 
-The installer supports **Linux and macOS** on x64/arm64, downloads the matching GitHub Release asset into a private unpredictable temporary directory, verifies its SHA-256 checksum **and GitHub build-provenance attestation**, and installs `friday` into `~/.local/bin` by default. A recent GitHub CLI (`gh`) with `gh attestation verify` support is required; the installer fails closed if provenance cannot be verified.
+The bootstrap installer is itself an attested **GitHub Release asset**; do not execute the mutable copy from `main`. The installer supports **Linux and macOS** on x64/arm64, verifies the matching binary's SHA-256 checksum **and GitHub build-provenance attestation**, preflights the candidate locally, and atomically installs `friday` into `~/.local/bin` by default. A recent GitHub CLI (`gh`) with `gh attestation verify` support is required and installation fails closed if provenance cannot be verified.
 
 Then run:
 
@@ -93,13 +102,16 @@ friday setup
 friday
 ```
 
+Setup creates a dedicated writable workspace at `~/FRIDAY-workspace` by default and persists it as `FRIDAY_WORKSPACE`. Protected state remains under `~/.friday`; do not use `$HOME`, `~/.friday`, or a parent of protected state as the model/tool workspace.
+
 On Windows, the supported path is **WSL2** rather than an unsafe native build. From PowerShell, download and run the WSL installer wrapper:
 
 ```powershell
 $installer = Join-Path $env:TEMP "friday-install.ps1"
-Invoke-WebRequest https://raw.githubusercontent.com/saravanaspar/F.R.I.D.A.Y/main/scripts/install-release.ps1 -OutFile $installer
+Invoke-WebRequest https://github.com/saravanaspar/F.R.I.D.A.Y/releases/latest/download/install-release.ps1 -OutFile $installer
+gh attestation verify $installer --repo saravanaspar/F.R.I.D.A.Y --cert-identity https://github.com/saravanaspar/F.R.I.D.A.Y/.github/workflows/release.yml@refs/heads/main --source-ref refs/heads/main --deny-self-hosted-runners
 & $installer
-Remove-Item $installer
+Remove-Item $installer -Force
 ```
 
 That installs the hardened Linux binary inside your default WSL2 distribution. Enter WSL2 and run `friday setup`, or invoke it from PowerShell with `wsl sh -lc '$HOME/.local/bin/friday setup'`.

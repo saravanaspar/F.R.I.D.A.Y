@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import "./version.js";
 import { activateConfiguredPlugins } from "./bootstrap.js";
-import { loadRuntimeEnvironment } from "./host/runtime-env.js";
+import { loadRuntimeEnvironment, prepareRuntimeWorkspace } from "./host/runtime-env.js";
 import { reportOperationalError } from "@friday/operational-errors";
 import { acquireRuntimeLease, isVerifiedLifecycleSuccessor } from "./runtime-coordination.js";
 import { pathToFileURL } from "node:url";
+import { resolve } from "node:path";
 import { installFatalCrashHandlers, recordFatalCrash } from "./crash-log.js";
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
@@ -54,12 +55,19 @@ export async function runRuntime(): Promise<void> {
   let releaseRuntimeLease: (() => Promise<void>) | undefined;
   let forceExit = false;
   try {
+    // Capture the source-mode config path before switching into the dedicated
+    // model/tool workspace. SEA builds fall back to the installed bundled registry.
+    const bootstrapConfigPath = resolve(process.env.FRIDAY_BOOTSTRAP_CONFIG?.trim() || resolve(process.cwd(), "friday.config.json"));
+    // Keep source-mode lifecycle successors anchored to the same declarative config
+    // even though their inherited CWD is the isolated model/tool workspace.
+    process.env.FRIDAY_BOOTSTRAP_CONFIG = bootstrapConfigPath;
     await loadRuntimeEnvironment();
+    await prepareRuntimeWorkspace(process.env);
     const verifiedLifecycleSuccessor = await isVerifiedLifecycleSuccessor(process.env);
     releaseRuntimeLease = await acquireRuntimeLease({
       allowConcurrent: verifiedLifecycleSuccessor,
     });
-    runtime = await activateConfiguredPlugins();
+    runtime = await activateConfiguredPlugins(bootstrapConfigPath);
     process.stdout.write("FRIDAY ready.\n");
     await waitForShutdown();
   } catch (error) {

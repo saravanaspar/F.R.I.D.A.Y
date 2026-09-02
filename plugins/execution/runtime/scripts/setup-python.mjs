@@ -1,12 +1,14 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, chmodSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const runtimeRoot = resolve(here, "..");
-const venv = join(runtimeRoot, ".venv");
+const fridayHome = resolve(process.env.FRIDAY_HOME?.trim() || join(homedir(), ".friday"));
+const runtimeRoot = join(fridayHome, "tooling", "execution-python");
+const venv = join(runtimeRoot, "venv");
 const python = process.platform === "win32" ? join(venv, "Scripts", "python.exe") : join(venv, "bin", "python");
+mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
+if (process.platform !== "win32") chmodSync(runtimeRoot, 0o700);
 const PYTHON_PACKAGES = ["ipykernel==6.30.1", "dill==0.4.0"];
 
 function probe(command, args = ["--version"]) {

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolveFridayActiveExecutable } from "@friday/lifecycle";
-import { chmod, lstat, mkdir, rename, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { getAsset, getAssetKeys, isSea } from "node:sea";
@@ -71,13 +71,30 @@ async function delegateToActiveExecutable(): Promise<boolean> {
   return true;
 }
 
+
+async function cleanupOldBundles(runtimeRoot: string, currentRoot: string): Promise<void> {
+  const candidates: Array<{ path: string; mtimeMs: number }> = [];
+  for (const entry of await readdir(runtimeRoot, { withFileTypes: true })) {
+    if (!entry.name.startsWith("bundle-") || !entry.isDirectory()) continue;
+    const path = join(runtimeRoot, entry.name);
+    if (resolve(path) === resolve(currentRoot)) continue;
+    const info = await stat(path);
+    candidates.push({ path, mtimeMs: info.mtimeMs });
+  }
+  candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
+  for (const stale of candidates.slice(2)) {
+    await rm(stale.path, { recursive: true, force: true });
+  }
+}
+
 async function extractAssets(): Promise<void> {
   if (!isSea()) return;
   const configured = process.env.FRIDAY_HOME?.trim();
   const home = configured ? resolve(configured) : join(homedir(), ".friday");
   const buildId = __FRIDAY_BINARY_BUILD_ID__.replace(/[^A-Za-z0-9._-]/g, "");
   if (!buildId) throw new Error("FRIDAY binary build id is invalid");
-  const root = join(home, ".runtime", `bundle-${buildId}`);
+  const runtimeRoot = join(home, ".runtime");
+  const root = join(runtimeRoot, `bundle-${buildId}`);
   await mkdir(root, { recursive: true, mode: 0o700 });
   await chmod(root, 0o700);
   await assertPrivateDirectory(root);
@@ -91,6 +108,7 @@ async function extractAssets(): Promise<void> {
     await rename(temp, target);
     await chmod(target, 0o600);
   }
+  await cleanupOldBundles(runtimeRoot, root);
   process.env.FRIDAY_BUNDLED_ROOT = root;
   process.env.FRIDAY_SINGLE_BINARY = "1";
 }

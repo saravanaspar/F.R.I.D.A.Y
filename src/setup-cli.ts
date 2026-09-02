@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { chmod, copyFile, mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { runOnboarding } from "./onboarding.js";
 import { runOnboardingCli } from "./cli.js";
@@ -12,13 +12,11 @@ function bundledRoot(): string | undefined {
   return value ? resolve(value) : undefined;
 }
 
-function executionRuntimeRoot(): string {
-  return bundledRoot()
-    ? join(bundledRoot()!, "plugins", "execution", "runtime")
-    : resolve("plugins", "execution", "runtime");
+function toolingRoot(component: string): string {
+  return join(getFridayHome(process.env), "tooling", component);
 }
 
-function whatsappRoot(): string {
+function whatsappAssetsRoot(): string {
   return bundledRoot()
     ? join(bundledRoot()!, "channels", "whatsapp")
     : resolve("plugins", "channels", "runtime", "bridge", "whatsapp");
@@ -55,9 +53,10 @@ function python311Available(command: string, prefix: readonly string[] = []): bo
 }
 
 async function setupExecutionPython(): Promise<void> {
-  const root = executionRuntimeRoot();
+  const root = toolingRoot("execution-python");
   await mkdir(root, { recursive: true, mode: 0o700 });
-  const venv = join(root, ".venv");
+  await chmod(root, 0o700);
+  const venv = join(root, "venv");
   const python = process.platform === "win32" ? join(venv, "Scripts", "python.exe") : join(venv, "bin", "python");
   const dependencies = ["ipykernel==6.30.1", "dill==0.4.0"] as const;
   process.stdout.write("[execution] provisioning the private Python 3.11 kernel environment\n");
@@ -96,9 +95,23 @@ async function setupSelfRepository(path: string): Promise<void> {
 }
 
 async function setupWhatsApp(): Promise<void> {
-  const root = whatsappRoot();
-  if (!existsSync(join(root, "package.json"))) throw new Error(`WhatsApp bridge assets are missing: ${root}`);
-  await run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund"], root);
+  const source = whatsappAssetsRoot();
+  if (!existsSync(join(source, "package.json")) || !existsSync(join(source, "package-lock.json")) || !existsSync(join(source, "bridge.mjs"))) {
+    throw new Error(`WhatsApp bridge assets are missing: ${source}`);
+  }
+  if (!commandAvailable("node") || !commandAvailable("npm")) {
+    throw new Error("WhatsApp bridge setup requires a host Node.js/npm installation");
+  }
+  const root = toolingRoot("whatsapp");
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  await chmod(root, 0o700);
+  await rm(join(root, "node_modules"), { recursive: true, force: true });
+  for (const file of ["bridge.mjs", "package.json", "package-lock.json"] as const) {
+    await copyFile(join(source, file), join(root, file));
+    await chmod(join(root, file), 0o600);
+  }
+  await run("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], root);
+  process.stdout.write(`[whatsapp] ready: ${root}\n`);
 }
 
 async function setupSandbox(): Promise<void> {

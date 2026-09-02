@@ -8,8 +8,8 @@ The non-plugin host is deliberately tiny:
 
 1. the optional setup CLI writes non-secret runtime defaults and performs explicit first-run setup;
 2. bounded offline maintenance commands back up/restore state and create/restore Vault recovery material while the runtime is stopped;
-3. the small runtime-environment helper loads only bounded non-secret defaults;
-4. the runtime entrypoint loads those defaults, starts configured plugin discovery, waits for process shutdown, and disposes the runtime;
+3. the small runtime-environment helper loads only bounded non-secret defaults and establishes the dedicated writable workspace outside protected state;
+4. the runtime entrypoint loads those defaults, enters that workspace before plugin activation, starts configured plugin discovery, waits for process shutdown, and disposes the runtime;
 5. the ephemeral bootstrap session imports plugins and exposes only generic symbol-keyed finalizer/disposer/deferred-discovery hooks; and
 6. the distribution entrypoint dispatches only these fixed host operations and can extract immutable bundled runtime assets.
 
@@ -23,7 +23,7 @@ composition microkernel.
 3. Locate/import those plugin entrypoints.
 4. Expose generic symbol-keyed bootstrap finalizer, disposer, and deferred-discovery hooks.
 5. Execute those generic hooks without interpreting subsystem semantics.
-6. Load non-secret setup defaults before plugin discovery.
+6. Load non-secret setup defaults and establish the persisted state-disjoint workspace before plugin discovery.
 7. Wait for host shutdown signals and dispose the composed runtime.
 8. Report startup/shutdown failures.
 9. Run fixed, non-extensible stopped-runtime backup/recovery operations and
@@ -32,7 +32,7 @@ composition microkernel.
 ## Host Bootstrap Must Not Understand
 
 Models, providers, agents, agent loops, tools, execution, interpreters,
-filesystems, lifecycle, dependency graphs, capability resolution, permissions,
+model-facing filesystem operations, lifecycle, dependency graphs, capability resolution, permissions,
 sandboxing, memory, sessions, context, evaluation, self-improvement,
 checkpointing, generations, rollback, scheduling, events, voice, networking,
 MCP, projects, skills, subagents, routing, conversational turns, or system
@@ -50,7 +50,9 @@ identity. `allowAll` transport admission never implies operator authority. Safe
 defaults use the main model for routing and `ask` permission mode. Rerunning setup
 may collect and persist bounded non-secret runtime defaults and perform explicitly
 approved host provisioning such as building the approved local sandbox image or
-preflighting optional Voice STT/TTS providers. Secrets remain Vault-owned.
+preflighting optional Voice STT/TTS providers. Setup also persists a dedicated
+`FRIDAY_WORKSPACE` outside `FRIDAY_HOME`; the runtime enters it before plugin
+activation. Secrets remain Vault-owned.
 
 Setup must not load the runtime plugin graph, expose a dynamic command
 registry, dispatch plugin operations, or become a second orchestration surface.

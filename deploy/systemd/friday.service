@@ -12,7 +12,7 @@ Type=exec
 # unit active while either predecessor or successor remains in this cgroup.
 ExitType=cgroup
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-WorkingDirectory=%h
+WorkingDirectory=-%h/FRIDAY-workspace
 ExecStart=/usr/bin/env friday
 Restart=on-failure
 RestartSec=5

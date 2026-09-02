@@ -12,7 +12,7 @@ import {
   type VoiceTtsProvider,
 } from "@friday/voice";
 import { modelCredentialVaultRef } from "../plugins/auth/model-credential-ref.js";
-import { getFridayHome } from "../plugins/runtime-settings/runtime-env.js";
+import { getFridayHome, getFridayWorkspace } from "../plugins/runtime-settings/runtime-env.js";
 import { voiceCredentialVaultRef } from "../plugins/voice/credential-ref.js";
 import { readVoiceSettings, saveVoiceSettings } from "../plugins/voice/settings.js";
 import type { OnboardingIO } from "./onboarding.js";
@@ -133,7 +133,7 @@ export async function runVoiceSetup(options: VoiceSetupOptions = {}): Promise<Vo
   const vaultModule = await import("@friday/vault");
   const store = new vaultModule.VaultStore({
     stateDir: vaultModule.getVaultStateDir({ ...process.env, FRIDAY_HOME: home }),
-    workspaceRoot: process.cwd(),
+    workspaceRoot: getFridayWorkspace({ ...process.env, FRIDAY_HOME: home }),
   });
   const neededProviders = new Set<VoiceCredentialProvider>();
   if (stt) neededProviders.add(stt.provider);

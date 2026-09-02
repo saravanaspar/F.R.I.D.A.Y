@@ -15,6 +15,7 @@ import {
   TeamsChannelTransport,
   TelegramChannelTransport,
   WhatsAppChannelTransport,
+  resolveWhatsAppNodeExecutable,
   channelPrincipalAllowed,
   sanitizeChannelText,
   splitChannelMessage,
@@ -856,6 +857,13 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
 }
 
 describe("WhatsApp transport", () => {
+
+  it("uses a real host Node executable for the WhatsApp sidecar in single-binary mode", () => {
+    expect(resolveWhatsAppNodeExecutable({ FRIDAY_SINGLE_BINARY: "1" } as NodeJS.ProcessEnv, "/opt/friday")).toBe("node");
+    expect(resolveWhatsAppNodeExecutable({ FRIDAY_SINGLE_BINARY: "1", FRIDAY_NODE_EXECUTABLE: "/usr/local/bin/node" } as NodeJS.ProcessEnv, "/opt/friday")).toBe("/usr/local/bin/node");
+    expect(resolveWhatsAppNodeExecutable({} as NodeJS.ProcessEnv, "/usr/bin/node")).toBe("/usr/bin/node");
+  });
+
   it("authenticates its loopback bridge, default-denies unknown senders, normalizes ingress, sends, and shuts down", async () => {
     const bridgeDir = mkdtempSync(join(tmpdir(), "friday-whatsapp-fake-"));
     tempDirs.push(bridgeDir);

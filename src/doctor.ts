@@ -1,16 +1,19 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, lstat, readFile, statfs } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { chmod, lstat, readFile, realpath, statfs } from "node:fs/promises";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { VaultStore, VAULT_MASTER_KEY_FILE_NAME, getVaultStateDir } from "@friday/vault";
 import { readSavedChannels } from "../plugins/channels/config.js";
-import { readRuntimeSettings, getFridayHome, type RuntimeSettings } from "../plugins/runtime-settings/runtime-env.js";
+import { readRuntimeSettings, getFridayHome, getFridayWorkspace, type RuntimeSettings } from "../plugins/runtime-settings/runtime-env.js";
 import { DEFAULT_SANDBOX_IMAGE, probePodman } from "../plugins/sandbox/podman.js";
 import { getStateBackupRoot, listStateBackups } from "./state-backup.js";
 import { runSetupCli } from "./setup-cli.js";
 import { FRIDAY_VERSION } from "./version.js";
+import { modelCredentialVaultRef, modelProviderTypicallyNeedsApiKey } from "../plugins/auth/model-credential-ref.js";
+import { readVoiceSettings } from "../plugins/voice/settings.js";
+import { voiceCredentialVaultRef } from "../plugins/voice/credential-ref.js";
 
 export type DoctorLevel = "ok" | "info" | "warn" | "error";
 export type DoctorSection = "Installation" | "Configuration" | "Security" | "Tooling" | "Recovery";
@@ -51,14 +54,51 @@ function command(commandName: string, args: readonly string[] = ["--version"]): 
   return { ok: result.error === undefined && result.status === 0, ...(firstLine ? { output: firstLine } : {}) };
 }
 
-function executionPythonPath(): string {
-  const bundled = process.env.FRIDAY_BUNDLED_ROOT?.trim();
-  const root = bundled
-    ? join(resolve(bundled), "plugins", "execution", "runtime")
-    : resolve("plugins", "execution", "runtime");
+function executionPythonPath(environment: NodeJS.ProcessEnv = process.env): string {
+  const root = join(getFridayHome(environment), "tooling", "execution-python", "venv");
   return process.platform === "win32"
-    ? join(root, ".venv", "Scripts", "python.exe")
-    : join(root, ".venv", "bin", "python");
+    ? join(root, "Scripts", "python.exe")
+    : join(root, "bin", "python");
+}
+
+function inside(parent: string, child: string): boolean {
+  const value = relative(resolve(parent), resolve(child));
+  return value === "" || (value !== ".." && !value.startsWith(`..${sep}`) && !isAbsolute(value));
+}
+
+async function workspaceCheck(environment: NodeJS.ProcessEnv, home: string, settings: RuntimeSettings | undefined): Promise<DoctorCheck> {
+  const workspace = resolve(settings?.workspaceRoot ?? getFridayWorkspace({ ...environment, FRIDAY_HOME: home }));
+  if (inside(home, workspace) || inside(workspace, home)) {
+    return check("workspace", "Security", "error", "Workspace", "overlaps FRIDAY state", {
+      detail: `${workspace} · state=${home}`,
+      fix: `Set FRIDAY_WORKSPACE to a dedicated directory outside ${JSON.stringify(home)}, then rerun: friday setup`,
+    });
+  }
+  try {
+    const info = await lstat(workspace);
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      return check("workspace", "Security", "error", "Workspace", "not a real directory", { detail: workspace, fix: "friday setup" });
+    }
+    const [canonicalWorkspace, canonicalHome] = await Promise.all([realpath(workspace), realpath(home)]);
+    if (inside(canonicalHome, canonicalWorkspace) || inside(canonicalWorkspace, canonicalHome)) {
+      return check("workspace", "Security", "error", "Workspace", "resolves into FRIDAY state", {
+        detail: `${canonicalWorkspace} · state=${canonicalHome}`,
+        fix: "Choose a dedicated workspace outside FRIDAY_HOME, then rerun: friday setup",
+      });
+    }
+    if (process.platform !== "win32" && (info.mode & 0o077) !== 0) {
+      return check("workspace", "Security", "error", "Workspace", "permissions are too broad", {
+        detail: `${canonicalWorkspace} · mode=${(info.mode & 0o777).toString(8)}`,
+        fix: `chmod 700 ${JSON.stringify(canonicalWorkspace)}`,
+      });
+    }
+    return check("workspace", "Security", "ok", "Workspace", "isolated from state", { detail: canonicalWorkspace });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return check("workspace", "Security", "error", "Workspace", "directory is missing", { detail: workspace, fix: "friday setup" });
+    }
+    return check("workspace", "Security", "error", "Workspace", "could not be inspected", { detail: String(error), fix: "friday setup" });
+  }
 }
 
 function sandboxNetworkCheck(environment: NodeJS.ProcessEnv): DoctorCheck {
@@ -188,10 +228,14 @@ async function channelChecks(home: string): Promise<readonly DoctorCheck[]> {
   }
 }
 
-async function vaultCheck(environment: NodeJS.ProcessEnv, home: string): Promise<DoctorCheck> {
+async function vaultCheck(environment: NodeJS.ProcessEnv, home: string, settings: RuntimeSettings | undefined): Promise<DoctorCheck> {
   const stateDir = getVaultStateDir({ ...environment, FRIDAY_HOME: home });
   try {
-    const workspaceRoot = resolve(home, "..", `.friday-doctor-workspace-${process.pid}`);
+    const workspaceRoot = getFridayWorkspace({
+      ...environment,
+      FRIDAY_HOME: home,
+      ...(settings?.workspaceRoot ? { FRIDAY_WORKSPACE: settings.workspaceRoot } : {}),
+    });
     const vault = new VaultStore({ stateDir, workspaceRoot });
     const records = vault.list();
     if (records.length === 0) {
@@ -215,6 +259,106 @@ async function vaultCheck(environment: NodeJS.ProcessEnv, home: string): Promise
       detail: error instanceof Error ? error.message : String(error),
       fix: "Do not delete Vault files; use `friday vault recovery ...` or restore from a known-good backup.",
     });
+  }
+}
+
+async function modelCredentialCheck(
+  environment: NodeJS.ProcessEnv,
+  home: string,
+  settings: RuntimeSettings | undefined,
+): Promise<DoctorCheck> {
+  if (!settings) return check("model-credential", "Configuration", "info", "Model credential", "not applicable yet");
+  try {
+    const vault = new VaultStore({
+      stateDir: getVaultStateDir({ ...environment, FRIDAY_HOME: home }),
+      workspaceRoot: getFridayWorkspace({ ...environment, FRIDAY_HOME: home, FRIDAY_WORKSPACE: settings.workspaceRoot }),
+    });
+    const ref = modelCredentialVaultRef(settings.modelProvider);
+    if (vault.exists(ref)) {
+      return check("model-credential", "Configuration", "ok", "Model credential", "stored in Vault", { detail: ref });
+    }
+    const model = await import("@friday/model");
+    const envKeys = model.findEnvKeys(settings.modelProvider);
+    if (envKeys?.length) {
+      return check("model-credential", "Configuration", "warn", "Model credential", "environment-managed only", {
+        detail: envKeys.join(", "),
+        fix: "Run `friday setup` and save the provider credential into Vault for unattended/systemd restarts.",
+      });
+    }
+    if (modelProviderTypicallyNeedsApiKey(settings.modelProvider)) {
+      return check("model-credential", "Configuration", "error", "Model credential", "missing", {
+        detail: ref,
+        fix: "friday setup",
+        repair: "setup",
+      });
+    }
+    return check("model-credential", "Configuration", "info", "Model credential", "no Vault API key", {
+      detail: "The selected provider may use OAuth, local, or platform-native authentication.",
+    });
+  } catch (error) {
+    return check("model-credential", "Configuration", "error", "Model credential", "could not be validated", {
+      detail: error instanceof Error ? error.message : String(error),
+      fix: "friday setup",
+    });
+  }
+}
+
+async function voiceCheck(environment: NodeJS.ProcessEnv, home: string, settings: RuntimeSettings | undefined): Promise<DoctorCheck> {
+  try {
+    const voice = await readVoiceSettings(home);
+    if (!voice?.stt && !voice?.tts) return check("voice", "Configuration", "info", "Voice", "not configured", { detail: "Optional capability." });
+    const vault = new VaultStore({
+      stateDir: getVaultStateDir({ ...environment, FRIDAY_HOME: home }),
+      workspaceRoot: getFridayWorkspace({ ...environment, FRIDAY_HOME: home, FRIDAY_WORKSPACE: settings?.workspaceRoot }),
+    });
+    const providers = [...new Set([voice.stt?.provider, voice.tts?.provider].filter((value): value is "openai" | "deepgram" | "elevenlabs" => Boolean(value)))];
+    const missing = providers.filter((provider) => {
+      const ref = provider === "openai" ? modelCredentialVaultRef("openai") : voiceCredentialVaultRef(provider);
+      return !vault.exists(ref);
+    });
+    if (missing.length > 0) {
+      return check("voice", "Configuration", "error", "Voice", "credential is missing", {
+        detail: missing.join(", "),
+        fix: "friday setup voice",
+      });
+    }
+    return check("voice", "Configuration", "ok", "Voice", "configured", {
+      detail: [voice.stt ? `STT=${voice.stt.provider}/${voice.stt.model}` : undefined, voice.tts ? `TTS=${voice.tts.provider}/${voice.tts.model}` : undefined].filter(Boolean).join(" · "),
+    });
+  } catch (error) {
+    return check("voice", "Configuration", "error", "Voice", "configuration is invalid", {
+      detail: error instanceof Error ? error.message : String(error),
+      fix: "friday setup voice",
+    });
+  }
+}
+
+async function whatsappToolingCheck(environment: NodeJS.ProcessEnv, home: string): Promise<DoctorCheck> {
+  try {
+    const saved = await readSavedChannels(home);
+    if (!saved.channels.whatsapp?.enabled) return check("whatsapp-tooling", "Tooling", "info", "WhatsApp bridge", "not enabled");
+    const root = join(home, "tooling", "whatsapp");
+    const manifestFiles = ["bridge.mjs", "package.json", "package-lock.json"] as const;
+    const required = [...manifestFiles.map((name) => join(root, name)), join(root, "node_modules", "@whiskeysockets", "baileys", "package.json")];
+    if (!required.every((path) => existsSync(path))) {
+      return check("whatsapp-tooling", "Tooling", "error", "WhatsApp bridge", "not provisioned", { detail: root, fix: "friday setup whatsapp" });
+    }
+    const bundled = environment.FRIDAY_BUNDLED_ROOT?.trim();
+    const source = bundled ? join(bundled, "channels", "whatsapp") : resolve("plugins", "channels", "runtime", "bridge", "whatsapp");
+    if (manifestFiles.every((name) => existsSync(join(source, name)))) {
+      const stale = await Promise.all(manifestFiles.map(async (name) => {
+        const [installed, current] = await Promise.all([readFile(join(root, name)), readFile(join(source, name))]);
+        return !installed.equals(current);
+      }));
+      if (stale.some(Boolean)) {
+        return check("whatsapp-tooling", "Tooling", "error", "WhatsApp bridge", "tooling is stale for this FRIDAY build", { detail: root, fix: "friday setup whatsapp" });
+      }
+    }
+    const node = command("node", ["--version"]);
+    if (!node.ok) return check("whatsapp-tooling", "Tooling", "error", "WhatsApp bridge", "host Node.js is unavailable", { fix: "Install Node.js, then run: friday setup whatsapp" });
+    return check("whatsapp-tooling", "Tooling", "ok", "WhatsApp bridge", "ready", { detail: `${root} · ${node.output ?? "node"}` });
+  } catch (error) {
+    return check("whatsapp-tooling", "Tooling", "error", "WhatsApp bridge", "could not be validated", { detail: String(error), fix: "friday setup whatsapp" });
   }
 }
 
@@ -383,8 +527,8 @@ function toolChecks(): readonly DoctorCheck[] {
   ]);
 }
 
-function executionPythonCheck(): DoctorCheck {
-  const python = executionPythonPath();
+function executionPythonCheck(environment: NodeJS.ProcessEnv): DoctorCheck {
+  const python = executionPythonPath(environment);
   if (!existsSync(python)) {
     return check("execution-python", "Tooling", "info", "Execution Python", "not provisioned", {
       detail: "Optional capability.",
@@ -392,7 +536,10 @@ function executionPythonCheck(): DoctorCheck {
       repair: "execution-python",
     });
   }
-  const health = command(python, ["-c", "import sys, ipykernel, zmq, dill; assert sys.version_info[:2] == (3, 11); print(sys.version.split()[0])"]);
+  const health = command(python, [
+    "-c",
+    "import importlib.metadata as m, sys, zmq; assert sys.version_info[:2] == (3, 11); assert m.version('ipykernel') == '6.30.1'; assert m.version('dill') == '0.4.0'; print(sys.version.split()[0])",
+  ]);
   if (!health.ok) {
     return check("execution-python", "Tooling", "warn", "Execution Python", "environment is incomplete or unhealthy", {
       detail: python,
@@ -437,14 +584,18 @@ export async function collectDoctorChecks(environment: NodeJS.ProcessEnv = proce
     }));
   }
 
+  checks.push(await workspaceCheck(environment, home, settings));
   checks.push(...await channelChecks(home));
+  checks.push(await modelCredentialCheck(environment, home, settings));
+  checks.push(await voiceCheck(environment, home, settings));
   checks.push(await sourceRepositoryCheck(settings?.selfRepository ?? environment.FRIDAY_SELF_REPOSITORY));
   checks.push(permissionCheck(settings));
-  checks.push(await vaultCheck(environment, home));
+  checks.push(await vaultCheck(environment, home, settings));
   checks.push(sandboxNetworkCheck(environment));
   checks.push(...toolChecks());
   checks.push(await nodeToolchainCheck(settings?.selfRepository ?? environment.FRIDAY_SELF_REPOSITORY));
-  checks.push(executionPythonCheck());
+  checks.push(executionPythonCheck(environment));
+  checks.push(await whatsappToolingCheck(environment, home));
   checks.push(sandboxCheck());
   checks.push(await backupCheck(environment));
   checks.push(await latestCrash(home));

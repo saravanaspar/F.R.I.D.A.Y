@@ -21,11 +21,10 @@
   "scripts": {
     "clean": "rm -rf dist",
     "build": "tsgo -p tsconfig.build.json",
-    "test": "vitest run --config vitest.config.ts",
-    "setup:whatsapp": "npm install --prefix bridge/whatsapp --ignore-scripts --no-audit --no-fund"
+    "test": "vitest run --config vitest.config.ts"
   },
   "devDependencies": {
-    "@types/node": "^24.3.0",
+    "@types/node": "^22.20.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   },
