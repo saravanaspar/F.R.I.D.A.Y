@@ -34,6 +34,9 @@ describe("workspace and binary packaging discovery", () => {
     expect(rootPackage.workspaces).toEqual(["packages/*", "plugins/*/runtime"]);
     expect(lock.packages?.[""]?.workspaces).toEqual(rootPackage.workspaces);
     expect(rootPackage.scripts?.["build:workspaces"]).toBe("node scripts/workspace-packages.mjs build");
+    expect(rootPackage.scripts?.["presetup:execution-python"]).toBe("npm run build:workspaces");
+    expect(rootPackage.scripts?.["presetup:whatsapp"]).toBe("npm run build:workspaces");
+    expect(rootPackage.scripts?.preonboard).toBe("npm run build:workspaces");
     expect(rootPackage.scripts?.["test:workspaces"]).toContain("node scripts/workspace-packages.mjs test");
     expect(rootPackage.scripts?.["clean:workspace-node-modules"]).toBe("node scripts/workspace-packages.mjs clean-node-modules");
     expect(rootPackage.scripts?.["check:workspace-node-modules"]).toBe("node scripts/workspace-packages.mjs check-node-modules");
