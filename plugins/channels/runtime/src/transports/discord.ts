@@ -23,8 +23,6 @@ import {
 export interface DiscordChannelConfig extends ChannelAccessPolicy {
   readonly accountId?: string | undefined;
   readonly credentialRef: string;
-  readonly gatewayUrl?: string | undefined;
-  readonly apiBaseUrl?: string | undefined;
   readonly requireMention?: boolean | undefined;
   readonly mentionPatterns?: readonly string[] | undefined;
 }
@@ -85,10 +83,34 @@ function asText(data: unknown): string | undefined {
   return undefined;
 }
 
+const DISCORD_GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
+const DISCORD_API_BASE_URL = "https://discord.com/api/v10";
+
+function normalizeDiscordGatewayUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "wss:" || url.username || url.password || url.port) return undefined;
+    const hostname = url.hostname.toLowerCase();
+    if (hostname !== "gateway.discord.gg" && !/^gateway-[a-z0-9-]+\.discord\.gg$/.test(hostname)) return undefined;
+    // Never pass a Gateway-provided URL to the network sink. Approved resume
+    // hosts select the fixed Discord endpoint while preserving session resume.
+    return DISCORD_GATEWAY_URL;
+  } catch {
+    return undefined;
+  }
+}
+
+function requireDiscordGatewayUrl(value: string): string {
+  const approved = normalizeDiscordGatewayUrl(value);
+  if (!approved) throw new Error("Discord Gateway URL is not an approved Discord Gateway URL");
+  return approved;
+}
+
 function defaultWebSocketFactory(url: string): WebSocketLike {
+  const approvedUrl = requireDiscordGatewayUrl(url);
   const Constructor = (globalThis as unknown as { WebSocket?: new (url: string) => WebSocketLike }).WebSocket;
   if (!Constructor) throw new Error("Discord requires WebSocket support in the Node runtime");
-  return new Constructor(url);
+  return new Constructor(approvedUrl);
 }
 
 function escapeRegExp(value: string): string {
@@ -257,7 +279,7 @@ export class DiscordChannelTransport implements ChannelTransport {
   }
 
   async #connect(signal: AbortSignal, onReady: () => void): Promise<void> {
-    const gateway = this.#resumeGateway ?? this.#config.gatewayUrl?.trim() ?? "wss://gateway.discord.gg/?v=10&encoding=json";
+    const gateway = normalizeDiscordGatewayUrl(this.#resumeGateway ?? "") ?? DISCORD_GATEWAY_URL;
     const socket = this.#websocketFactory(gateway);
     // A failed admission deliberately leaves #sequence at the last durable
     // dispatch. Rewind the heartbeat cursor too, otherwise a reconnect can
@@ -332,15 +354,7 @@ export class DiscordChannelTransport implements ChannelTransport {
         this.#botUserId = ready?.user?.id;
         if (ready?.session_id) this.#sessionId = ready.session_id;
         if (ready?.resume_gateway_url) {
-          try {
-            const candidate = new URL(ready.resume_gateway_url);
-            candidate.searchParams.set("v", "10");
-            candidate.searchParams.set("encoding", "json");
-            const value = candidate.toString();
-            this.#resumeGateway = this.#validResumeGateway(value) ? value : undefined;
-          } catch {
-            this.#resumeGateway = undefined;
-          }
+          this.#resumeGateway = normalizeDiscordGatewayUrl(ready.resume_gateway_url);
         }
         if (receivedSequence !== undefined) this.#sequence = receivedSequence;
         this.#persistSession(false);
@@ -412,11 +426,14 @@ export class DiscordChannelTransport implements ChannelTransport {
     try {
       const value = readPrivateJson<{ sessionId?: unknown; resumeGateway?: unknown; sequence?: unknown; botUserId?: unknown }>(this.#sessionPath, 16 * 1024);
       if (!value) return;
+      const resumeGateway = typeof value.resumeGateway === "string" && value.resumeGateway.length <= 2_048
+        ? normalizeDiscordGatewayUrl(value.resumeGateway)
+        : undefined;
       if (typeof value.sessionId === "string" && value.sessionId.length > 0 && value.sessionId.length <= 256
-        && typeof value.resumeGateway === "string" && value.resumeGateway.length <= 2_048 && this.#validResumeGateway(value.resumeGateway)
+        && resumeGateway !== undefined
         && typeof value.sequence === "number" && Number.isSafeInteger(value.sequence) && value.sequence >= 0
         && (value.botUserId === undefined || (typeof value.botUserId === "string" && value.botUserId.length > 0 && value.botUserId.length <= 128))) {
-        this.#sessionId = value.sessionId; this.#resumeGateway = value.resumeGateway; this.#sequence = value.sequence; this.#lastReceivedSequence = value.sequence;
+        this.#sessionId = value.sessionId; this.#resumeGateway = resumeGateway; this.#sequence = value.sequence; this.#lastReceivedSequence = value.sequence;
         if (typeof value.botUserId === "string") this.#botUserId = value.botUserId;
       }
     } catch (error) {
@@ -437,17 +454,6 @@ export class DiscordChannelTransport implements ChannelTransport {
 
   #clearSession(): void {
     try { removePrivateJson(this.#sessionPath); } catch (error) { reportOperationalError({ component: "channels.discord", operation: "clear persisted gateway session", error, severity: "warn" }); }
-  }
-
-  #validResumeGateway(value: string): boolean {
-    try {
-      const url = new URL(value);
-      if (url.protocol !== "wss:" || url.username || url.password) return false;
-      const configured = this.#config.gatewayUrl?.trim() ? new URL(this.#config.gatewayUrl.trim()) : undefined;
-      return configured
-        ? configured.protocol === "wss:" && !configured.username && !configured.password && url.origin === configured.origin
-        : !url.port && (url.hostname === "gateway.discord.gg" || /^gateway-[a-z0-9-]+\.discord\.gg$/.test(url.hostname));
-    } catch { return false; }
   }
 
   async #handleMessage(message: DiscordMessage): Promise<unknown> {
@@ -531,7 +537,7 @@ export class DiscordChannelTransport implements ChannelTransport {
 
   async #api<T>(path: string, input: { method: "GET" | "POST"; body?: unknown }): Promise<T> {
     return await withSecretText(this.#secrets, this.#config.credentialRef, async (token) => {
-      const response = await fetchWithTimeout(this.#fetch, `${this.#config.apiBaseUrl?.replace(/\/$/, "") || "https://discord.com/api/v10"}${path}`, {
+      const response = await fetchWithTimeout(this.#fetch, `${DISCORD_API_BASE_URL}${path}`, {
         method: input.method,
         headers: {
           authorization: `Bot ${token}`,

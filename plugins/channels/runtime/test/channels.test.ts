@@ -958,8 +958,9 @@ describe("native protected-action payloads", () => {
     expect(JSON.parse(String(telegramFetch.mock.calls[0]?.[1]?.body))).toMatchObject({ reply_markup: { inline_keyboard: [[{ callback_data: `friday:${action.requestId}:approve` }, { callback_data: `friday:${action.requestId}:deny` }]] } });
 
     const discordFetch = vi.fn(async () => new Response(JSON.stringify({ id: "d1" }), { status: 200, headers: { "content-type": "application/json" } }));
-    const discord = new DiscordChannelTransport({ credentialRef: "vault://discord/token", apiBaseUrl: "https://discord.test" }, secretConsumer({ "vault://discord/token": "discord-token" }), { fetch: discordFetch as typeof fetch, websocketFactory: () => { throw new Error("not used"); } });
+    const discord = new DiscordChannelTransport({ credentialRef: "vault://discord/token" }, secretConsumer({ "vault://discord/token": "discord-token" }), { fetch: discordFetch as typeof fetch, websocketFactory: () => { throw new Error("not used"); } });
     await discord.sendProtectedAction({ channel: "discord", accountId: "default", conversationId: "channel-1" }, "approval", action);
+    expect(String(discordFetch.mock.calls[0]?.[0])).toBe("https://discord.com/api/v10/channels/channel-1/messages");
     expect(JSON.parse(String(discordFetch.mock.calls[0]?.[1]?.body))).toMatchObject({ components: [{ components: [{ custom_id: `friday:${action.requestId}:approve` }, { custom_id: `friday:${action.requestId}:deny` }] }] });
 
     const slackFetch = vi.fn(async () => new Response(JSON.stringify({ ok: true, ts: "s1" }), { status: 200, headers: { "content-type": "application/json" } }));
@@ -1013,6 +1014,58 @@ describe("native protected-action payloads", () => {
 });
 
 describe("Discord transport", () => {
+  it("rejects non-Discord resume gateways before they can be used for reconnects", async () => {
+    let firstSocket: TestSocket | undefined;
+    const first = new DiscordChannelTransport({
+      accountId: "ssrf-guard",
+      credentialRef: "vault://discord/ssrf-guard",
+    }, secretConsumer({ "vault://discord/ssrf-guard": "discord-token" }), {
+      fetch: vi.fn() as never,
+      websocketFactory: () => {
+        firstSocket = new TestSocket();
+        queueMicrotask(() => firstSocket?.emit("message", { data: JSON.stringify({ op: 10, d: { heartbeat_interval: 5_000 } }) }));
+        const originalSend = firstSocket.send.bind(firstSocket);
+        firstSocket.send = (data: string) => {
+          originalSend(data);
+          if ((JSON.parse(data) as { op?: number }).op !== 2) return;
+          queueMicrotask(() => firstSocket?.emit("message", { data: JSON.stringify({
+            op: 0,
+            t: "READY",
+            s: 1,
+            d: { user: { id: "bot-1" }, session_id: "session-1", resume_gateway_url: "wss://127.0.0.1/internal" },
+          }) }));
+        };
+        return firstSocket as never;
+      },
+    });
+    await first.start(() => undefined);
+    await first.stop();
+
+    let reconnectUrl = "";
+    let secondSocket: TestSocket | undefined;
+    const second = new DiscordChannelTransport({
+      accountId: "ssrf-guard",
+      credentialRef: "vault://discord/ssrf-guard",
+    }, secretConsumer({ "vault://discord/ssrf-guard": "discord-token" }), {
+      fetch: vi.fn() as never,
+      websocketFactory: (url) => {
+        reconnectUrl = url;
+        secondSocket = new TestSocket();
+        queueMicrotask(() => secondSocket?.emit("message", { data: JSON.stringify({ op: 10, d: { heartbeat_interval: 5_000 } }) }));
+        const originalSend = secondSocket.send.bind(secondSocket);
+        secondSocket.send = (data: string) => {
+          originalSend(data);
+          if ((JSON.parse(data) as { op?: number }).op !== 2) return;
+          queueMicrotask(() => secondSocket?.emit("message", { data: JSON.stringify({ op: 0, t: "READY", s: 1, d: { user: { id: "bot-1" } } }) }));
+        };
+        return secondSocket as never;
+      },
+    });
+    await second.start(() => undefined);
+    expect(reconnectUrl).toBe("wss://gateway.discord.gg/?v=10&encoding=json");
+    await second.stop();
+  });
+
   it("uses a Vault token, accepts an allowed Gateway message, sends via REST, and shuts down", async () => {
     const sockets: TestSocket[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1139,7 +1192,7 @@ describe("Discord transport", () => {
       },
     });
     await second.start(() => undefined);
-    expect(resumeUrl).toBe("wss://gateway-us-east1-a.discord.gg/?v=10&encoding=json");
+    expect(resumeUrl).toBe("wss://gateway.discord.gg/?v=10&encoding=json");
     expect(resumeFrame).toMatchObject({ op: 6, d: { session_id: "session-1", seq: 3, token: "discord-token" } });
     await second.stop();
   });
