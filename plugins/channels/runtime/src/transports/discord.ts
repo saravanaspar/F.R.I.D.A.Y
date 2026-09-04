@@ -92,10 +92,9 @@ function normalizeDiscordGatewayUrl(value: string): string | undefined {
     if (url.protocol !== "wss:" || url.username || url.password || url.port) return undefined;
     const hostname = url.hostname.toLowerCase();
     if (hostname !== "gateway.discord.gg" && !/^gateway-[a-z0-9-]+\.discord\.gg$/.test(hostname)) return undefined;
-    url.hostname = hostname;
-    url.searchParams.set("v", "10");
-    url.searchParams.set("encoding", "json");
-    return url.toString();
+    // Never pass a Gateway-provided URL to the network sink. Approved resume
+    // hosts select the fixed Discord endpoint while preserving session resume.
+    return DISCORD_GATEWAY_URL;
   } catch {
     return undefined;
   }
