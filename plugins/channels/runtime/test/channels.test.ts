@@ -1192,7 +1192,7 @@ describe("Discord transport", () => {
       },
     });
     await second.start(() => undefined);
-    expect(resumeUrl).toBe("wss://gateway-us-east1-a.discord.gg/?v=10&encoding=json");
+    expect(resumeUrl).toBe("wss://gateway.discord.gg/?v=10&encoding=json");
     expect(resumeFrame).toMatchObject({ op: 6, d: { session_id: "session-1", seq: 3, token: "discord-token" } });
     await second.stop();
   });
