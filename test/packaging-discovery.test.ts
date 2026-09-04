@@ -38,6 +38,9 @@ describe("workspace and binary packaging discovery", () => {
     expect(rootPackage.scripts?.["presetup:whatsapp"]).toBe("npm run build:workspaces");
     expect(rootPackage.scripts?.preonboard).toBe("npm run build:workspaces");
     expect(rootPackage.scripts?.["test:workspaces"]).toContain("node scripts/workspace-packages.mjs test");
+    expect(rootPackage.scripts?.["version:set"]).toBe("node scripts/release-version.mjs --set");
+    expect(rootPackage.scripts?.["check:versions"]).toBe("node scripts/release-version.mjs --check-packages");
+    expect(rootPackage.scripts?.["check:packaging"]).toContain("npm run check:versions");
     expect(rootPackage.scripts?.["clean:workspace-node-modules"]).toBe("node scripts/workspace-packages.mjs clean-node-modules");
     expect(rootPackage.scripts?.["check:workspace-node-modules"]).toBe("node scripts/workspace-packages.mjs check-node-modules");
     expect(rootPackage.scripts?.["check:packaging"]).toContain("node scripts/workspace-packages.mjs check-node-modules");
@@ -125,6 +128,7 @@ describe("workspace and binary packaging discovery", () => {
     expect(readme).toContain("releases/latest/download/install-release.sh");
     expect(release).toContain("release/install-release.sh");
     expect(release).toContain("scripts/smoke-release-binary.sh");
+    expect(release).toContain('release-version.mjs "$REQUESTED_VERSION" --check-packages');
     expect(ci).toContain("linux-binary-smoke");
     expect(ci).toContain("scripts/smoke-release-binary.sh");
     expect(installer.indexOf('"$target_tmp" --version')).toBeGreaterThanOrEqual(0);

@@ -72,6 +72,7 @@ jobs:
           REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          node scripts/release-version.mjs "$REQUESTED_VERSION" --check-packages
           node scripts/release-version.mjs "$REQUESTED_VERSION" --github-output "$GITHUB_OUTPUT"
 
       - name: Reject existing or equivalent release tags
