@@ -387,7 +387,7 @@ The passphrase is read from a hidden terminal. For automation, use `FRIDAY_VAULT
 
 ## Releases
 
-Normal pushes and pull requests run verification but do not publish binaries. Releases are created only by manually dispatching the **Release** workflow from the current tip of protected `main`; the workflow validates the requested version, rejects an existing/equivalent tag, builds and verifies the release, then creates the tag and GitHub Release itself. Development work should use a focused short-lived branch, merge through a PR, and delete the branch after merge.
+Normal pushes and pull requests run verification but do not publish binaries. Releases are created only by manually dispatching the **Release** workflow from the current tip of protected `main`; the workflow validates the requested version, requires it to match every package manifest and lockfile, rejects an existing/equivalent tag, builds and verifies the release, then creates the tag and GitHub Release itself. Development work should use a focused short-lived branch, merge through a PR, and delete the branch after merge.
 
 F.R.I.D.A.Y intentionally uses a small custom numeric tag format rather than SemVer: each `MAJOR.MINOR.PATCH` component accepts **1-6 digits**. Major/minor are integer-normalized. The patch component is decimal-style for release identity: trailing zeroes do not create a new release, while leading zeroes preserve precision.
 
@@ -398,7 +398,14 @@ v2.3.04     != v2.3.4
 v2.3.00004  != v2.3.04
 ```
 
-The release workflow rejects a requested version if an equivalent canonical tag already exists. For the current release line, dispatch the workflow only after the intended commit is merged to and synced with `main`; the workflow creates the tag itself after all release gates pass:
+Release package versions use the root `package.json` as their source of truth. Before dispatching a release, synchronize the root package, every workspace/plugin package, embedded npm packages such as the WhatsApp bridge, their internal FRIDAY dependency specifiers, and all corresponding lockfiles. Because these values are npm package metadata, synchronized release versions must not contain leading zeroes. For example, use `2.3.4`, not `2.3.04`.
+
+```bash
+npm run version:set -- 1.0.1
+npm run check:versions
+```
+
+Commit the generated manifest and lockfile changes through a PR. The release workflow rejects a requested version if it differs from the synchronized source version or if an equivalent canonical tag already exists. Dispatch the workflow only after the version change and intended release code are merged to and synced with `main`; the workflow creates the tag itself after all release gates pass:
 
 ```bash
 git switch main
