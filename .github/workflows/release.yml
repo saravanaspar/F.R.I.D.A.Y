@@ -1,36 +1,38 @@
-name: Release
+name: Publish Release
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - package.json
   workflow_dispatch:
-    inputs:
-      version:
-        description: Release version (for example 0.1.0 or v0.1.0)
-        required: true
-        type: string
 
 permissions:
   contents: read
 
-# Serialize releases. A failed build creates no tag, so the same version can be
-# corrected and re-run after a fix lands on main.
+# A merged release-preparation PR changes package.json on main and starts this
+# workflow. Manual dispatch remains available for retrying an unpublished
+# version already present on main.
 concurrency:
-  group: release-manual-main
+  group: release-publish-main
   cancel-in-progress: false
 
 jobs:
   validate:
-    name: Validate manual release
+    name: Detect unpublished release
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
-      canonical: ${{ steps.version.outputs.canonical }}
-      sha: ${{ steps.source.outputs.sha }}
+      publish: ${{ steps.release.outputs.publish }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      canonical: ${{ steps.release.outputs.canonical }}
+      sha: ${{ steps.release.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -38,64 +40,55 @@ jobs:
         with:
           node-version-file: .node-version
 
-      - name: Require dispatch from latest main
-        id: source
+      - name: Detect synchronized version without an existing tag
+        id: release
         shell: bash
         run: |
           set -euo pipefail
 
           if [ "$GITHUB_REF" != "refs/heads/main" ]; then
-            echo "Releases may only be dispatched from the main branch." >&2
-            echo "Choose main in the Run workflow branch selector and try again." >&2
+            echo "Releases may only run from the main branch." >&2
             exit 1
           fi
 
-          git fetch --no-tags origin main
-          latest_main="$(git rev-parse origin/main)"
           checked_out="$(git rev-parse HEAD)"
-
-          if [ "$GITHUB_SHA" != "$latest_main" ] || [ "$checked_out" != "$latest_main" ]; then
-            echo "This release was not dispatched from the current tip of main." >&2
+          if [ "$checked_out" != "$GITHUB_SHA" ]; then
+            echo "Release checkout does not match the triggering main commit." >&2
             echo "event sha:   $GITHUB_SHA" >&2
             echo "checked out: $checked_out" >&2
-            echo "latest main: $latest_main" >&2
-            echo "Run the workflow again from the latest main." >&2
             exit 1
           fi
 
-          echo "sha=$latest_main" >> "$GITHUB_OUTPUT"
+          release_version="$(node -p "require('./package.json').version")"
+          if [[ "$release_version" == *-* ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Package version $release_version is a development version; no release is due." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
 
-      - name: Validate FRIDAY release version
-        id: version
-        shell: bash
-        env:
-          REQUESTED_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          node scripts/release-version.mjs "$REQUESTED_VERSION" --check-packages
-          node scripts/release-version.mjs "$REQUESTED_VERSION" --github-output "$GITHUB_OUTPUT"
-
-      - name: Reject existing or equivalent release tags
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-          CANONICAL_VERSION: ${{ steps.version.outputs.canonical }}
-        run: |
-          set -euo pipefail
+          node scripts/release-version.mjs "$release_version" --check-packages
+          canonical_version="$(node scripts/release-version.mjs "$release_version" --canonical)"
           git fetch --force --tags origin
 
           while IFS= read -r tag; do
             if canonical="$(node scripts/release-version.mjs "$tag" --canonical 2>/dev/null)"; then
-              if [ "$canonical" = "$CANONICAL_VERSION" ]; then
-                echo "Requested release $RELEASE_TAG is equivalent to existing tag $tag under FRIDAY version rules." >&2
-                exit 1
+              if [ "$canonical" = "$canonical_version" ]; then
+                echo "publish=false" >> "$GITHUB_OUTPUT"
+                echo "Release $release_version is already represented by tag $tag; nothing to publish." >> "$GITHUB_STEP_SUMMARY"
+                exit 0
               fi
             fi
           done < <(git tag --list 'v*.*.*')
 
+          node scripts/release-version.mjs "$release_version" --github-output "$GITHUB_OUTPUT"
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "Publishing F.R.I.D.A.Y $release_version from $GITHUB_SHA after all release gates pass." >> "$GITHUB_STEP_SUMMARY"
+
   verify:
     name: Verify release source
     needs: validate
+    if: needs.validate.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -117,6 +110,7 @@ jobs:
   sbom:
     name: Build release SBOM
     needs: [validate, verify]
+    if: needs.validate.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -145,6 +139,7 @@ jobs:
   build:
     name: Build ${{ matrix.asset }}
     needs: [validate, verify]
+    if: needs.validate.outputs.publish == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -198,6 +193,7 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs: [validate, verify, sbom, build]
+    if: needs.validate.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -215,17 +211,17 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Reconfirm this commit is still latest main
+      - name: Confirm the release source remains on main
         shell: bash
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
-          latest_main="$(git rev-parse origin/main)"
-          if [ "$latest_main" != "$RELEASE_SHA" ]; then
-            echo "main advanced while this release was building." >&2
-            echo "release sha: $RELEASE_SHA" >&2
-            echo "latest main: $latest_main" >&2
-            echo "No tag or release will be created. Re-run from the new main tip." >&2
+          if [ "$(git rev-parse HEAD)" != "$RELEASE_SHA" ]; then
+            echo "Release checkout changed during the build." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$RELEASE_SHA" origin/main; then
+            echo "Release source $RELEASE_SHA is no longer reachable from main." >&2
             exit 1
           fi
 

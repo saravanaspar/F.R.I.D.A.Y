@@ -112,9 +112,10 @@ describe("workspace and binary packaging discovery", () => {
     expect(binaryBuilder).not.toContain("plugins/rlm/runtime/python");
   });
   it("keeps deployment workspace isolation, installer provenance, and Linux SEA smoke checks release-enforced", async () => {
-    const [service, readme, release, ci, installer, runtime, memory, channelsManifest] = await Promise.all([
+    const [service, readme, prepareRelease, release, ci, installer, runtime, memory, channelsManifest] = await Promise.all([
       readFile("deploy/systemd/friday.service", "utf8"),
       readFile("README.md", "utf8"),
+      readFile(".github/workflows/prepare-release.yml", "utf8"),
       readFile(".github/workflows/release.yml", "utf8"),
       readFile(".github/workflows/ci.yml", "utf8"),
       readFile("scripts/install-release.sh", "utf8"),
@@ -126,9 +127,16 @@ describe("workspace and binary packaging discovery", () => {
     expect(service).not.toContain("WorkingDirectory=%h\n");
     expect(readme).not.toContain("raw.githubusercontent.com/saravanaspar/F.R.I.D.A.Y/main/scripts/install-release.sh");
     expect(readme).toContain("releases/latest/download/install-release.sh");
+    expect(prepareRelease).toContain("npm run version:set");
+    expect(prepareRelease).toContain("pull-requests: write");
+    expect(prepareRelease).toContain("gh pr create");
+    expect(prepareRelease).toContain("release/${{ steps.version.outputs.tag }}");
+    expect(release).toContain("push:");
+    expect(release).toContain("- package.json");
+    expect(release).toContain("needs.validate.outputs.publish == 'true'");
     expect(release).toContain("release/install-release.sh");
     expect(release).toContain("scripts/smoke-release-binary.sh");
-    expect(release).toContain('release-version.mjs "$REQUESTED_VERSION" --check-packages');
+    expect(release).toContain('release-version.mjs "$release_version" --check-packages');
     expect(ci).toContain("linux-binary-smoke");
     expect(ci).toContain("scripts/smoke-release-binary.sh");
     expect(installer.indexOf('"$target_tmp" --version')).toBeGreaterThanOrEqual(0);
