@@ -1,5 +1,4 @@
 import { chmod, mkdtemp, rm } from "node:fs/promises";
-import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,7 +6,7 @@ import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { collectContributions, definePlugin, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import { OBSERVABILITY_CAPABILITY, type ModelUsageSummary, type ObservabilityService } from "../plugins/observability/contract.js";
 import { PERMISSIONS_CAPABILITY, type PermissionRequest, type PermissionsService } from "../plugins/permissions/contract.js";
-import spendingPlugin from "../plugins/spending/index.js";
+import spendingPlugin, { spendingProjectKey } from "../plugins/spending/index.js";
 import { SPENDING_POLICY_CAPABILITY } from "../plugins/spending/contract.js";
 import { AGENT_MODEL_REQUEST_POLICY_CONTRIBUTION, type AgentModelRequestContext } from "../plugins/turn-loop/contract.js";
 import { PluginTestHost } from "./helpers/plugin-host.js";
@@ -45,7 +44,7 @@ describe("persistent spending policy", () => {
     const service = requireCapability(SPENDING_POLICY_CAPABILITY);
     service.setLimit("daily", 1);
     const cwd = process.cwd();
-    const projectKey = `friday-${createHash("sha256").update(cwd).digest("hex").slice(0, 10)}`;
+    const projectKey = spendingProjectKey(cwd);
     service.setLimit("project", 0.5, projectKey);
     const policy = collectContributions(AGENT_MODEL_REQUEST_POLICY_CONTRIBUTION)[0]!;
     const replies: string[] = [];

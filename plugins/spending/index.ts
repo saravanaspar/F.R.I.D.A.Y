@@ -15,7 +15,7 @@ function stateRoot(): string {
   return configured ? (isAbsolute(configured) ? configured : resolve(configured)) : join(homedir(), ".friday");
 }
 
-function projectKey(cwd: string): string {
+export function spendingProjectKey(cwd: string): string {
   const path = resolve(cwd);
   const label = basename(path).toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project";
   return `${label}-${createHash("sha256").update(path).digest("hex").slice(0, 10)}`;
@@ -34,10 +34,10 @@ function scopeValue(input: Readonly<SystemJsonObject>): "daily" | "project" {
 
 function requestedProjectKey(input: Readonly<SystemJsonObject>): string {
   const value = input.project;
-  if (value === undefined) return projectKey(process.cwd());
+  if (value === undefined) return spendingProjectKey(process.cwd());
   if (typeof value !== "string" || !value.trim()) throw new Error("project must be a non-empty path or project key");
   const normalized = value.trim();
-  return /^[a-z0-9][a-z0-9-]{1,100}$/i.test(normalized) ? normalized : projectKey(normalized);
+  return /^[a-z0-9][a-z0-9-]{1,100}$/i.test(normalized) ? normalized : spendingProjectKey(normalized);
 }
 
 const spendingPlugin: FridayPlugin = definePlugin({
@@ -67,7 +67,7 @@ const spendingPlugin: FridayPlugin = definePlugin({
       signal?.throwIfAborted();
       const limits = store.limits();
       const day = utcDay();
-      const key = projectKey(context.cwd);
+      const key = spendingProjectKey(context.cwd);
       store.registerSessionProject(context.rootSessionId, key);
       const daily = usage(day.since);
       const projectSpent = store.projectSessions(key).reduce((sum, rootSessionId) => sum + usage(day.since, rootSessionId).billableCost, 0);
