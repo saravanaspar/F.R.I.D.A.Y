@@ -1,0 +1,148 @@
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (for example 1.0.1 or v1.0.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-release-main
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Create release pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: Require dispatch from latest main
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "Release preparation may only be dispatched from main." >&2
+            echo "Choose main in the Run workflow branch selector and try again." >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin main
+          latest_main="$(git rev-parse origin/main)"
+          checked_out="$(git rev-parse HEAD)"
+          if [ "$GITHUB_SHA" != "$latest_main" ] || [ "$checked_out" != "$latest_main" ]; then
+            echo "Release preparation was not dispatched from the current tip of main." >&2
+            echo "event sha:   $GITHUB_SHA" >&2
+            echo "checked out: $checked_out" >&2
+            echo "latest main: $latest_main" >&2
+            exit 1
+          fi
+
+      - name: Validate requested version and tags
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          node scripts/release-version.mjs "$REQUESTED_VERSION" --github-output "$GITHUB_OUTPUT"
+          canonical_version="$(node scripts/release-version.mjs "$REQUESTED_VERSION" --canonical)"
+          git fetch --force --tags origin
+          while IFS= read -r tag; do
+            if canonical="$(node scripts/release-version.mjs "$tag" --canonical 2>/dev/null)"; then
+              if [ "$canonical" = "$canonical_version" ]; then
+                echo "Requested release $REQUESTED_VERSION is already represented by tag $tag." >&2
+                exit 1
+              fi
+            fi
+          done < <(git tag --list 'v*.*.*')
+
+      - name: Refuse an existing release branch or pull request
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BRANCH: release/${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          existing_pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$RELEASE_BRANCH" --json url --jq '.[0].url // empty')"
+          if [ -n "$existing_pr" ]; then
+            echo "A release pull request already exists: $existing_pr" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --heads origin "refs/heads/$RELEASE_BRANCH" >/dev/null 2>&1; then
+            echo "Release branch $RELEASE_BRANCH already exists without an open pull request." >&2
+            echo "Delete or recover that branch before retrying." >&2
+            exit 1
+          fi
+
+      - name: Synchronize release package versions
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          npm run version:set -- "$RELEASE_VERSION"
+          node scripts/release-version.mjs "$RELEASE_VERSION" --check-packages
+
+      - name: Commit and push release branch
+        env:
+          RELEASE_BRANCH: release/${{ steps.version.outputs.tag }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          git switch -c "$RELEASE_BRANCH"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- package.json package-lock.json 'packages/**/package.json' 'plugins/**/package.json' 'plugins/**/package-lock.json'
+
+          while IFS= read -r path; do
+            case "$path" in
+              package.json|package-lock.json|*/package.json|*/package-lock.json) ;;
+              *) echo "Unexpected release-preparation change: $path" >&2; exit 1 ;;
+            esac
+          done < <(git diff --cached --name-only)
+
+          if git diff --cached --quiet; then
+            echo "Version metadata already matches $RELEASE_TAG; no release PR is needed." >&2
+            exit 1
+          fi
+
+          git commit -m "build(release): prepare $RELEASE_TAG"
+          git push --set-upstream origin "$RELEASE_BRANCH"
+
+      - name: Open release pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BRANCH: release/${{ steps.version.outputs.tag }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          pr_url="$(gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --head "$RELEASE_BRANCH" \
+            --title "build(release): prepare $RELEASE_TAG" \
+            --body "This pull request was generated by the Prepare Release workflow.\n\nIt synchronizes every FRIDAY package manifest, internal dependency, and lockfile to $RELEASE_TAG. After required checks pass, merging this PR automatically starts the Publish Release workflow for the exact merged commit.\n\nIf GitHub displays an approval banner for workflow runs, approve those runs before merging.")"
+
+          echo "Created release pull request: $pr_url" >> "$GITHUB_STEP_SUMMARY"
+          echo "$pr_url"

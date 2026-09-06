@@ -397,7 +397,7 @@ The passphrase is read from a hidden terminal. For automation, use `FRIDAY_VAULT
 
 ## Releases
 
-Normal pushes and pull requests run verification but do not publish binaries. Releases are created only by manually dispatching the **Release** workflow from the current tip of protected `main`; the workflow validates the requested version, requires it to match every package manifest and lockfile, rejects an existing/equivalent tag, builds and verifies the release, then creates the tag and GitHub Release itself. Development work should use a focused short-lived branch, merge through a PR, and delete the branch after merge.
+Normal pushes and pull requests run verification but do not publish binaries. To release, manually dispatch **Prepare Release** from the current tip of protected `main` and enter the new version. It synchronizes every package manifest, internal dependency, and lockfile, then opens a `release/vVERSION` pull request. After its required checks pass, merge that PR; the resulting `package.json` change on `main` automatically starts **Publish Release**, which verifies and packages the exact merged commit before creating the tag and GitHub Release. A manual **Publish Release** dispatch remains available to retry a synchronized version when no equivalent tag exists.
 
 F.R.I.D.A.Y intentionally uses a small custom numeric tag format rather than SemVer: each `MAJOR.MINOR.PATCH` component accepts **1-6 digits**. Major/minor are integer-normalized. The patch component is decimal-style for release identity: trailing zeroes do not create a new release, while leading zeroes preserve precision.
 
@@ -408,22 +408,23 @@ v2.3.04     != v2.3.4
 v2.3.00004  != v2.3.04
 ```
 
-Release package versions use the root `package.json` as their source of truth. Before dispatching a release, synchronize the root package, every workspace/plugin package, embedded npm packages such as the WhatsApp bridge, their internal FRIDAY dependency specifiers, and all corresponding lockfiles. Because these values are npm package metadata, synchronized release versions must not contain leading zeroes. For example, use `2.3.4`, not `2.3.04`.
+Release package versions use the root `package.json` as their source of truth. **Prepare Release** performs the synchronization through the existing version tool. Because these values are npm package metadata, synchronized release versions must not contain leading zeroes. For example, use `2.3.4`, not `2.3.04`. The equivalent local commands remain available for maintainers and recovery:
 
 ```bash
 npm run version:set -- 1.0.1
 npm run check:versions
 ```
 
-Commit the generated manifest and lockfile changes through a PR. The release workflow rejects a requested version if it differs from the synchronized source version or if an equivalent canonical tag already exists. Dispatch the workflow only after the version change and intended release code are merged to and synced with `main`; the workflow creates the tag itself after all release gates pass:
+The preparation workflow rejects existing/equivalent tags and existing release branches. Its generated PR must pass the normal repository checks. Pull requests created with the repository `GITHUB_TOKEN` may display an **Approve workflows to run** banner; approve those checks, then merge the PR. The publishing workflow creates the tag only after all release gates pass:
 
 ```bash
 git switch main
 git pull --ff-only origin main
-# Releases are created manually from GitHub Actions.
-# Actions -> Release -> Run workflow
+# Actions -> Prepare Release -> Run workflow
 # Branch: main
-# Enter the desired release version, for example: 0.1.0
+# Enter the desired release version, for example: 1.0.1
+# Review the generated release/v1.0.1 PR and merge it after checks pass.
+# Publish Release then runs automatically.
 ```
 
 Release builds currently target Linux x64/arm64 and macOS x64/arm64 and use the pinned Node.js 22.22.2 SEA-compatible runtime. Every published binary embeds the exact release tag version, is accompanied by its SHA-256 checksum, and is published alongside `SHA256SUMS`, an SPDX SBOM, and an offline-verifiable `friday-build-provenance.json` Sigstore bundle. The installer verifies that provenance against this repository's `release.yml` workflow on `main` before replacing the installed binary. Windows release binaries are deliberately disabled until F.R.I.D.A.Y has native Windows ACL enforcement for private state and a Windows-specific security test matrix.

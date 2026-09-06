@@ -1,6 +1,6 @@
 {
   "name": "@friday/channels",
-  "version": "1.0.0-dev",
+  "version": "1.0.1",
   "description": "FRIDAY human communication channels with pre-model credential capture and sanitization",
   "type": "module",
   "main": "./dist/index.js",
@@ -16,7 +16,7 @@
     "bridge"
   ],
   "dependencies": {
-    "@friday/operational-errors": "1.0.0-dev"
+    "@friday/operational-errors": "1.0.1"
   },
   "scripts": {
     "clean": "rm -rf dist",

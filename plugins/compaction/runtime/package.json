@@ -1,6 +1,6 @@
 {
   "name": "@friday/compaction",
-  "version": "1.0.0-dev",
+  "version": "1.0.1",
   "description": "FRIDAY context compaction and branch summarization",
   "type": "module",
   "main": "./dist/index.js",

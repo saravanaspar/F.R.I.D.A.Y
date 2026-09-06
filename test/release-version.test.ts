@@ -102,9 +102,10 @@ describe("FRIDAY release version rules", () => {
   });
 
   it("keeps all repository package manifests, local dependencies, and lockfiles synchronized", async () => {
+    const rootPackage = JSON.parse(await readFile("package.json", "utf8")) as { version: string };
     const result = await execFileAsync(process.execPath, [script, "--check-packages"]);
     expect(result.stdout).toContain("Release package versions: PASS");
-    expect(result.stdout).toContain("version 1.0.0-dev");
+    expect(result.stdout).toContain(`version ${rootPackage.version}`);
   });
 
   it("sets one release version across workspaces, embedded packages, dependencies, and lockfiles", async () => {
