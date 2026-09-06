@@ -28,6 +28,7 @@ import routing from "../plugins/routing/index.js";
 import runtimeSettings from "../plugins/runtime-settings/index.js";
 import sandbox from "../plugins/sandbox/index.js";
 import scheduler from "../plugins/scheduler/index.js";
+import spending from "../plugins/spending/index.js";
 import selfImprovement from "../plugins/self-improvement/index.js";
 import sessionResources from "../plugins/session-resources/index.js";
 import sessionJobs from "../plugins/session-jobs/index.js";
@@ -72,6 +73,7 @@ export const BUILTIN_PLUGINS: ReadonlyMap<string, FridayPlugin> = new Map([
   ["./plugins/runtime-settings/index.ts", runtimeSettings],
   ["./plugins/sandbox/index.ts", sandbox],
   ["./plugins/scheduler/index.ts", scheduler],
+  ["./plugins/spending/index.ts", spending],
   ["./plugins/self-improvement/index.ts", selfImprovement],
   ["./plugins/session-resources/index.ts", sessionResources],
   ["./plugins/session-jobs/index.ts", sessionJobs],

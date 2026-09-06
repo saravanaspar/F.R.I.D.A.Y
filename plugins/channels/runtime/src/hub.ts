@@ -189,6 +189,13 @@ function approvalResponse(text: string, code: string): boolean | undefined {
   return undefined;
 }
 
+function promptResponse(text: string, code: string): string | undefined {
+  const command = protectedCommand(text);
+  const match = /^answer\s+([A-Z0-9]{6})(?:\s+([\s\S]*))?$/i.exec(command);
+  if (!match || match[1]!.toLowerCase() !== code.toLowerCase()) return undefined;
+  return match[2] ?? "";
+}
+
 /** Providers may prepend a verified bot mention; email clients may quote the
  * previous thread. Only the first bounded non-quoted command line is used. */
 function protectedCommand(text: string): string {
@@ -268,7 +275,9 @@ export class ChannelHub {
   #hasProtectedPrincipal(principal: ChannelPrincipal): boolean {
     this.#purgeStaleProtected();
     const key = principalKey(principal);
-    return this.#pendingCaptures.has(key) || this.#pendingApprovals.has(key) || this.#pendingPrompts.has(key)
+    return this.#pendingCaptures.has(key)
+      || [...this.#pendingApprovals.values()].some((entry) => principalKey(entry.public.principal) === key)
+      || [...this.#pendingPrompts.values()].some((entry) => principalKey(entry.public.principal) === key)
       || [...this.#staleProtected.values()].some((record) => (record.kind === "capture" || record.kind === "prompt") && principalKey(record.principal) === key);
   }
 
@@ -284,6 +293,7 @@ export class ChannelHub {
       const code = approvalCode();
       const collision = [...this.#staleProtected.values()].some((record) => principalKey(record.principal) === key && record.code === code)
         || [...this.#pendingApprovals.values()].some((entry) => principalKey(entry.public.principal) === key && entry.public.code === code)
+        || [...this.#pendingPrompts.values()].some((entry) => principalKey(entry.public.principal) === key && entry.public.code === code)
         || [...this.#pendingCancellations.values()].some((entry) => principalKey(entry.public.principal) === key && entry.public.code === code);
       if (!collision) return code;
     }
@@ -293,7 +303,7 @@ export class ChannelHub {
     const records = [...this.#staleProtected.values(),
       ...[...this.#pendingCaptures.values()].map((entry) => this.#protectedRecord("capture", entry.public.id, entry.public.principal, entry.public.expiresAt)),
       ...[...this.#pendingApprovals.values()].map((entry) => this.#protectedRecord("approval", entry.public.id, entry.public.principal, entry.public.expiresAt, entry.public.code)),
-      ...[...this.#pendingPrompts.values()].map((entry) => this.#protectedRecord("prompt", entry.public.id, entry.public.principal, entry.public.expiresAt)),
+      ...[...this.#pendingPrompts.values()].map((entry) => this.#protectedRecord("prompt", entry.public.id, entry.public.principal, entry.public.expiresAt, entry.public.code)),
       ...[...this.#pendingCancellations.values()].map((entry) => this.#protectedRecord("cancellation", entry.public.id, entry.public.principal, entry.public.expiresAt, entry.public.code)),
     ];
     if (records.length > 256) throw new Error("Protected interaction state capacity exhausted; resolve or expire an existing interaction first");
@@ -344,7 +354,11 @@ export class ChannelHub {
     const key = principalKey(raw.principal);
     const candidates = [...this.#staleProtected.values()].filter((record) => principalKey(record.principal) === key);
     const native = raw.protectedAction?.requestId;
-    const specific = candidates.find((record) => native === record.id || (record.code !== undefined && (record.kind === "approval" ? approvalResponse(raw.text, record.code) !== undefined : cancellationResponse(raw.text, record.code))));
+    const specific = candidates.find((record) => native === record.id || (record.code !== undefined && (
+      record.kind === "approval" ? approvalResponse(raw.text, record.code) !== undefined
+        : record.kind === "prompt" ? promptResponse(raw.text, record.code) !== undefined
+          : cancellationResponse(raw.text, record.code)
+    )));
     // A post-crash capture/prompt consumes one ordinary exact-principal reply,
     // but never consumes a callback intended for a different tombstone.
     const record = specific ?? (native === undefined ? candidates.find((candidate) => candidate.kind === "capture" || candidate.kind === "prompt") : undefined);
@@ -368,14 +382,14 @@ export class ChannelHub {
     if (cancellation.expiresAt > this.#now()) this.#staleProtected.set(cancellation.id, this.#protectedRecord("cancellation", cancellation.id, cancellation.principal, cancellation.expiresAt, cancellation.code));
   }
 
-  #retainGenericTombstone(kind: "capture" | "prompt", id: string, principal: ChannelPrincipal, expiresAt: number): void {
-    if (expiresAt > this.#now()) this.#staleProtected.set(id, this.#protectedRecord(kind, id, principal, expiresAt));
+  #retainGenericTombstone(kind: "capture" | "prompt", id: string, principal: ChannelPrincipal, expiresAt: number, code?: string): void {
+    if (expiresAt > this.#now()) this.#staleProtected.set(id, this.#protectedRecord(kind, id, principal, expiresAt, code));
   }
 
   #snapshotActiveAsStale(): void {
     for (const entry of this.#pendingCaptures.values()) this.#staleProtected.set(entry.public.id, this.#protectedRecord("capture", entry.public.id, entry.public.principal, entry.public.expiresAt));
     for (const entry of this.#pendingApprovals.values()) this.#retainApprovalTombstone(entry.public);
-    for (const entry of this.#pendingPrompts.values()) this.#staleProtected.set(entry.public.id, this.#protectedRecord("prompt", entry.public.id, entry.public.principal, entry.public.expiresAt));
+    for (const entry of this.#pendingPrompts.values()) this.#staleProtected.set(entry.public.id, this.#protectedRecord("prompt", entry.public.id, entry.public.principal, entry.public.expiresAt, entry.public.code));
     for (const entry of this.#pendingCancellations.values()) this.#retainCancellationTombstone(entry.public);
   }
 
@@ -650,9 +664,8 @@ export class ChannelHub {
 
   async requestApproval(request: ChannelApprovalRequest): Promise<boolean> {
     this.#purgeExpiredApprovals();
-    const key = principalKey(request.principal);
-    if (this.#hasProtectedPrincipal(request.principal)) {
-      throw new Error("Another protected interaction is already pending for this channel principal");
+    if (this.#pendingCaptures.has(principalKey(request.principal))) {
+      throw new Error("A credential capture is already pending for this channel principal");
     }
     const ttlMs = request.ttlMs ?? DEFAULT_APPROVAL_TTL_MS;
     if (!Number.isFinite(ttlMs) || ttlMs < 1_000 || ttlMs > MAX_APPROVAL_TTL_MS) {
@@ -668,6 +681,7 @@ export class ChannelHub {
       resource: bounded(sanitizeDisplayText(request.resource) ?? "", "approval resource", 512),
       reason: bounded(sanitizeDisplayText(request.reason) ?? "", "approval reason", 512),
       network: request.network === true,
+      ...(request.jobId === undefined ? {} : { jobId: bounded(sanitizeDisplayText(request.jobId) ?? "", "approval job id", 128) }),
       createdAt: now,
       expiresAt: now + ttlMs,
     });
@@ -679,9 +693,9 @@ export class ChannelHub {
       rejectPromise = reject;
     });
     const timer = setTimeout(() => {
-      const active = this.#pendingApprovals.get(key);
-      if (active?.public.id !== pending.id) return;
-      this.#pendingApprovals.delete(key);
+      const active = this.#pendingApprovals.get(pending.id);
+      if (!active) return;
+      this.#pendingApprovals.delete(pending.id);
       active.resolve(false);
       this.#safePersistProtectedState("expire approval");
       void this.send(targetFromPrincipal(pending.principal), `Approval ${pending.code} expired.`).catch((error: unknown) => {
@@ -689,14 +703,16 @@ export class ChannelHub {
       });
     }, ttlMs);
     timer.unref?.();
-    this.#pendingApprovals.set(key, { public: pending, resolve: resolvePromise, reject: rejectPromise, timer });
+    this.#pendingApprovals.set(pending.id, { public: pending, resolve: resolvePromise, reject: rejectPromise, timer });
     try { this.#persistProtectedState(); }
-    catch (error) { this.#pendingApprovals.delete(key); clearTimeout(timer); throw error; }
+    catch (error) { this.#pendingApprovals.delete(pending.id); clearTimeout(timer); throw error; }
 
     try {
       const target = targetFromPrincipal(request.principal);
       const notice = [
         `FRIDAY approval ${pending.code} required`,
+        `Request ID: ${pending.id}`,
+        ...(pending.jobId === undefined ? [] : [`Job ID: ${pending.jobId}`]),
         `Action: ${pending.actionId}`,
         `Effect: ${pending.effect}`,
         `Resource: ${pending.resource}`,
@@ -718,10 +734,10 @@ export class ChannelHub {
         await this.send(target, sanitizedNotice);
       }
     } catch (error) {
-      const active = this.#pendingApprovals.get(key);
-      if (active?.public.id === pending.id) {
+      const active = this.#pendingApprovals.get(pending.id);
+      if (active) {
         clearTimeout(active.timer);
-        this.#pendingApprovals.delete(key);
+        this.#pendingApprovals.delete(pending.id);
         this.#retainApprovalTombstone(pending);
         active.reject(error);
         this.#safePersistProtectedState("retain failed approval delivery");
@@ -755,9 +771,8 @@ export class ChannelHub {
 
   async requestPrompt(request: ChannelPromptRequest): Promise<string> {
     this.#purgeExpiredPrompts();
-    const key = principalKey(request.principal);
-    if (this.#hasProtectedPrincipal(request.principal)) {
-      throw new Error("Another protected interaction is already pending for this channel principal");
+    if (this.#pendingCaptures.has(principalKey(request.principal))) {
+      throw new Error("A credential capture is already pending for this channel principal");
     }
     const ttlMs = request.ttlMs ?? DEFAULT_PROMPT_TTL_MS;
     if (!Number.isFinite(ttlMs) || ttlMs < 1_000 || ttlMs > MAX_PROMPT_TTL_MS) {
@@ -767,11 +782,25 @@ export class ChannelHub {
     if (!Number.isSafeInteger(maxLength) || maxLength < 1 || maxLength > 32_000) {
       throw new Error("Channel prompt maxLength must be between 1 and 32000");
     }
+    if (request.options !== undefined && (request.options.length < 1 || request.options.length > 5)) {
+      throw new Error("Channel prompt options must contain between 1 and 5 choices");
+    }
+    const options = Object.freeze((request.options ?? []).map((option) => Object.freeze({
+      label: bounded(sanitizeDisplayText(option.label) ?? "", "prompt option label", 80),
+      value: bounded(sanitizeDisplayText(option.value) ?? "", "prompt option value", 512),
+      ...(option.description === undefined ? {} : { description: bounded(sanitizeDisplayText(option.description) ?? "", "prompt option description", 240) }),
+    })));
     const now = this.#now();
     const pending: PendingChannelPrompt = Object.freeze({
       id: randomUUID(),
+      code: this.#newProtectedCode(request.principal),
       principal: clonePrincipal(request.principal),
       message: bounded(sanitizeDisplayText(request.message) ?? "", "prompt message", 2_000),
+      title: bounded(sanitizeDisplayText(request.title ?? "FRIDAY question") ?? "", "prompt title", 160),
+      ...(request.notes === undefined ? {} : { notes: bounded(sanitizeDisplayText(request.notes) ?? "", "prompt notes", 1_000) }),
+      options,
+      allowCustom: request.allowCustom !== false,
+      ...(request.jobId === undefined ? {} : { jobId: bounded(sanitizeDisplayText(request.jobId) ?? "", "prompt job id", 128) }),
       createdAt: now,
       expiresAt: now + ttlMs,
     });
@@ -779,9 +808,9 @@ export class ChannelHub {
     let rejectPromise!: (error: unknown) => void;
     const result = new Promise<string>((resolve, reject) => { resolvePromise = resolve; rejectPromise = reject; });
     const timer = setTimeout(() => {
-      const active = this.#pendingPrompts.get(key);
-      if (active?.public.id !== pending.id) return;
-      this.#pendingPrompts.delete(key);
+      const active = this.#pendingPrompts.get(pending.id);
+      if (!active) return;
+      this.#pendingPrompts.delete(pending.id);
       active.reject(new Error("Channel prompt expired"));
       this.#safePersistProtectedState("expire protected prompt");
       void this.send(targetFromPrincipal(pending.principal), "That input request expired.").catch((error: unknown) => {
@@ -789,21 +818,41 @@ export class ChannelHub {
       });
     }, ttlMs);
     timer.unref?.();
-    this.#pendingPrompts.set(key, { public: pending, allowEmpty: request.allowEmpty === true, maxLength, resolve: resolvePromise, reject: rejectPromise, timer });
+    this.#pendingPrompts.set(pending.id, { public: pending, allowEmpty: request.allowEmpty === true, maxLength, resolve: resolvePromise, reject: rejectPromise, timer });
     try { this.#persistProtectedState(); }
-    catch (error) { this.#pendingPrompts.delete(key); clearTimeout(timer); throw error; }
+    catch (error) { this.#pendingPrompts.delete(pending.id); clearTimeout(timer); throw error; }
     try {
-      await this.send(targetFromPrincipal(request.principal), [
+      const target = targetFromPrincipal(request.principal);
+      const notice = [
+        pending.title,
+        `Request ID: ${pending.id}`,
+        ...(pending.jobId === undefined ? [] : [`Job ID: ${pending.jobId}`]),
+        "",
         pending.message,
+        ...(pending.notes === undefined ? [] : [`Notes: ${pending.notes}`]),
+        ...pending.options.map((option, index) => `${index + 1}. ${option.label}${option.description === undefined ? "" : ` — ${option.description}`}`),
         ...(request.placeholder ? [`Expected: ${sanitizeDisplayText(request.placeholder)?.slice(0, 512) ?? "value"}`] : []),
-        "Your next reply is captured directly and will not be sent to the AI router/model.",
-      ].join("\n"));
+        pending.allowCustom
+          ? `Reply: answer ${pending.code} <choice number or custom answer>`
+          : `Reply: answer ${pending.code} <choice number>`,
+        "This reply is captured directly and will not be sent to the AI router/model.",
+      ].join("\n");
+      const sanitizedNotice = sanitizeChannelText(notice).text;
+      const transport = this.#transports.get(targetKey(target));
+      if (pending.options.length > 0 && transport?.sendProtectedQuestion) {
+        await transport.sendProtectedQuestion(target, sanitizedNotice, {
+          requestId: pending.id,
+          choices: pending.options.map((option) => ({ label: option.label })),
+        });
+      } else {
+        await this.send(target, sanitizedNotice);
+      }
     } catch (error) {
-      const active = this.#pendingPrompts.get(key);
-      if (active?.public.id === pending.id) {
+      const active = this.#pendingPrompts.get(pending.id);
+      if (active) {
         clearTimeout(active.timer);
-        this.#pendingPrompts.delete(key);
-        this.#retainGenericTombstone("prompt", pending.id, pending.principal, pending.expiresAt);
+        this.#pendingPrompts.delete(pending.id);
+        this.#retainGenericTombstone("prompt", pending.id, pending.principal, pending.expiresAt, pending.code);
         active.reject(error);
         this.#safePersistProtectedState("retain failed protected-prompt delivery");
       }
@@ -818,7 +867,7 @@ export class ChannelHub {
       clearTimeout(prompt.timer);
       this.#pendingPrompts.delete(key);
       prompt.reject(new Error("Channel prompt cancelled"));
-      this.#retainGenericTombstone("prompt", prompt.public.id, prompt.public.principal, prompt.public.expiresAt);
+      this.#retainGenericTombstone("prompt", prompt.public.id, prompt.public.principal, prompt.public.expiresAt, prompt.public.code);
       this.#safePersistProtectedState("cancel protected prompt");
       return true;
     }
@@ -903,27 +952,50 @@ export class ChannelHub {
       });
       return marker(raw, { text: `[${cancellation.public.label} cancellation requested]`, classification: "cancellation-requested", cancellation: { requestId: cancellation.public.id, code: cancellation.public.code } });
     }
+    const principalApprovals = [...this.#pendingApprovals.values()].filter((entry) => principalKey(entry.public.principal) === key);
+    const approval = raw.protectedAction && "decision" in raw.protectedAction
+      ? principalApprovals.find((entry) => entry.public.id === raw.protectedAction?.requestId)
+      : principalApprovals.find((entry) => approvalResponse(raw.text, entry.public.code) !== undefined);
+    if (approval) return this.#resolveApproval(raw, approval);
+    const principalPrompts = [...this.#pendingPrompts.values()].filter((entry) => principalKey(entry.public.principal) === key);
+    const exactPrompt = raw.protectedAction && "selection" in raw.protectedAction
+      ? principalPrompts.find((entry) => entry.public.id === raw.protectedAction?.requestId)
+      : principalPrompts.find((entry) => promptResponse(raw.text, entry.public.code) !== undefined);
+    if (exactPrompt) return this.#resolvePrompt(raw, exactPrompt, false);
     const stale = this.#consumeStale(raw);
     if (stale) return stale;
-    const approval = raw.protectedAction
-      ? [...this.#pendingApprovals.values()].find((entry) => entry.public.id === raw.protectedAction?.requestId && principalKey(entry.public.principal) === key)
-      : this.#pendingApprovals.get(key);
-    if (approval) return this.#resolveApproval(raw, key, approval);
     if (raw.protectedAction) {
       // Provider callbacks are privileged control traffic. A stale, replayed,
       // malformed, or wrong-principal token must never fall through as a
       // normal empty user message.
-      return marker(raw, { text: "[protected action rejected]", classification: "approval-error", approval: { requestId: raw.protectedAction.requestId, code: "", approved: false } });
+      return "selection" in raw.protectedAction
+        ? marker(raw, { text: "[protected question action rejected]", classification: "prompt-error", prompt: { requestId: raw.protectedAction.requestId } })
+        : marker(raw, { text: "[protected action rejected]", classification: "approval-error", approval: { requestId: raw.protectedAction.requestId, code: "", approved: false } });
     }
     const protectedText = protectedCommand(raw.text);
     if (/^(?:approve|deny)\s+[A-Z0-9]{6}$/i.test(protectedText)) {
       return marker(raw, { text: "[approval rejected: no live request]", classification: "approval-error", approval: { requestId: "", code: "", approved: false } });
     }
+    if (principalApprovals.length > 0) {
+      const codes = principalApprovals.map((entry) => entry.public.code).join(", ");
+      void this.send(targetFromPrincipal(raw.principal), `Approval replies must name a request code. Waiting: ${codes}.`).catch((error: unknown) => {
+        this.#onError("deliver approval correction", error);
+      });
+      return marker(raw, { text: "[approval reply was not scoped to a request]", classification: "approval-error", approval: { requestId: "", code: "", approved: false } });
+    }
+    if (/^answer\s+[A-Z0-9]{6}(?:\s|$)/i.test(protectedText)) {
+      return marker(raw, { text: "[question answer rejected: no live request]", classification: "prompt-error", prompt: { requestId: "" } });
+    }
     if (/^cancel\s+[A-Z0-9]{6}$/i.test(protectedText)) {
       return marker(raw, { text: "[cancellation rejected: no live request]", classification: "approval-error", cancellation: { requestId: "", code: "" } });
     }
-    const prompt = this.#pendingPrompts.get(key);
-    if (prompt) return this.#resolvePrompt(raw, key, prompt);
+    if (principalPrompts.length > 1) {
+      void this.send(targetFromPrincipal(raw.principal), "Several questions are waiting. Reply with the exact `answer CODE ...` shown on the question you mean to answer.").catch((error: unknown) => {
+        this.#onError("deliver concurrent-question correction", error);
+      });
+      return marker(raw, { text: "[question answer needs a request code]", classification: "prompt-error", prompt: { requestId: "" } });
+    }
+    if (principalPrompts.length === 1) return this.#resolvePrompt(raw, principalPrompts[0]!, true);
     const capture = this.#pendingCaptures.get(key);
     const attachments = Object.freeze([...(raw.attachments ?? [])].map(cloneAttachment));
 
@@ -1024,7 +1096,7 @@ export class ChannelHub {
       + [...this.#failedIngress].filter((entry) => entry.startsWith(`${key}\u0000`)).length;
   }
 
-  async #resolveApproval(raw: RawChannelInboundMessage, key: string, approval: PendingApprovalInternal): Promise<ChannelInboundMessage> {
+  async #resolveApproval(raw: RawChannelInboundMessage, approval: PendingApprovalInternal): Promise<ChannelInboundMessage> {
     if ((raw.attachments?.length ?? 0) > 0) {
       return marker(raw, {
         text: `[approval ${approval.public.code} expects a text reply]`,
@@ -1032,7 +1104,7 @@ export class ChannelHub {
         approval: { requestId: approval.public.id, code: approval.public.code, approved: false },
       });
     }
-    const decision = raw.protectedAction?.requestId === approval.public.id
+    const decision = raw.protectedAction?.requestId === approval.public.id && "decision" in raw.protectedAction
       ? raw.protectedAction.decision === "approve"
       : approvalResponse(raw.text, approval.public.code);
     if (decision === undefined) {
@@ -1046,7 +1118,7 @@ export class ChannelHub {
       });
     }
     clearTimeout(approval.timer);
-    this.#pendingApprovals.delete(key);
+    this.#pendingApprovals.delete(approval.public.id);
     this.#retainApprovalTombstone(approval.public);
     this.#safePersistProtectedState("resolve approval");
     approval.resolve(decision);
@@ -1058,14 +1130,38 @@ export class ChannelHub {
   }
 
 
-  async #resolvePrompt(raw: RawChannelInboundMessage, key: string, prompt: PendingPromptInternal): Promise<ChannelInboundMessage> {
+  async #resolvePrompt(raw: RawChannelInboundMessage, prompt: PendingPromptInternal, allowBareReply: boolean): Promise<ChannelInboundMessage> {
     if ((raw.attachments?.length ?? 0) > 0) {
       void this.send(targetFromPrincipal(raw.principal), "That input expects text only. Please reply again with text.").catch((error: unknown) => {
         this.#onError("deliver protected-input attachment rejection", error);
       });
       return marker(raw, { text: "[protected prompt rejected an attachment]", classification: "prompt-error", prompt: { requestId: prompt.public.id } });
     }
-    const value = raw.text.trim();
+    const nativeSelection = raw.protectedAction && "selection" in raw.protectedAction && raw.protectedAction.requestId === prompt.public.id
+      ? raw.protectedAction.selection
+      : undefined;
+    const coded = promptResponse(raw.text, prompt.public.code);
+    const submitted = nativeSelection === undefined
+      ? coded ?? (allowBareReply ? raw.text.trim() : undefined)
+      : String(nativeSelection + 1);
+    if (submitted === undefined) {
+      return marker(raw, { text: "[question answer did not match this request]", classification: "prompt-error", prompt: { requestId: prompt.public.id } });
+    }
+    const selectedIndex = /^\d+$/.test(submitted) ? Number(submitted) - 1 : -1;
+    const selected = selectedIndex >= 0 ? prompt.public.options[selectedIndex] : undefined;
+    if (selectedIndex >= 0 && !selected) {
+      void this.send(targetFromPrincipal(raw.principal), `That choice is not available. Reply with a number from 1 to ${prompt.public.options.length}.`).catch((error: unknown) => {
+        this.#onError("deliver protected-input choice rejection", error);
+      });
+      return marker(raw, { text: "[protected prompt rejected an invalid choice]", classification: "prompt-error", prompt: { requestId: prompt.public.id } });
+    }
+    if (!selected && prompt.public.options.length > 0 && !prompt.public.allowCustom) {
+      void this.send(targetFromPrincipal(raw.principal), `A listed choice is required. Reply: answer ${prompt.public.code} <choice number>.`).catch((error: unknown) => {
+        this.#onError("deliver protected-input custom rejection", error);
+      });
+      return marker(raw, { text: "[protected prompt rejected a custom answer]", classification: "prompt-error", prompt: { requestId: prompt.public.id } });
+    }
+    const value = selected?.value ?? submitted.trim();
     if (!prompt.allowEmpty && value.length === 0) {
       void this.send(targetFromPrincipal(raw.principal), "That value cannot be empty. Please reply again.").catch((error: unknown) => {
         this.#onError("deliver protected-input empty-value rejection", error);
@@ -1079,10 +1175,10 @@ export class ChannelHub {
       return marker(raw, { text: "[protected prompt rejected an oversized value]", classification: "prompt-error", prompt: { requestId: prompt.public.id } });
     }
     clearTimeout(prompt.timer);
-    this.#pendingPrompts.delete(key);
+    this.#pendingPrompts.delete(prompt.public.id);
     try { this.#persistProtectedState(); }
     catch (error) {
-      this.#retainGenericTombstone("prompt", prompt.public.id, prompt.public.principal, prompt.public.expiresAt);
+      this.#retainGenericTombstone("prompt", prompt.public.id, prompt.public.principal, prompt.public.expiresAt, prompt.public.code);
       this.#onError("persist consumed protected prompt", error);
     }
     prompt.resolve(value);

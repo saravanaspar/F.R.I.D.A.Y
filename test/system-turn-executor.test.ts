@@ -7,6 +7,7 @@ import {
   createSystemActionInputValidator,
   createSystemActionsAction,
   createSystemModelPlanner,
+  createOperatorDashboardAction,
   createSystemStatusAction,
   createSystemTurnExecutor,
 } from "../plugins/system/executor.js";
@@ -155,6 +156,19 @@ describe("system turn executor", () => {
     expect(actions.execute({}, actionContext())).toEqual([
       { id: "system.status", label: "FRIDAY status", description: expect.any(String) },
     ]);
+  });
+
+  it("builds one timestamped operator dashboard from plugin-owned status sections", async () => {
+    const dashboard = createOperatorDashboardAction(() => [
+      { id: "session-jobs", label: "Jobs", snapshot: () => ({ activeJobs: [{ jobId: "job-1", status: "running" }] }) },
+      { id: "channels", label: "Channels", snapshot: () => ({ pendingInteractions: { approvals: [{ requestId: "approval-1", jobId: "job-1" }] } }) },
+    ]);
+    const result = await dashboard.execute({}, actionContext()) as { generatedAt: string; sections: Record<string, unknown> };
+    expect(Number.isNaN(Date.parse(result.generatedAt))).toBe(false);
+    expect(result.sections).toMatchObject({
+      "session-jobs": { snapshot: { activeJobs: [{ jobId: "job-1" }] } },
+      channels: { snapshot: { pendingInteractions: { approvals: [{ requestId: "approval-1", jobId: "job-1" }] } } },
+    });
   });
 
   it("honors explicit log counts as one logical raw response and only analyzes when explicitly requested", async () => {

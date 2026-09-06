@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AGENT_TOOL_CONTRIBUTION } from "../plugins/turn-loop/contract.js";
+import { SYSTEM_ACTION_CONTRIBUTION } from "../plugins/system/contract.js";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { collectContributions, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import memoryPlugin from "../plugins/memory/index.js";
@@ -145,5 +146,27 @@ describe("agent memory tools", () => {
       object: "credential",
       context: { access_token: "ghp_abcdefghijklmnopqrstuvwxyz123456" },
     })).rejects.toThrow(/secrets belong in Vault/);
+  });
+
+  it("reviews sources/conflicts and replaces an outdated relation by exact id", async () => {
+    const { tools } = await assemble();
+    const relation = tools.find((tool) => tool.name === "memory_remember_relation")!;
+    const old = await relation.execute({ subject: "user", predicate: "prefers_editor", object: "vim" });
+    await relation.execute({ subject: "user", predicate: "prefers_editor", object: "zed" });
+    const actions = collectContributions(SYSTEM_ACTION_CONTRIBUTION);
+    const review = actions.find((action) => action.id === "memory.review")!;
+    const correct = actions.find((action) => action.id === "memory.correct")!;
+    const context = {
+      turn: { id: "turn-memory", principal: { authority: "local" as const, channel: "local", accountId: "local", conversationId: "terminal", senderId: "operator" }, text: "review memory", timestamp: Date.now(), reply: async () => undefined },
+      deferAfterReply() {},
+    };
+    const before = await review.execute({ query: "prefers_editor" }, context) as { conflicts: unknown[] };
+    expect(before.conflicts).toHaveLength(1);
+    const oldId = (old.output as { id: string }).id;
+    const replaced = await correct.execute({ id: oldId, kind: "relation", object: "helix" }, context) as { memory: { source: string; object: string } };
+    expect(replaced.memory).toMatchObject({ source: "operator-correction", object: "helix" });
+    const after = await review.execute({ query: "prefers_editor" }, context) as { relations: Array<{ id: string; source: string }> };
+    expect(after.relations.some((entry) => entry.id === oldId)).toBe(false);
+    expect(after.relations.some((entry) => entry.source === "operator-correction")).toBe(true);
   });
 });

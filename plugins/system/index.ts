@@ -14,6 +14,7 @@ import {
   createSystemActionsAction,
   createSystemModelPlanner,
   createSystemModelPresenter,
+  createOperatorDashboardAction,
   createSystemStatusAction,
   createSystemTurnExecutor,
 } from "./executor.js";
@@ -26,8 +27,9 @@ const systemPlugin: FridayPlugin = definePlugin({
   const models = ctx.services.require(MODEL_CAPABILITY);
   const contributedActions = (): readonly SystemActionContribution[] => ctx.collect(SYSTEM_ACTION_CONTRIBUTION);
   const statusAction = createSystemStatusAction(() => ctx.collect(SYSTEM_STATUS_CONTRIBUTION));
-  const actionsAction = createSystemActionsAction(() => [statusAction, ...contributedActions()]);
-  const allActions = (): readonly SystemActionContribution[] => [statusAction, actionsAction, ...contributedActions()];
+  const dashboardAction = createOperatorDashboardAction(() => ctx.collect(SYSTEM_STATUS_CONTRIBUTION));
+  const actionsAction = createSystemActionsAction(() => [statusAction, dashboardAction, ...contributedActions()]);
+  const allActions = (): readonly SystemActionContribution[] => [statusAction, dashboardAction, actionsAction, ...contributedActions()];
 
   ctx.contribute(TURN_EXECUTOR_CONTRIBUTION, createSystemTurnExecutor({
     permissions: ctx.services.require(PERMISSIONS_CAPABILITY),
@@ -45,6 +47,7 @@ export {
   createSystemActionsAction,
   createSystemModelPlanner,
   createSystemModelPresenter,
+  createOperatorDashboardAction,
   createSystemStatusAction,
   createSystemTurnExecutor,
   type SystemPlannerRequest,

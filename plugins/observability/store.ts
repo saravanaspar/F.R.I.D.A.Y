@@ -404,8 +404,8 @@ export class ObservabilityDatabase {
     this.#assertOpen();
     const clauses: string[] = [];
     const parameters: Array<string | number> = [];
-    const equals: Array<[keyof Pick<ModelUsageQuery, "provider" | "model" | "sessionId" | "agentId" | "jobId">, string]> = [
-      ["provider", "provider"], ["model", "model"], ["sessionId", "session_id"], ["agentId", "agent_id"], ["jobId", "job_id"],
+    const equals: Array<[keyof Pick<ModelUsageQuery, "provider" | "model" | "sessionId" | "rootSessionId" | "agentId" | "jobId">, string]> = [
+      ["provider", "provider"], ["model", "model"], ["sessionId", "session_id"], ["rootSessionId", "root_session_id"], ["agentId", "agent_id"], ["jobId", "job_id"],
     ];
     for (const [key, column] of equals) {
       const value = query[key];

@@ -4,6 +4,7 @@ import type {
   ChannelPrincipal,
   ChannelSendResult,
   ChannelProtectedAction,
+  ChannelProtectedQuestion,
   ChannelTarget,
   ChannelTransport,
   ChannelTransportStatus,
@@ -189,6 +190,22 @@ export class SlackChannelTransport implements ChannelTransport {
     return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze(result.ts ? [result.ts] : []) });
   }
 
+  async sendProtectedQuestion(target: ChannelTarget, text: string, question: ChannelProtectedQuestion): Promise<ChannelSendResult> {
+    const result = await this.#webApi<{ ok?: boolean; ts?: string }>("chat.postMessage", {
+      channel: target.conversationId,
+      text,
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: text.slice(0, 2900) } }, { type: "actions", elements: question.choices.map((choice, index) => ({
+        type: "button",
+        text: { type: "plain_text", text: choice.label },
+        action_id: `fridayq:${question.requestId}:${index}`,
+        value: question.requestId,
+      })) }],
+      ...(target.threadId === undefined ? {} : { thread_ts: target.threadId }),
+    });
+    if (result.ok !== true) throw new Error("Slack chat.postMessage failed");
+    return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze(result.ts ? [result.ts] : []) });
+  }
+
   async #run(signal: AbortSignal, onFirstOpen: () => void): Promise<void> {
     let first = false;
     let backoff = 500;
@@ -291,13 +308,17 @@ export class SlackChannelTransport implements ChannelTransport {
     const userId = payload?.user?.id;
     const conversationId = payload?.channel?.id;
     const match = /^friday:([0-9a-f-]{36}):(approve|deny)$/.exec(action?.action_id ?? "");
-    if (!action || !match || !userId || !conversationId || !this.#handler) return;
+    const questionMatch = /^fridayq:([0-9a-f-]{36}):(\d)$/.exec(action?.action_id ?? "");
+    if (!action || (!match && !questionMatch) || !userId || !conversationId || !this.#handler) return;
     const threadId = payload?.message?.thread_ts;
     const isDm = conversationId.startsWith("D");
     const type = threadId ? "thread" as const : (isDm ? "dm" as const : "group" as const);
     const principal: ChannelPrincipal = { channel: this.channel, accountId: this.accountId, conversationId, senderId: userId, ...(threadId === undefined ? {} : { threadId }) };
     if (!channelPrincipalAllowed(principal, type, this.#config)) return;
-    await this.#handler({ id: `interactive-${match[1]}`, principal, chatType: type, text: "", timestamp: Date.now(), attachments: [], protectedAction: { requestId: match[1]!, decision: match[2] as "approve" | "deny" } });
+    const protectedAction = match
+      ? { requestId: match[1]!, decision: match[2] as "approve" | "deny" } as const
+      : { requestId: questionMatch![1]!, selection: Number(questionMatch![2]) } as const;
+    await this.#handler({ id: `interactive-${protectedAction.requestId}`, principal, chatType: type, text: "", timestamp: Date.now(), attachments: [], protectedAction });
   }
 
   async #webApi<T>(method: string, body: Record<string, unknown>): Promise<T> {

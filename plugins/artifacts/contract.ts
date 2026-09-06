@@ -29,6 +29,27 @@ export interface ArtifactRecord {
   readonly createdAt: string;
 }
 
+export interface ArtifactStorageSummary {
+  readonly artifacts: number;
+  readonly totalBytes: number;
+  readonly quotaBytes: number;
+  readonly availableBytes: number;
+  readonly utilization: number;
+}
+
+export interface ArtifactCleanupCandidate extends ArtifactRecord {
+  readonly protected: boolean;
+  readonly protectionReason?: string | undefined;
+}
+
+export interface ArtifactCleanupPreview {
+  readonly generatedAt: string;
+  readonly olderThanDays: number;
+  readonly reclaimableBytes: number;
+  readonly candidates: readonly ArtifactCleanupCandidate[];
+  readonly protectedCount: number;
+}
+
 export interface PackageStage {
   readonly sourceDir: string;
   readonly source: string;
@@ -53,6 +74,10 @@ export interface ArtifactService {
   ): Promise<ArtifactRecord>;
   inspect(ref: string): Promise<ArtifactRecord>;
   consume<T>(ref: string, consumer: (bytes: Uint8Array, record: ArtifactRecord) => T | Promise<T>): Promise<T>;
+  storage(): Promise<ArtifactStorageSummary>;
+  setQuota(quotaBytes: number): Promise<ArtifactStorageSummary>;
+  previewCleanup(options?: { readonly olderThanDays?: number | undefined }): Promise<ArtifactCleanupPreview>;
+  cleanup(refs: readonly string[]): Promise<{ readonly deleted: readonly string[]; readonly reclaimedBytes: number; readonly skippedProtected: readonly string[] }>;
   /** Safely materialize a user-supplied GitHub repository or ZIP source into a private temporary tree. */
   stagePackageSource(input: PackageSourceInput): Promise<PackageStage>;
 }

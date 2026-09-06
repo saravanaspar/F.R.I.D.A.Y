@@ -131,6 +131,22 @@ export interface AgentAfterTurnContribution {
   afterTurn(context: AgentAfterTurnContext, signal?: AbortSignal): void | Promise<void>;
 }
 
+export interface AgentModelRequestContext extends AgentToolExecutionContext {
+  readonly rootSessionId: string;
+  readonly agentId: string;
+  readonly agentName: string;
+  readonly parentAgentId?: string | undefined;
+  readonly provider: string;
+  readonly model: string;
+}
+
+/** Host policy evaluated immediately before every foreground or subagent model
+ * request. Throwing denies the request before provider billing begins. */
+export interface AgentModelRequestPolicyContribution {
+  readonly id: string;
+  beforeRequest(context: AgentModelRequestContext, signal?: AbortSignal): void | Promise<void>;
+}
+
 /**
  * Model-facing tool contribution. Plugins contribute tools through Turn Loop's
  * generic extension seam without depending on the Agent implementation package.
@@ -160,6 +176,9 @@ export const AGENT_PROMPT_SECTION_CONTRIBUTION: Contribution<AgentPromptSectionC
 
 export const AGENT_AFTER_TURN_CONTRIBUTION: Contribution<AgentAfterTurnContribution> =
   defineContribution<AgentAfterTurnContribution>("agent.after-turn");
+
+export const AGENT_MODEL_REQUEST_POLICY_CONTRIBUTION: Contribution<AgentModelRequestPolicyContribution> =
+  defineContribution<AgentModelRequestPolicyContribution>("agent.model-request-policy");
 
 export const TURN_FINALIZER_CONTRIBUTION: Contribution<TurnFinalizerContribution> =
   defineContribution<TurnFinalizerContribution>("turn.finalizer");

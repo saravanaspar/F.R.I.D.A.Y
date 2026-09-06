@@ -287,6 +287,10 @@ Channel messages are durably admitted before transports acknowledge them. If rep
 
 Persistent Agent work can be admitted as a durable Session Job. Jobs retain the originating request, status/progress, and session association so separate sessions can progress concurrently while a single session remains serialized.
 
+Completion and failure reports are persisted privately before delivery. Failed sends use the durable Events retry policy, and startup republishes pending deliveries without rerunning the completed work. Required continuations run only after successful delivery; restart recovery uses their saved finalizer descriptors. Job status reports distinguish pending delivery from pending finalization. A crash after a provider accepts a message but before the local acknowledgement is saved can still produce a duplicate message.
+
+Session Jobs upgrades its database to schema 2 on the first job write, preserving schema-1 records. Opening a suspended successor does not advance the schema. Older runtimes cannot read schema 2; retain a stopped-runtime backup before upgrading if you need to roll back to an older binary.
+
 ### Restart-aware continuation
 
 Before self-improvement, capability installation, or a settings change performs a restart, F.R.I.D.A.Y checks for other active foreground turns and background jobs.
@@ -362,6 +366,12 @@ show detailed model usage
 ```
 
 Usage can be attributed by session, root/parent agent, subagent, and detached job. Provider-reported billing data is kept distinct from catalog-derived estimates.
+
+The operator dashboard combines active jobs, pending approvals/questions, delivery failures, schedules, attachment storage, and today’s usage. Ask `show the operator dashboard` from an operator-authorized channel. Approval, question, completion, and failure messages include their durable job/request identifiers, so simultaneous interactions resolve independently.
+
+Persistent USD spending limits can be set or cleared for the whole UTC day or the current project. They are checked before every foreground and subagent model request. At 80% FRIDAY sends a one-time warning; after the limit is reached, each additional model request requires an explicit permission approval.
+
+Memory can be reviewed with its source and conflict groups, then corrected by the exact note/relation ID. Attachment storage exposes aggregate usage and a persistent quota (`FRIDAY_ARTIFACT_QUOTA_BYTES` supplies the initial default). Cleanup is preview-first and rechecks persisted/prepared session references before deleting selected artifacts.
 
 ## Backup and recovery
 

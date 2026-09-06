@@ -60,6 +60,15 @@ export function createSchedulerPlugin(options: SchedulerPluginOptions = {}): Fri
           taskCount: tasks.length,
           enabledTaskCount: tasks.filter((task) => task.enabled).length,
           failedOccurrences,
+          schedules: tasks.slice(0, 100).map((task) => ({
+            taskId: task.id,
+            name: task.name,
+            type: task.taskType,
+            enabled: task.enabled,
+            nextRunAt: task.nextRunAt,
+            consecutiveFailedOccurrences: task.consecutiveFailedOccurrences,
+            ...(task.lastRun === undefined ? {} : { lastRunStatus: task.lastRun.status }),
+          })),
         };
       },
     });

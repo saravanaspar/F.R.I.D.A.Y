@@ -6,6 +6,7 @@ import type {
   ChannelPrincipal,
   ChannelSendResult,
   ChannelProtectedAction,
+  ChannelProtectedQuestion,
   ChannelTarget,
   ChannelTransport,
   ChannelTransportStatus,
@@ -198,6 +199,21 @@ export class TelegramChannelTransport implements ChannelTransport {
     return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze([String(result.message_id)]) });
   }
 
+  async sendProtectedQuestion(target: ChannelTarget, text: string, question: ChannelProtectedQuestion): Promise<ChannelSendResult> {
+    const result = await this.#request<{ message_id: number }>("sendMessage", {
+      chat_id: target.conversationId,
+      text,
+      ...(target.threadId === undefined ? {} : { message_thread_id: Number(target.threadId) || target.threadId }),
+      reply_markup: {
+        inline_keyboard: question.choices.map((choice, index) => [{
+          text: choice.label,
+          callback_data: `fridayq:${question.requestId}:${index}`,
+        }]),
+      },
+    });
+    return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze([String(result.message_id)]) });
+  }
+
   async #poll(signal: AbortSignal): Promise<void> {
     let backoff = 500;
     while (!signal.aborted) {
@@ -274,7 +290,8 @@ export class TelegramChannelTransport implements ChannelTransport {
     const message = callback.message;
     const data = callback.data ?? "";
     const match = /^friday:([0-9a-f-]{36}):(approve|deny)$/.exec(data);
-    if (!message || !match || !message.chat || !callback.from?.id) {
+    const questionMatch = /^fridayq:([0-9a-f-]{36}):(\d)$/.exec(data);
+    if (!message || (!match && !questionMatch) || !message.chat || !callback.from?.id) {
       await this.#request("answerCallbackQuery", { callback_query_id: callback.id, text: "This action is no longer valid." }).catch((error: unknown) => { reportOperationalError({ component: "channels.telegram", operation: "acknowledge invalid callback", error, severity: "warn" }); });
       return;
     }
@@ -285,9 +302,13 @@ export class TelegramChannelTransport implements ChannelTransport {
       await this.#request("answerCallbackQuery", { callback_query_id: callback.id, text: "Not authorized." }).catch((error: unknown) => { reportOperationalError({ component: "channels.telegram", operation: "acknowledge unauthorized callback", error, severity: "warn" }); });
       return;
     }
-    const result = await this.#handler?.({ id: `callback-${callback.id}`, principal, chatType: type, text: "", timestamp: Date.now(), attachments: [], protectedAction: { requestId: match[1]!, decision: match[2] as "approve" | "deny" } });
-    const accepted = result?.classification === "approval-resolved";
-    await this.#request("answerCallbackQuery", { callback_query_id: callback.id, text: accepted ? (match[2] === "approve" ? "Approved" : "Denied") : "This action is no longer valid." }).catch((error: unknown) => { reportOperationalError({ component: "channels.telegram", operation: "acknowledge protected callback", error, severity: "warn" }); });
+    const protectedAction = match
+      ? { requestId: match[1]!, decision: match[2] as "approve" | "deny" } as const
+      : { requestId: questionMatch![1]!, selection: Number(questionMatch![2]) } as const;
+    const result = await this.#handler?.({ id: `callback-${callback.id}`, principal, chatType: type, text: "", timestamp: Date.now(), attachments: [], protectedAction });
+    const accepted = result?.classification === (match ? "approval-resolved" : "prompt-resolved");
+    const acknowledgement = !accepted ? "This action is no longer valid." : match ? (match[2] === "approve" ? "Approved" : "Denied") : "Answer recorded";
+    await this.#request("answerCallbackQuery", { callback_query_id: callback.id, text: acknowledgement }).catch((error: unknown) => { reportOperationalError({ component: "channels.telegram", operation: "acknowledge protected callback", error, severity: "warn" }); });
   }
 
   #isMentioned(text: string): boolean {

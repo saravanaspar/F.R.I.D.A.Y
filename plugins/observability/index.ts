@@ -63,6 +63,7 @@ function usageQuery(input: Readonly<SystemJsonObject>, includeLimit = false): Mo
   const provider = optionalString(input, "provider");
   const model = optionalString(input, "model");
   const sessionId = optionalString(input, "sessionId");
+  const rootSessionId = optionalString(input, "rootSessionId");
   const agentId = optionalString(input, "agentId");
   const jobId = optionalString(input, "jobId");
   return {
@@ -71,6 +72,7 @@ function usageQuery(input: Readonly<SystemJsonObject>, includeLimit = false): Mo
     ...(provider === undefined ? {} : { provider }),
     ...(model === undefined ? {} : { model }),
     ...(sessionId === undefined ? {} : { sessionId }),
+    ...(rootSessionId === undefined ? {} : { rootSessionId }),
     ...(agentId === undefined ? {} : { agentId }),
     ...(jobId === undefined ? {} : { jobId }),
     ...(includeLimit ? { limit: optionalLimit(input, 100) } : {}),
@@ -83,6 +85,7 @@ const USAGE_QUERY_PROPERTIES = Object.freeze({
   provider: { type: "string" },
   model: { type: "string" },
   sessionId: { type: "string" },
+  rootSessionId: { type: "string" },
   agentId: { type: "string" },
   jobId: { type: "string" },
 });
@@ -152,7 +155,14 @@ const observabilityPlugin: FridayPlugin = definePlugin({
   ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
     id: "observability",
     label: "Observability",
-    snapshot: () => observability.status(),
+    snapshot: () => {
+      const today = new Date();
+      today.setUTCHours(0, 0, 0, 0);
+      return {
+        ...observability.status(),
+        ...(observability.usageSummary === undefined ? {} : { todayUsage: observability.usageSummary({ since: today.toISOString() }).totals }),
+      };
+    },
   });
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
     id: "observability.logs",

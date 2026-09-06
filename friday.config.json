@@ -28,6 +28,7 @@
     "./plugins/runtime-settings/index.ts",
     "./plugins/sandbox/index.ts",
     "./plugins/scheduler/index.ts",
+    "./plugins/spending/index.ts",
     "./plugins/self-improvement/index.ts",
     "./plugins/session-resources/index.ts",
     "./plugins/session-jobs/index.ts",

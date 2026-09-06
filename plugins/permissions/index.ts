@@ -73,6 +73,7 @@ export function createPermissionsPlugin(options: PermissionsPluginOptions = {}):
         resource: request.action.resource,
         reason: request.reason,
         network: request.action.network,
+        ...(request.jobId === undefined ? {} : { jobId: request.jobId }),
       });
     });
     const controller = createPermissionsController({

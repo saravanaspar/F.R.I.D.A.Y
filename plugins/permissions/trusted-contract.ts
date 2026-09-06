@@ -33,6 +33,7 @@ export interface PermissionsTrustedService {
   runAsLocal<T>(operation: () => T): T;
   runAsSystem<T>(service: string, operation: () => T): T;
   runAsChannel<T>(selector: ChannelPrincipalSelector, operation: () => T): T;
+  runAsJob?<T>(jobId: string, operation: () => T): T;
 }
 
 export const PERMISSIONS_TRUSTED_CAPABILITY: Capability<PermissionsTrustedService> =

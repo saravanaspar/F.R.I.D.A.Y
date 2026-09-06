@@ -44,6 +44,8 @@ export interface PermissionRequest {
   readonly action: PermissionAction;
   /** Human-readable context only. Policy must never classify authority from this field. */
   readonly reason: string;
+  /** Durable Session Jobs attribution for the approval/audit record. */
+  readonly jobId?: string | undefined;
 }
 
 export interface PermissionApprovalRequest extends PermissionRequest {
