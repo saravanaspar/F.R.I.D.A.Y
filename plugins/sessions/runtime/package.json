@@ -1,6 +1,6 @@
 {
   "name": "@friday/sessions",
-  "version": "1.0.0-dev",
+  "version": "1.0.1",
   "description": "FRIDAY durable session history, branching, listing, and lifecycle metadata",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,7 +20,7 @@
     "test": "vitest run --config vitest.config.ts --configLoader runner --no-cache"
   },
   "dependencies": {
-    "@friday/operational-errors": "1.0.0-dev",
+    "@friday/operational-errors": "1.0.1",
     "uuid": "^14.0.0"
   },
   "devDependencies": {

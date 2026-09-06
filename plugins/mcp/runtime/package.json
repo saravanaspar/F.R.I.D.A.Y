@@ -1,6 +1,6 @@
 {
   "name": "@friday/mcp",
-  "version": "1.0.0-dev",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -19,7 +19,7 @@
     "build": "tsgo -p tsconfig.build.json"
   },
   "dependencies": {
-    "@friday/operational-errors": "1.0.0-dev"
+    "@friday/operational-errors": "1.0.1"
   },
   "engines": {
     "node": ">=20.0.0"

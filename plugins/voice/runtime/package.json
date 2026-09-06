@@ -1,6 +1,6 @@
 {
   "name": "@friday/voice",
-  "version": "1.0.0-dev",
+  "version": "1.0.1",
   "description": "FRIDAY speech-to-text and text-to-speech provider runtime",
   "type": "module",
   "main": "./dist/index.js",

@@ -1,6 +1,6 @@
 {
   "name": "@friday/rlm",
-  "version": "1.0.0-dev",
+  "version": "1.0.1",
   "description": "FRIDAY model-facing recursive delegation bridge",
   "type": "module",
   "main": "./dist/index.js",

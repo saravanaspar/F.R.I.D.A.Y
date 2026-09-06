@@ -1,6 +1,6 @@
 {
   "name": "friday",
-  "version": "1.0.0-dev",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "engines": {
@@ -42,7 +42,7 @@
     "check:workspace-node-modules": "node scripts/workspace-packages.mjs check-node-modules"
   },
   "dependencies": {
-    "@friday/operational-errors": "1.0.0-dev"
+    "@friday/operational-errors": "1.0.1"
   },
   "devDependencies": {
     "@opentelemetry/api": "^1.9.1",

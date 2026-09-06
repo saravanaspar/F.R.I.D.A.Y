@@ -1,6 +1,6 @@
 {
   "name": "@friday/vault",
-  "version": "1.0.0-dev",
+  "version": "1.0.1",
   "description": "FRIDAY encrypted local secret vault with metadata-only and trusted consumption boundaries",
   "type": "module",
   "main": "./dist/index.js",
