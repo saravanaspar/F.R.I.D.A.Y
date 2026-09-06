@@ -5,6 +5,7 @@ import type {
   ChannelPrincipal,
   ChannelSendResult,
   ChannelProtectedAction,
+  ChannelProtectedQuestion,
   ChannelTarget,
   ChannelTransport,
   ChannelTransportStatus,
@@ -181,6 +182,20 @@ export class TeamsChannelTransport implements ChannelTransport {
     return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze(payload.id ? [payload.id] : []) });
   }
 
+  async sendProtectedQuestion(target: ChannelTarget, text: string, question: ChannelProtectedQuestion): Promise<ChannelSendResult> {
+    this.#pruneServiceUrls();
+    const route = this.#serviceUrls.get(target.conversationId);
+    if (!route || route.updatedAt < Date.now() - 7 * 24 * 60 * 60 * 1000) { this.#serviceUrls.delete(target.conversationId); throw new Error("Teams conversation has no trusted serviceUrl yet; receive a message in that conversation first"); }
+    const token = await this.#accessToken();
+    const response = await fetchWithTimeout(this.#fetch, `${route.url.replace(/\/$/, "")}/v3/conversations/${encodeURIComponent(target.conversationId)}/activities`, {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ type: "message", text, attachments: [{ contentType: "application/vnd.microsoft.card.adaptive", content: { type: "AdaptiveCard", version: "1.4", body: [{ type: "TextBlock", text: text.slice(0, 3000), wrap: true }], actions: question.choices.map((choice, index) => ({ type: "Action.Submit", title: choice.label, data: { action: `fridayq:${question.requestId}:${index}`, requestId: question.requestId } })) } }] }),
+    });
+    if (!response.ok) throw new Error(`Teams send failed with status ${response.status}`);
+    const payload = await response.json() as { id?: string };
+    return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze(payload.id ? [payload.id] : []) });
+  }
+
   async #handleActivity(activity: BotFrameworkActivity): Promise<void> {
     if (!this.#handler || (activity.type !== "message" && activity.type !== "invoke") || !activity.id || !activity.conversation?.id || !activity.from?.id) return;
     if (activity.recipient?.id && activity.from.id === activity.recipient.id) return;
@@ -193,10 +208,11 @@ export class TeamsChannelTransport implements ChannelTransport {
     const type = activity.conversation.conversationType === "personal" ? "dm" as const : "group" as const;
     if (!channelPrincipalAllowed(principal, type, this.#config)) return;
     const protectedMatch = /^friday:([0-9a-f-]{36}):(approve|deny)$/.exec(activity.value?.action ?? "");
+    const questionMatch = /^fridayq:([0-9a-f-]{36}):(\d)$/.exec(activity.value?.action ?? "");
     const hasUnsupportedAttachment = (activity.attachments?.length ?? 0) > 0;
     const text = [activity.text?.trim(), hasUnsupportedAttachment ? "[attachment received; Teams media retrieval is not enabled]" : ""].filter(Boolean).join("\n");
-    if (activity.type === "invoke" && !protectedMatch) return;
-    if (activity.type === "message" && !text && !protectedMatch) return;
+    if (activity.type === "invoke" && !protectedMatch && !questionMatch) return;
+    if (activity.type === "message" && !text && !protectedMatch && !questionMatch) return;
     this.#serviceUrls.set(conversationId, { url: serviceUrl, updatedAt: Date.now() });
     this.#pruneServiceUrls();
     this.#writeServiceUrl(conversationId, serviceUrl);
@@ -204,13 +220,17 @@ export class TeamsChannelTransport implements ChannelTransport {
       id: activity.id,
       principal,
       chatType: type,
-      text: protectedMatch ? "" : text,
+      text: protectedMatch || questionMatch ? "" : text,
       timestamp: activity.timestamp ? Date.parse(activity.timestamp) || Date.now() : Date.now(),
       ...(activity.from.name === undefined ? {} : { senderName: activity.from.name }),
       ...(activity.conversation.name === undefined ? {} : { conversationName: activity.conversation.name }),
       ...(activity.replyToId === undefined ? {} : { replyToMessageId: activity.replyToId }),
       attachments: [],
-      ...(protectedMatch ? { protectedAction: { requestId: protectedMatch[1]!, decision: protectedMatch[2] as "approve" | "deny" } } : {}),
+      ...(protectedMatch
+        ? { protectedAction: { requestId: protectedMatch[1]!, decision: protectedMatch[2] as "approve" | "deny" } as const }
+        : questionMatch
+          ? { protectedAction: { requestId: questionMatch[1]!, selection: Number(questionMatch[2]) } as const }
+          : {}),
     });
   }
 

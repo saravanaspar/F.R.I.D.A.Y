@@ -375,6 +375,8 @@ export class ObservabilityRuntime implements ObservabilityService {
         actualCostRecords: values.filter((value) => value.actualCost !== undefined).length,
         estimatedCost: values.reduce((sum, value) => sum + (value.estimatedCost ?? 0), 0),
         estimatedCostRecords: values.filter((value) => value.estimatedCost !== undefined).length,
+        billableCost: values.reduce((sum, value) => sum + (value.actualCost ?? value.estimatedCost ?? 0), 0),
+        billableCostRecords: values.filter((value) => value.actualCost !== undefined || value.estimatedCost !== undefined).length,
         currency: currencies.size === 1 ? [...currencies][0]! : currencies.size > 1 ? "mixed" : "unknown",
       };
     };

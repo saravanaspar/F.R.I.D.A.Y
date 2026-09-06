@@ -20,6 +20,24 @@ import {
 
 const tempDirs: string[] = [];
 
+describe("relation retrieval candidate selection", () => {
+  it("finds older matching relations before limiting candidates, including Unicode and predicate words", () => {
+    const store = new MemoryStore({ inMemory: true, embeddingProvider: null });
+    try {
+      store.observeRelation({ subject: "user", predicate: "favorite_drink", object: "JÄSMINE", observedAt: "2025-01-01T00:00:00Z" });
+      for (let i = 0; i < 600; i++) {
+        store.observeRelation({ subject: "user", predicate: "uses", object: `unrelated-${i}`, observedAt: "2026-01-01T00:00:00Z" });
+      }
+      expect(store.queryRelations({ query: "jäsMine" }).map(({ relation }) => relation.object)).toEqual(["JÄSMINE"]);
+      expect(store.queryRelations({ query: "favorite drink" })[0]?.relation.object).toBe("JÄSMINE");
+      expect(store.queryRelations({ query: "jäsMine", subject: "someone-else" })).toEqual([]);
+      expect(store.queryRelations({ query: "unrelated", limit: 3 })).toHaveLength(3);
+    } finally {
+      store.close();
+    }
+  });
+});
+
 function makeTempDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "friday-memory-test-"));
   tempDirs.push(dir);

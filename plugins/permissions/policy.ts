@@ -155,6 +155,7 @@ function describe(request: PermissionApprovalRequest): string {
   const network = request.action.network ? "\nNetwork: requested" : "";
   return [
     `FRIDAY requests action ${normalizedDisplay(request.action.id, 128)}.`,
+    ...(request.jobId === undefined ? [] : [`Job ID: ${normalizedDisplay(request.jobId, 128)}`]),
     `Principal: ${normalizedDisplay(request.principal.label, 128)} (${request.principal.id}, ${request.principal.role})`,
     `Effect: ${request.action.effect}`,
     `Resource: ${normalizedDisplay(request.action.resource, 512)}`,
@@ -206,6 +207,7 @@ export function createPermissionsController(options: PermissionsServiceOptions =
   const now = options.now ?? (() => new Date());
   const audit = options.audit;
   const context = new AsyncLocalStorage<PermissionPrincipalView>();
+  const jobContext = new AsyncLocalStorage<string>();
   const recordAudit = (entry: PermissionAuditEntry): void => {
     audit?.(entry);
   };
@@ -283,6 +285,7 @@ export function createPermissionsController(options: PermissionsServiceOptions =
         workspace,
         action,
         reason: normalizedDisplay(request.reason, 512) || action.id,
+        ...(request.jobId === undefined && jobContext.getStore() !== undefined ? { jobId: jobContext.getStore() } : {}),
       };
 
       if (!roleAllows(actor.role, action)) {
@@ -526,6 +529,13 @@ export function createPermissionsController(options: PermissionsServiceOptions =
         throw new Error("Channel identity is not trusted for privileged FRIDAY actions");
       }
       return context.run(channelPrincipal(identity, selector), operation);
+    },
+    runAsJob<T>(jobId: string, operation: () => T): T {
+      const normalized = normalizedDisplay(jobId, 128);
+      if (!normalized || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(normalized)) {
+        throw new Error(`Invalid trusted job id: ${JSON.stringify(jobId)}`);
+      }
+      return jobContext.run(normalized, operation);
     },
   });
 

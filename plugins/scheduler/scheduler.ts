@@ -432,14 +432,19 @@ export function createSchedulerService(options: SchedulerServiceOptions = {}): S
       runOptions.signal?.throwIfAborted();
       database.abandonExpiredLeases(current.toISOString());
       const dueIds = database.listDueTaskIds(current.toISOString(), maxTasks);
-      const results: SchedulerRunResult[] = [];
-      for (let index = 0; index < dueIds.length; index += maxConcurrent) {
-        runOptions.signal?.throwIfAborted();
-        const batch = dueIds.slice(index, index + maxConcurrent);
-        const batchResults = await Promise.all(batch.map((id) => runTask(id, current, leaseMs, runOptions.signal)));
-        results.push(...batchResults.flat());
-      }
-      return results;
+      const results: SchedulerRunResult[][] = new Array(dueIds.length);
+      let nextIndex = 0;
+      const workers = await Promise.allSettled(Array.from({ length: Math.min(maxConcurrent, dueIds.length) }, async () => {
+        while (nextIndex < dueIds.length) {
+          runOptions.signal?.throwIfAborted();
+          const index = nextIndex++;
+          results[index] = await runTask(dueIds[index]!, current, leaseMs, runOptions.signal);
+        }
+      }));
+      // Settle every owned worker before returning an error or allowing shutdown.
+      const failure = workers.find((worker) => worker.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
+      return results.flat();
     },
 
     startWorker(workerOptions: SchedulerWorkerOptions = {}) {

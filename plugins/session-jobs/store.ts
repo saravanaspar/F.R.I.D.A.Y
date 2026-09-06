@@ -11,7 +11,7 @@ import { DatabaseSync } from "node:sqlite";
 export const SESSION_JOBS_DATABASE_FILE = "jobs.sqlite";
 export const SESSION_JOBS_LEGACY_FILE = "jobs.json";
 const MIGRATED_LEGACY_FILE = "jobs.v1.migrated.json";
-const DATABASE_SCHEMA_VERSION = 1;
+const DATABASE_SCHEMA_VERSION = 2;
 const MAX_PAYLOAD_BYTES = 512 * 1024;
 const MAX_DATABASE_BYTES = 96 * 1024 * 1024;
 
@@ -26,7 +26,8 @@ export interface SessionJobStoreOptions<T extends StoredSessionJob> {
   readonly stateDir: string;
   readonly maxRecords: number;
   readonly maxActiveRecords: number;
-  readonly isActive: (status: T["status"]) => boolean;
+  /** Protect running work and pending delivery from terminal-history pruning. */
+  readonly isActive: (record: T) => boolean;
   readonly parse: (value: unknown) => T;
   readonly loadLegacy: (path: string) => Promise<readonly T[]>;
 }
@@ -72,7 +73,9 @@ function initialize(db: DatabaseSync): void {
       value TEXT NOT NULL
     );
   `);
-  db.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+  // Opening a suspended successor must not upgrade predecessor-owned state.
+  // Version 2 protects pending notifications; advance it on the first write.
+  if (version === 0) db.exec("PRAGMA user_version = 1");
   const integrity = db.prepare("PRAGMA quick_check").get() as { quick_check?: unknown } | undefined;
   if (integrity?.quick_check !== "ok") {
     throw new Error(`Session-jobs database quick_check failed: ${String(integrity?.quick_check)}`);
@@ -147,7 +150,7 @@ export class SessionJobStore<T extends StoredSessionJob> {
         job.id !== rowText(row, "id")
         || job.createdAt !== rowText(row, "created_at")
         || job.updatedAt !== rowText(row, "updated_at")
-        || Number(row.active) !== (this.#options.isActive(job.status) ? 1 : 0)
+        || Number(row.active) !== (this.#options.isActive(job) ? 1 : 0)
       ) throw new Error(`Session-jobs database metadata disagrees with payload: ${job.id}`);
       return job;
     });
@@ -171,10 +174,11 @@ export class SessionJobStore<T extends StoredSessionJob> {
     `);
     this.#db.exec("BEGIN IMMEDIATE");
     try {
+      this.#db.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       for (const record of records) {
         const payload = JSON.stringify(record);
         if (Buffer.byteLength(payload) > MAX_PAYLOAD_BYTES) throw new Error(`Session-job payload is too large: ${record.id}`);
-        const result = upsert.run(record.id, record.createdAt, record.updatedAt, this.#options.isActive(record.status) ? 1 : 0, payload);
+        const result = upsert.run(record.id, record.createdAt, record.updatedAt, this.#options.isActive(record) ? 1 : 0, payload);
         if (Number(result.changes) !== 1) throw new Error(`Session-job save affected ${String(result.changes)} rows for ${record.id}`);
       }
       const active = Number((this.#db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE active = 1").get() as { count: number }).count);
@@ -229,7 +233,7 @@ export class SessionJobStore<T extends StoredSessionJob> {
     try {
       const insert = this.#db.prepare("INSERT INTO jobs(id, created_at, updated_at, active, payload_json) VALUES (?, ?, ?, ?, ?)");
       for (const record of legacy) {
-        const result = insert.run(record.id, record.createdAt, record.updatedAt, this.#options.isActive(record.status) ? 1 : 0, JSON.stringify(record));
+        const result = insert.run(record.id, record.createdAt, record.updatedAt, this.#options.isActive(record) ? 1 : 0, JSON.stringify(record));
         if (Number(result.changes) !== 1) throw new Error(`Legacy session-job insertion affected ${String(result.changes)} rows for ${record.id}`);
       }
       const marker = this.#db.prepare("INSERT INTO metadata(key, value) VALUES ('legacy-v1-migrated', '1')").run();

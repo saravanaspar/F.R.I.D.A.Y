@@ -430,6 +430,120 @@ const memoryPlugin: FridayPlugin = definePlugin({
   });
 
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+    id: "memory.review",
+    label: "Review remembered information",
+    description: "Show what FRIDAY remembers, including stable ids, scope, source, timestamps, and conflicting relation values that may need correction.",
+    parameters: Object.freeze({
+      type: "object",
+      properties: { query: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 200 } },
+      additionalProperties: false,
+    }),
+    permission() {
+      return { id: "memory.review", effect: "private-read", resource: "memory:review", network: false };
+    },
+    execute(input, context) {
+      const query = stringValue(input.query, "query", false)?.toLocaleLowerCase();
+      const limit = typeof input.limit === "number" ? Math.max(1, Math.min(200, Math.trunc(input.limit))) : 100;
+      return withGlobalStore(principalScope(context.turn.principal), (store) => {
+        const notes = store.list("memory")
+          .filter((entry) => !query || `${entry.title} ${entry.content} ${entry.path} ${entry.source}`.toLocaleLowerCase().includes(query))
+          .slice(0, limit)
+          .map((entry) => ({
+            id: entry.id,
+            title: entry.title,
+            content: entry.content,
+            path: entry.path,
+            scope: entry.scope,
+            source: entry.source,
+            createdAt: entry.created_at,
+            updatedAt: entry.updated_at,
+            version: entry.version,
+          }));
+        const relations = (store.snapshot().relations ?? [])
+          .filter((relation) => !query || `${relation.subject} ${relation.predicate} ${relation.object} ${relation.source}`.toLocaleLowerCase().includes(query))
+          .slice(0, limit);
+        const groups = new Map<string, typeof relations>();
+        for (const relation of relations) {
+          const key = `${relation.subject.trim().toLocaleLowerCase()}\u0000${relation.predicate.trim().toLocaleLowerCase()}`;
+          groups.set(key, [...(groups.get(key) ?? []), relation]);
+        }
+        const conflicts = [...groups.values()]
+          .filter((group) => new Set(group.map((relation) => relation.object.trim().toLocaleLowerCase())).size > 1)
+          .map((group) => ({
+            subject: group[0]!.subject,
+            predicate: group[0]!.predicate,
+            values: group.map((relation) => ({ id: relation.id, object: relation.object, source: relation.source, updatedAt: relation.updated_at })),
+          }));
+        return { notes, relations, conflicts, noteCount: notes.length, relationCount: relations.length };
+      });
+    },
+  });
+
+  ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+    id: "memory.correct",
+    label: "Correct remembered information",
+    description: "Replace one outdated memory note or relation by its exact id while preserving correction provenance.",
+    parameters: Object.freeze({
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        kind: { type: "string", enum: ["note", "relation"] },
+        title: { type: "string" },
+        content: { type: "string" },
+        path: { type: "string" },
+        subject: { type: "string" },
+        predicate: { type: "string" },
+        object: { type: "string" },
+        context: { type: "object", additionalProperties: true },
+      },
+      required: ["id", "kind"],
+      additionalProperties: false,
+    }),
+    permission(input) {
+      const id = stringValue(input.id, "id")!;
+      return { id: "memory.correct", effect: "system-write", resource: `memory:correction:${id}`, network: false };
+    },
+    execute(input, context) {
+      const id = memoryText(input.id, "memory id", 160);
+      if (input.kind !== "note" && input.kind !== "relation") throw new Error("kind must be note or relation");
+      return withGlobalStore(principalScope(context.turn.principal), (store) => {
+        if (input.kind === "note") {
+          const existing = store.get("memory", id);
+          if (!existing) throw new Error(`Memory note not found: ${id}`);
+          const corrected = store.update("memory", id, {
+            title: memoryText(input.title, "title", 240),
+            content: memoryText(input.content, "content"),
+            path: input.path === undefined ? existing.path : memoryText(input.path, "path", 240),
+            reference: existing.reference,
+            arguments: existing.arguments,
+            metadata: { ...existing.metadata, correctedAt: new Date().toISOString(), correctedFromSource: existing.source },
+            source: "operator-correction",
+          });
+          return { kind: "note", replacedId: id, memory: corrected };
+        }
+        const previous = store.snapshot();
+        const existing = (previous.relations ?? []).find((relation) => relation.id === id);
+        if (!existing) throw new Error(`Memory relation not found: ${id}`);
+        const relationContext = safeMemoryContext(input.context) ?? existing.context;
+        try {
+          if (!store.deleteRelation(id)) throw new Error(`Memory relation changed before correction: ${id}`);
+          const corrected = store.observeRelation({
+            subject: input.subject === undefined ? existing.subject : memoryText(input.subject, "subject", 512),
+            predicate: input.predicate === undefined ? existing.predicate : memoryText(input.predicate, "predicate", 128),
+            object: memoryText(input.object, "object", 512),
+            context: { ...relationContext, correctedAt: new Date().toISOString(), correctedFromId: id, correctedFromSource: existing.source },
+            source: "operator-correction",
+          });
+          return { kind: "relation", replacedId: id, memory: corrected };
+        } catch (error) {
+          store.replaceState(previous);
+          throw error;
+        }
+      });
+    },
+  });
+
+  ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
     id: "memory.preference.remember",
     label: "Remember preference",
     description: "Store or reinforce one non-secret user preference/habit relation.",

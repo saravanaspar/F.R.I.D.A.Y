@@ -496,6 +496,7 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
               phase = "background-admission";
               const job = await backgroundJobs.start({
                 sourceKey: key,
+                turnId: turn.id,
                 destinationId: decision.destination.id,
                 text: turn.text,
                 timestamp: turn.timestamp,
@@ -508,17 +509,21 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
                   ...(turn.principal.threadId === undefined ? {} : { threadId: turn.principal.threadId }),
                 },
                 run: async (signal, report, jobContext) => {
-                  const result = await executor.execute({
-                    turn,
-                    decision,
-                    signal,
-                    progress: report,
-                    ...(jobContext?.jobId === undefined ? {} : { jobId: jobContext.jobId }),
-                  });
+                  const executeJob = () => executor.execute({
+                      turn,
+                      decision,
+                      signal,
+                      progress: report,
+                      ...(jobContext?.jobId === undefined ? {} : { jobId: jobContext.jobId }),
+                    });
+                  const result = jobContext?.jobId === undefined || options.permissions.runAsJob === undefined
+                    ? await executeJob()
+                    : await options.permissions.runAsJob(jobContext.jobId, executeJob);
                   return {
                     text: result.text,
                     ...(result.sessionId === undefined ? {} : { sessionId: result.sessionId }),
                     ...(result.afterReply === undefined ? {} : { afterNotify: result.afterReply }),
+                    ...(result.afterReplyFinalizers === undefined ? {} : { afterNotifyFinalizers: result.afterReplyFinalizers }),
                   };
                 },
                 notify: turn.reply,

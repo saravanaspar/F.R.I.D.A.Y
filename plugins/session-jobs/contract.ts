@@ -1,5 +1,8 @@
 import type { Capability } from "../capabilities/protocol.js";
 import { defineCapability } from "../capabilities/protocol.js";
+import type { TurnFinalizerDescriptor } from "../turn-loop/contract.js";
+
+export type SessionJobFinalizerDescriptor = TurnFinalizerDescriptor;
 
 export type SessionJobStatus = "queued" | "running" | "retrying" | "completed" | "resumed" | "error" | "cancelled";
 
@@ -51,6 +54,8 @@ export interface SessionJobRecord {
   readonly retryMax?: number | undefined;
   readonly error?: string | undefined;
   readonly resultPreview?: string | undefined;
+  /** Execution is finished, but delivery or its required continuation is pending. */
+  readonly deliveryStatus?: "pending" | "finalizing" | undefined;
   readonly timeline: readonly SessionJobTimelineEntry[];
 }
 
@@ -66,13 +71,15 @@ export interface SessionJobResumeRecord {
 export interface SessionJobRunResult {
   readonly text: string;
   readonly sessionId?: string | undefined;
-  /** Runs only after the final success notification has been attempted. */
+  /** Runs only after the final success notification has been delivered. */
   readonly afterNotify?: (() => void | Promise<void>) | undefined;
+  readonly afterNotifyFinalizers?: readonly SessionJobFinalizerDescriptor[] | undefined;
 }
 
 export interface SessionJobStartRequest {
   /** Stable key for the user operation that admitted this job (for example a durable turn key). */
   readonly sourceKey?: string | undefined;
+  readonly turnId?: string | undefined;
   readonly destinationId: string;
   readonly text: string;
   readonly timestamp: number;

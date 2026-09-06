@@ -21,6 +21,7 @@ import type {
   AgentAfterTurnContribution,
   AgentInputContribution,
   AgentPromptSectionContribution,
+  AgentModelRequestPolicyContribution,
   AgentToolContribution,
   AgentToolExecutionContext,
   TurnExecutionContext,
@@ -110,6 +111,7 @@ export interface AgentTurnExecutorDependencies {
   readonly inputContributions?: (() => readonly AgentInputContribution[]) | undefined;
   readonly promptSectionContributions?: (() => readonly AgentPromptSectionContribution[]) | undefined;
   readonly afterTurnContributions?: (() => readonly AgentAfterTurnContribution[]) | undefined;
+  readonly modelRequestPolicyContributions?: (() => readonly AgentModelRequestPolicyContribution[]) | undefined;
   /** Resolved lazily so optional plugin activation order is never orchestration. */
   readonly optional?: Partial<AgentTurnExecutorOptionalDependencies> | undefined;
 }
@@ -515,6 +517,8 @@ export function createAgentTurnExecutor(
       }
 
       let activeJobId: string | undefined;
+      let activeTurnContext: TurnExecutionContext | undefined;
+      let activeExtensionContext: AgentToolExecutionContext | undefined;
 
       const createChildRuntime = async (childOptions: {
         id: string;
@@ -543,7 +547,7 @@ export function createAgentTurnExecutor(
           sessionId: child.sessionId,
           sessionName: childOptions.name,
           async run(prompt: string, signal: AbortSignal) {
-            await child.run(prompt, Date.now(), signal, undefined, activeJobId);
+            await child.run(prompt, Date.now(), signal, undefined, activeJobId, activeTurnContext);
             return { sessionId: child.sessionId, name: childOptions.name };
           },
           abort(reason?: string) {
@@ -664,6 +668,23 @@ export function createAgentTurnExecutor(
         initialState,
         sessionId: session.getSessionId(),
         transformContext: async (messages) => {
+          const policyContext = activeExtensionContext;
+          if (policyContext) {
+            const seenPolicies = new Set<string>();
+            for (const policy of dependencies.modelRequestPolicyContributions?.() ?? []) {
+              if (seenPolicies.has(policy.id)) throw new Error(`Duplicate model request policy contribution: ${policy.id}`);
+              seenPolicies.add(policy.id);
+              await policy.beforeRequest({
+                ...policyContext,
+                rootSessionId,
+                agentId,
+                agentName,
+                ...(runtimeOptions.parentAgentId === undefined ? {} : { parentAgentId: runtimeOptions.parentAgentId }),
+                provider: String(model.provider),
+                model: String(model.id),
+              });
+            }
+          }
           try {
             let userIndex = -1;
             for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -826,6 +847,8 @@ export function createAgentTurnExecutor(
           }
           const abort = () => agent.abort();
           activeJobId = jobId;
+          activeTurnContext = turnContext;
+          activeExtensionContext = extensionContext;
           const usedTools = new Set<string>();
           const toolTrackingUnsubscribe = agent.subscribe((event: AgentEvent) => {
             if (event.type === "tool_execution_start") usedTools.add(event.toolName);
@@ -963,6 +986,8 @@ export function createAgentTurnExecutor(
               ...(afterFailure === undefined ? {} : { afterFailure }),
             });
           } finally {
+            activeExtensionContext = undefined;
+            activeTurnContext = undefined;
             activeJobId = undefined;
             signal?.removeEventListener("abort", abort);
             toolTrackingUnsubscribe();

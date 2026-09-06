@@ -113,6 +113,30 @@ describe("Artifacts", () => {
     await expect(service.inspect(record.ref)).rejects.toThrow("Artifact root permissions are too broad");
   });
 
+  it("reports aggregate quota and cleanup preserves artifacts referenced by sessions", async () => {
+    const bytes = await zipBytes({ "document.txt": "storage lifecycle" });
+    const { home, service } = await assemble(bytes);
+    const protectedRecord = await service.ingestChannelAttachment(principal, attachment);
+    const disposableRecord = await service.ingestChannelAttachment(principal, { ...attachment, externalId: "file-2" });
+    await service.setQuota(2 * 1024 * 1024);
+    expect(await service.storage()).toMatchObject({ artifacts: 2, totalBytes: bytes.byteLength * 2, quotaBytes: 2 * 1024 * 1024 });
+
+    const old = "2025-01-01T00:00:00.000Z";
+    for (const record of [protectedRecord, disposableRecord]) {
+      await writeFile(join(home, "artifacts", `${record.id}.json`), `${JSON.stringify({ ...record, createdAt: old })}\n`, { mode: 0o600 });
+    }
+    await mkdir(join(home, "sessions"), { recursive: true, mode: 0o700 });
+    await writeFile(join(home, "sessions", "active.jsonl"), `${JSON.stringify({ attachment: protectedRecord.ref })}\n`, { mode: 0o600 });
+
+    const preview = await service.previewCleanup({ olderThanDays: 1 });
+    expect(preview).toMatchObject({ protectedCount: 1, reclaimableBytes: disposableRecord.sizeBytes });
+    const result = await service.cleanup([protectedRecord.ref, disposableRecord.ref]);
+    expect(result.deleted).toEqual([disposableRecord.ref]);
+    expect(result.skippedProtected).toEqual([protectedRecord.ref]);
+    await expect(service.inspect(protectedRecord.ref)).resolves.toBeDefined();
+    await expect(service.inspect(disposableRecord.ref)).rejects.toThrow();
+  });
+
   it("rejects ZIP traversal before materializing a package tree", async () => {
     const bytes = await zipBytes({ "../escape.txt": "escape", "skill/SKILL.md": "# Test\n" });
     const { service } = await assemble(bytes);

@@ -41,6 +41,34 @@ afterEach(async () => {
 });
 
 describe("scheduler plugin", () => {
+  it("refills available worker slots without waiting for a slow task and preserves result order", async () => {
+    const current = new Date("2026-08-18T12:00:00.000Z");
+    const service = scheduler({ stateDir: await tempDir(), now: () => current });
+    let release!: () => void;
+    const slow = new Promise<void>((resolve) => { release = resolve; });
+    const started: string[] = [];
+    let active = 0;
+    let peak = 0;
+    service.registerExecutor("test.pool", async ({ task }) => {
+      started.push(task.id);
+      peak = Math.max(peak, ++active);
+      try { if (task.id === "a") await slow; } finally { active--; }
+    });
+    for (const id of ["a", "b", "c"]) {
+      service.schedule({ id, taskType: "test.pool", schedule: { kind: "once", at: current.toISOString() } });
+    }
+    const pending = service.runDue({ maxConcurrent: 2 });
+    try {
+      await waitFor(() => started.includes("c"));
+      expect(active).toBe(1);
+      expect(peak).toBe(2);
+    } finally {
+      release();
+      await pending;
+    }
+    expect((await pending).map((result) => result.taskId)).toEqual(["a", "b", "c"]);
+  });
+
   it("persists tasks in private SQLite state and reopens them", async () => {
     const stateDir = await tempDir();
     const current = new Date("2026-08-18T00:00:00.000Z");

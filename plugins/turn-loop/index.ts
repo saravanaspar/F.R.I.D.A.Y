@@ -24,6 +24,7 @@ import {
   AGENT_INPUT_CONTRIBUTION,
   AGENT_PROMPT_SECTION_CONTRIBUTION,
   AGENT_TOOL_CONTRIBUTION,
+  AGENT_MODEL_REQUEST_POLICY_CONTRIBUTION,
   TURN_EXECUTOR_CONTRIBUTION,
   TURN_FINALIZER_CONTRIBUTION,
   TURN_INGRESS_HOOK,
@@ -68,6 +69,7 @@ const turnLoopPlugin: FridayPlugin = definePlugin({
     inputContributions: () => ctx.collect(AGENT_INPUT_CONTRIBUTION),
     promptSectionContributions: () => ctx.collect(AGENT_PROMPT_SECTION_CONTRIBUTION),
     afterTurnContributions: () => ctx.collect(AGENT_AFTER_TURN_CONTRIBUTION),
+    modelRequestPolicyContributions: () => ctx.collect(AGENT_MODEL_REQUEST_POLICY_CONTRIBUTION),
     optional: {
       credentials: () => ctx.services.optional(MODEL_CREDENTIALS_CAPABILITY),
       memory: () => ctx.services.optional(MEMORY_CAPABILITY),

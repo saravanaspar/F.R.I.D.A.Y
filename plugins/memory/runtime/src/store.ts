@@ -368,7 +368,7 @@ export class MemoryStore {
       throw new Error("memory relation minimumOccurrences must be a positive integer");
     }
     const terms = relationTerms(options.query ?? "");
-    return this.#withDatabase((database) => database.listRelations({ ...options, limit: Math.max(limit * 8, 100) })
+    return this.#withDatabase((database) => database.listRelations({ ...options, limit: Math.max(limit * 8, 100) }, terms)
       .map((relation) => {
         const haystack = `${relation.subject} ${relation.predicate.replaceAll("_", " ")} ${relation.object} ${JSON.stringify(relation.context)}`.toLowerCase();
         const matches = terms.reduce((count, term) => count + (haystack.includes(term) ? 1 : 0), 0);
@@ -378,7 +378,6 @@ export class MemoryStore {
         const textScore = terms.length === 0 ? 0 : matches / terms.length;
         return { relation, score: textScore * 6 + frequency * 2 + recency + relation.confidence };
       })
-      .filter((result) => terms.length === 0 || terms.some((term) => `${result.relation.subject} ${result.relation.predicate} ${result.relation.object} ${JSON.stringify(result.relation.context)}`.toLowerCase().includes(term)))
       .sort((left, right) => right.score - left.score || right.relation.last_observed_at.localeCompare(left.relation.last_observed_at) || left.relation.id.localeCompare(right.relation.id))
       .slice(0, limit)
       .map((result) => ({ ...result, relation: structuredClone(result.relation) })));

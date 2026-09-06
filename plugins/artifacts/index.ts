@@ -8,13 +8,15 @@ import { definePlugin } from "../capabilities/protocol.js";
 import { CHANNELS_TRUSTED_CAPABILITY } from "../channels/trusted-contract.js";
 import { EXECUTION_CAPABILITY } from "../execution/contract.js";
 import { SANDBOX_CAPABILITY } from "../sandbox/contract.js";
-import { SYSTEM_STATUS_CONTRIBUTION } from "../system/contract.js";
+import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION, type SystemJsonObject } from "../system/contract.js";
 import {
   ARTIFACTS_CAPABILITY,
   ARTIFACT_INPUT_ENRICHMENT_CONTRIBUTION,
   type ArtifactAttachment,
   type ArtifactChannelPrincipal,
   type ArtifactRecord,
+  type ArtifactCleanupPreview,
+  type ArtifactStorageSummary,
   type ArtifactService,
   type PackageSourceInput,
   type PackageStage,
@@ -27,6 +29,7 @@ const MAX_PACKAGE_FILES = 2_000;
 const MAX_PACKAGE_EXPANDED_BYTES = 64 * 1024 * 1024;
 const SMALL_TEXT_PREVIEW_BYTES = 24 * 1024;
 const MAX_MODEL_IMAGE_BYTES = 20 * 1024 * 1024;
+const DEFAULT_STORAGE_QUOTA_BYTES = 1024 * 1024 * 1024;
 
 const SAFE_ZIP_EXTRACT = String.raw`
 import os, stat, sys, zipfile
@@ -58,11 +61,12 @@ if len(sys.argv) > 3 and sys.argv[3] == "strip-root":
     os.rmdir(wrapper)
 `;
 
-function rootDir(): string {
+function stateRoot(): string {
   const configured = process.env.FRIDAY_HOME?.trim() || process.env.FRIDAY_STATE_DIR?.trim();
-  const root = configured ? (isAbsolute(configured) ? configured : resolve(configured)) : join(homedir(), ".friday");
-  return join(root, "artifacts");
+  return configured ? (isAbsolute(configured) ? configured : resolve(configured)) : join(homedir(), ".friday");
 }
+
+function rootDir(): string { return join(stateRoot(), "artifacts"); }
 
 async function assertPrivateRoot(root: string, create: boolean): Promise<void> {
   try {
@@ -189,6 +193,7 @@ async function assertPrivateRegular(path: string): Promise<void> {
 
 function recordPath(root: string, id: string): string { return join(root, `${id}.json`); }
 function payloadPath(root: string, id: string): string { return join(root, `${id}.bin`); }
+function storagePolicyPath(root: string): string { return join(root, "storage-policy.json"); }
 
 async function loadRecord(root: string, id: string): Promise<ArtifactRecord> {
   const path = recordPath(root, id);
@@ -199,6 +204,73 @@ async function loadRecord(root: string, id: string): Promise<ArtifactRecord> {
     throw new Error(`Artifact metadata is corrupt: ${id}`);
   }
   return Object.freeze(parsed as ArtifactRecord);
+}
+
+function quotaFromEnvironment(): number {
+  const value = Number(process.env.FRIDAY_ARTIFACT_QUOTA_BYTES ?? DEFAULT_STORAGE_QUOTA_BYTES);
+  return Number.isSafeInteger(value) && value >= 1024 * 1024 ? value : DEFAULT_STORAGE_QUOTA_BYTES;
+}
+
+async function readQuota(root: string): Promise<number> {
+  try {
+    const parsed = JSON.parse(await readFile(storagePolicyPath(root), "utf8")) as { quotaBytes?: unknown };
+    if (!Number.isSafeInteger(parsed.quotaBytes) || (parsed.quotaBytes as number) < 1024 * 1024) throw new Error("Artifact storage quota is malformed");
+    return parsed.quotaBytes as number;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return quotaFromEnvironment();
+    throw error;
+  }
+}
+
+async function listArtifactRecords(root: string): Promise<ArtifactRecord[]> {
+  await assertPrivateRoot(root, false);
+  let names: string[];
+  try { names = await readdir(root); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+  const ids = names.flatMap((name) => {
+    const match = /^([0-9a-f-]{36})\.json$/i.exec(name);
+    return match ? [match[1]!.toLowerCase()] : [];
+  });
+  return Promise.all(ids.map((id) => loadRecord(root, id)));
+}
+
+async function referencedArtifactIds(root: string): Promise<Set<string>> {
+  const protectedIds = new Set<string>();
+  const addFromText = (text: string): void => {
+    for (const match of text.matchAll(/artifact:([0-9a-f-]{36})/gi)) protectedIds.add(match[1]!.toLowerCase());
+  };
+  let visited = 0;
+  let bytes = 0;
+  const visit = async (path: string, depth: number): Promise<void> => {
+    if (depth > 4 || visited >= 2_000 || bytes >= 64 * 1024 * 1024) return;
+    let entries;
+    try { entries = await readdir(path, { withFileTypes: true }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    for (const entry of entries) {
+      if (visited >= 2_000 || bytes >= 64 * 1024 * 1024) break;
+      const child = join(path, entry.name);
+      if (entry.isDirectory()) {
+        if (/^[0-9a-f-]{36}$/i.test(entry.name)) protectedIds.add(entry.name.toLowerCase());
+        await visit(child, depth + 1);
+      } else if (entry.isFile() && /\.(?:json|jsonl|ndjson)$/i.test(entry.name)) {
+        const info = await lstat(child);
+        if (info.size > 8 * 1024 * 1024) continue;
+        visited += 1;
+        bytes += info.size;
+        addFromText(await readFile(child, "utf8"));
+      }
+    }
+  };
+  await visit(join(stateRoot(), "sessions"), 0);
+  await visit(join(root, "prepared-runtime"), 0);
+  return protectedIds;
+}
+
+function cleanupAge(input: Readonly<SystemJsonObject>): number {
+  const value = input.olderThanDays;
+  if (value === undefined) return 30;
+  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 3650) throw new Error("olderThanDays must be an integer from 1 to 3650");
+  return value as number;
 }
 
 const artifactsPlugin: FridayPlugin = definePlugin({
@@ -234,6 +306,11 @@ const artifactsPlugin: FridayPlugin = definePlugin({
       try {
         if (bytes.byteLength === 0) throw new Error("Attachment is empty");
         if (bytes.byteLength > maxBytes) throw new Error("Attachment exceeds the configured artifact size limit");
+        const existingBytes = (await listArtifactRecords(root)).reduce((sum, record) => sum + record.sizeBytes, 0);
+        const quotaBytes = await readQuota(root);
+        if (existingBytes + bytes.byteLength > quotaBytes) {
+          throw new Error(`Artifact storage quota exceeded (${formatBytes(existingBytes)} used of ${formatBytes(quotaBytes)})`);
+        }
         const id = randomUUID();
         const ref = artifactRef(id);
         const record: ArtifactRecord = Object.freeze({
@@ -281,6 +358,89 @@ const artifactsPlugin: FridayPlugin = definePlugin({
       } finally {
         bytes.fill(0);
       }
+    },
+    async storage(): Promise<ArtifactStorageSummary> {
+      const records = await listArtifactRecords(root);
+      const quotaBytes = await readQuota(root);
+      const totalBytes = records.reduce((sum, record) => sum + record.sizeBytes, 0);
+      return Object.freeze({
+        artifacts: records.length,
+        totalBytes,
+        quotaBytes,
+        availableBytes: Math.max(0, quotaBytes - totalBytes),
+        utilization: quotaBytes === 0 ? 1 : totalBytes / quotaBytes,
+      });
+    },
+    async setQuota(quotaBytes: number): Promise<ArtifactStorageSummary> {
+      if (!Number.isSafeInteger(quotaBytes) || quotaBytes < 1024 * 1024 || quotaBytes > 1024 * 1024 * 1024 * 1024) {
+        throw new Error("Artifact quota must be an integer from 1 MiB to 1 TiB");
+      }
+      await assertPrivateRoot(root, true);
+      const target = storagePolicyPath(root);
+      const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+      await writeFile(temporary, `${JSON.stringify({ schema: 1, quotaBytes })}\n`, { mode: 0o600, flag: "wx" });
+      try { await rename(temporary, target); }
+      catch (error) {
+        try { await unlink(temporary); }
+        catch (cleanupError) {
+          if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
+            throw new AggregateError([error, cleanupError], "Artifact quota update and temporary-file cleanup both failed");
+          }
+        }
+        throw error;
+      }
+      return service.storage();
+    },
+    async previewCleanup(options: { readonly olderThanDays?: number | undefined } = {}): Promise<ArtifactCleanupPreview> {
+      const olderThanDays = options.olderThanDays ?? 30;
+      if (!Number.isSafeInteger(olderThanDays) || olderThanDays < 1 || olderThanDays > 3650) throw new Error("olderThanDays must be an integer from 1 to 3650");
+      const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
+      const [records, protectedIds] = await Promise.all([listArtifactRecords(root), referencedArtifactIds(root)]);
+      const candidates = records
+        .filter((record) => Date.parse(record.createdAt) <= cutoff)
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+        .map((record) => Object.freeze({
+          ...record,
+          protected: protectedIds.has(record.id),
+          ...(protectedIds.has(record.id) ? { protectionReason: "referenced by a persisted or prepared session" } : {}),
+        }));
+      return Object.freeze({
+        generatedAt: new Date().toISOString(),
+        olderThanDays,
+        reclaimableBytes: candidates.filter((record) => !record.protected).reduce((sum, record) => sum + record.sizeBytes, 0),
+        candidates: Object.freeze(candidates),
+        protectedCount: candidates.filter((record) => record.protected).length,
+      });
+    },
+    async cleanup(refs: readonly string[]) {
+      if (!Array.isArray(refs) || refs.length < 1 || refs.length > 500) throw new Error("cleanup refs must contain between 1 and 500 artifact references");
+      const ids = [...new Set(refs.map(idFromRef))];
+      const protectedIds = await referencedArtifactIds(root);
+      const deleted: string[] = [];
+      const skippedProtected: string[] = [];
+      let reclaimedBytes = 0;
+      await assertPrivateRoot(root, false);
+      const trash = join(root, ".cleanup", randomUUID());
+      await ensurePrivateDirectory(trash);
+      try {
+        for (const id of ids) {
+          const ref = artifactRef(id);
+          if (protectedIds.has(id)) { skippedProtected.push(ref); continue; }
+          const record = await loadRecord(root, id);
+          const payload = payloadPath(root, id);
+          const metadata = recordPath(root, id);
+          await assertPrivateRegular(payload);
+          await rename(payload, join(trash, `${id}.bin`));
+          try { await rename(metadata, join(trash, `${id}.json`)); }
+          catch (error) { await rename(join(trash, `${id}.bin`), payload); throw error; }
+          reclaimedBytes += record.sizeBytes;
+          deleted.push(ref);
+        }
+        await rm(trash, { recursive: true, force: true });
+      } catch (error) {
+        throw error;
+      }
+      return Object.freeze({ deleted: Object.freeze(deleted), reclaimedBytes, skippedProtected: Object.freeze(skippedProtected) });
     },
     async stagePackageSource(input: PackageSourceInput): Promise<PackageStage> {
       const urlText = input.url?.trim();
@@ -500,10 +660,51 @@ const artifactsPlugin: FridayPlugin = definePlugin({
   });
 
   ctx.services.provide(ARTIFACTS_CAPABILITY, service);
+  ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+    id: "artifacts.storage",
+    label: "Attachment storage usage",
+    description: "Show aggregate attachment count, bytes, quota, available capacity, and utilization.",
+    parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+    permission() { return { id: "artifacts.storage", effect: "global-operational-read", resource: "artifacts:storage", network: false }; },
+    execute: () => service.storage(),
+  });
+  ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+    id: "artifacts.quota.set",
+    label: "Set attachment storage quota",
+    description: "Persist the aggregate attachment storage quota in bytes (1 MiB to 1 TiB).",
+    parameters: Object.freeze({ type: "object", properties: { quotaBytes: { type: "integer", minimum: 1048576, maximum: 1099511627776 } }, required: ["quotaBytes"], additionalProperties: false }),
+    permission() { return { id: "artifacts.quota.set", effect: "system-write", resource: "artifacts:storage-policy", network: false }; },
+    execute(input) {
+      if (!Number.isSafeInteger(input.quotaBytes)) throw new Error("quotaBytes must be an integer");
+      return service.setQuota(input.quotaBytes as number);
+    },
+  });
+  ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+    id: "artifacts.cleanup-preview",
+    label: "Preview attachment cleanup",
+    description: "Preview old attachments eligible for cleanup and identify files protected by persisted or prepared sessions. This does not delete anything.",
+    parameters: Object.freeze({ type: "object", properties: { olderThanDays: { type: "integer", minimum: 1, maximum: 3650 } }, additionalProperties: false }),
+    permission() { return { id: "artifacts.cleanup-preview", effect: "global-operational-read", resource: "artifacts:cleanup-preview", network: false }; },
+    execute: (input) => service.previewCleanup({ olderThanDays: cleanupAge(input) }),
+  });
+  ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+    id: "artifacts.cleanup",
+    label: "Clean up attachments",
+    description: "Delete exact artifact references selected from a cleanup preview. References found in persisted or prepared sessions are rechecked and preserved.",
+    parameters: Object.freeze({ type: "object", properties: { refs: { type: "array", minItems: 1, maxItems: 500, items: { type: "string" } } }, required: ["refs"], additionalProperties: false }),
+    permission(input) {
+      const refs = Array.isArray(input.refs) ? input.refs : [];
+      return { id: "artifacts.cleanup", effect: "system-write", resource: `artifacts:cleanup:${refs.length}`, network: false };
+    },
+    execute(input) {
+      if (!Array.isArray(input.refs) || !input.refs.every((value) => typeof value === "string")) throw new Error("refs must be an array of artifact references");
+      return service.cleanup(input.refs as string[]);
+    },
+  });
   ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
     id: "artifacts",
     label: "Artifacts",
-    snapshot: () => ({ ingested, root }),
+    snapshot: async () => ({ ingestedThisRuntime: ingested, ...(await service.storage()) }),
   });
 });
 

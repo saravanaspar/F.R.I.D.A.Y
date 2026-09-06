@@ -5,7 +5,7 @@ import { CHANNELS_TRUSTED_CAPABILITY } from "../channels/trusted-contract.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { EVENTS_CAPABILITY } from "../events/contract.js";
 import { ownerScopeAllows } from "../principal-scope.js";
-import { TURN_INGRESS_HOOK } from "../turn-loop/contract.js";
+import { TURN_FINALIZER_CONTRIBUTION, TURN_INGRESS_HOOK, type TurnFinalizerContribution } from "../turn-loop/contract.js";
 import { isLifecycleRestartEnvironment, LIFECYCLE_HANDOFF_CONTRIBUTION } from "../lifecycle/contract.js";
 import { SESSIONS_CAPABILITY } from "../sessions/contract.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_ACTIVE_WORK_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION, type SystemActionExecutionContext, type SystemJsonObject } from "../system/contract.js";
@@ -83,6 +83,7 @@ function formatJobList(jobs: readonly SessionJobRecord[], includeCompleted: bool
       `   ${job.status}${job.retryAttempt === undefined ? "" : ` · retry ${job.retryAttempt}/${job.retryMax ?? "?"}`}`,
       `   job: ${job.id}${job.sessionId === undefined ? "" : ` · session: ${job.sessionId}`}`,
       `   current: ${job.currentStatus ?? job.requestPreview}`,
+      ...(job.deliveryStatus ? [`   delivery: ${job.deliveryStatus}`] : []),
       "",
     ]),
   ].join("\n").trimEnd();
@@ -171,6 +172,26 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
       progressNotifyIntervalMs: options.progressNotifyIntervalMs,
       recoverInterrupted: !restartSuccessor,
       startSuspended: restartSuccessor,
+      async finalizeNotification(job, descriptors, context) {
+        const handlers = new Map<string, TurnFinalizerContribution>();
+        for (const entry of ctx.collect(TURN_FINALIZER_CONTRIBUTION)) {
+          if (handlers.has(entry.type)) throw new Error(`Duplicate turn finalizer contribution: ${entry.type}`);
+          handlers.set(entry.type, entry);
+        }
+        for (const descriptor of descriptors) {
+          const handler = handlers.get(descriptor.type);
+          if (!handler) throw new Error(`Background-job finalizer is unavailable: ${descriptor.type}`);
+          await handler.finalize(structuredClone(descriptor.payload), {
+            turn: {
+              id: context.turnId,
+              principal: job.origin,
+              text: context.text,
+              timestamp: Date.parse(job.createdAt),
+              reply: (text) => sendJobReply(job, text),
+            },
+          });
+        }
+      },
       async resolveLabel(destinationId, text, origin) {
         if (destinationId === "session:new") return text.trim().slice(0, 80) || "new session";
         if (!destinationId.startsWith("session:")) return destinationId;
@@ -184,7 +205,21 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
     ctx.services.provide(SESSION_JOBS_CAPABILITY, manager);
     ctx.effect(() => manager.close());
 
+    async function sendJobReply(job: SessionJobRecord, text: string): Promise<void> {
+      const channels = ctx.services.optional(CHANNELS_TRUSTED_CAPABILITY);
+      if (!channels || job.origin.authority !== "channel") throw new Error(`Cannot deliver ${job.id}: trusted channel origin is unavailable`);
+      await channels.send({
+        channel: job.origin.channel,
+        accountId: job.origin.accountId,
+        conversationId: job.origin.conversationId,
+        ...(job.origin.threadId === undefined ? {} : { threadId: job.origin.threadId }),
+      }, text);
+    }
+
     const publishResumeRequests = (): void => {
+      for (const job of manager.pendingDeliveries()) {
+        events.publish({ type: "session-job.delivery-requested", source: "session-jobs", subject: `job:${job.id}`, data: { jobId: job.id } });
+      }
       for (const job of manager.resumable()) {
         events.publish({
           id: `session-job:${job.id}:resume-requested`,
@@ -199,6 +234,20 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
     const registerResumeConsumer = typeof events.registerConsumer === "function"
       ? events.registerConsumer.bind(events)
       : undefined;
+    if (registerResumeConsumer) ctx.effect(registerResumeConsumer({
+      id: "session-jobs.result-delivery.v1",
+      types: ["session-job.delivery-requested"],
+      startAt: "beginning",
+      retry: { maxAttempts: 100, initialDelayMs: 1_000, multiplier: 2, maxDelayMs: 60_000 },
+    }, async ({ event, signal }) => {
+      signal?.throwIfAborted();
+      const data = event.data && typeof event.data === "object" && !Array.isArray(event.data) ? event.data : undefined;
+      const jobId = data && "jobId" in data && typeof data.jobId === "string" ? data.jobId : undefined;
+      if (!jobId) throw new Error("session-job delivery event is missing jobId");
+      const job = manager.get(jobId);
+      if (!job) return;
+      await manager.deliverPending(jobId, (text) => sendJobReply(job, text), true);
+    }));
     const unregisterResumeConsumer = registerResumeConsumer ? registerResumeConsumer({
       id: "session-jobs.restart-resume.v1",
       types: ["session-job.resume-requested"],
@@ -272,6 +321,19 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
           queued: active.filter((job) => job.status === "queued").length,
           running: active.filter((job) => job.status === "running").length,
           retrying: active.filter((job) => job.status === "retrying").length,
+          pendingDeliveries: manager.pendingDeliveries().length,
+          activeJobs: active.map((job) => ({
+            jobId: job.id,
+            label: job.label,
+            status: job.status,
+            ...(job.currentStatus === undefined ? {} : { currentStatus: job.currentStatus }),
+            ...(job.sessionId === undefined ? {} : { sessionId: job.sessionId }),
+            ...(job.deliveryStatus === undefined ? {} : { deliveryStatus: job.deliveryStatus }),
+            updatedAt: job.updatedAt,
+          })),
+          deliveryFailures: manager.list({ limit: 100 })
+            .filter((job) => job.deliveryStatus !== undefined || (job.error?.toLowerCase().includes("deliver") ?? false))
+            .map((job) => ({ jobId: job.id, label: job.label, status: job.status, ...(job.deliveryStatus === undefined ? {} : { deliveryStatus: job.deliveryStatus }), ...(job.error === undefined ? {} : { error: job.error }) })),
         };
       },
     });

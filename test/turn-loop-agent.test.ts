@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PluginTestHost } from "./helpers/plugin-host.js";
 import agentPlugin from "../plugins/agent/index.js";
 import { AGENT_CAPABILITY } from "../plugins/agent/contract.js";
-import type { AgentInputContribution, AgentToolContribution } from "../plugins/turn-loop/contract.js";
+import type { AgentInputContribution, AgentModelRequestPolicyContribution, AgentToolContribution } from "../plugins/turn-loop/contract.js";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import modelPlugin from "../plugins/model/index.js";
@@ -98,6 +98,43 @@ afterEach(() => {
 });
 
 describe("Turn Loop agent executor", () => {
+  it("evaluates model-request policy immediately before a job model call", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "faux";
+    process.env.FRIDAY_MODEL_ID = "faux-1";
+    const stateDir = tempRoot();
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(sessionsPlugin);
+    await friday.activatePlugin(promptsPlugin);
+    await friday.activatePlugin(modelPlugin);
+    await friday.activatePlugin(agentPlugin);
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
+    const checks: Array<{ jobId?: string; rootSessionId: string; agentId: string }> = [];
+    const policy: AgentModelRequestPolicyContribution = {
+      id: "test-spending-policy",
+      beforeRequest(context) { checks.push({ ...(context.jobId === undefined ? {} : { jobId: context.jobId }), rootSessionId: context.rootSessionId, agentId: context.agentId }); },
+    };
+    const executor = createAgentTurnExecutor({
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: withTestModel(requireCapability(MODEL_CAPABILITY), faux),
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions: requireCapability(SESSIONS_CAPABILITY),
+      tools: { createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService,
+      modelRequestPolicyContributions: () => [policy],
+    }, { stateDir });
+    try {
+      faux.setResponses([modelRuntime.fauxAssistantMessage("policy checked")]);
+      const result = await executor.execute({ turn: turn("policy-1", "run within budget"), decision: decision("session:new"), jobId: "job-policy" });
+      expect(checks).toEqual([{ jobId: "job-policy", rootSessionId: result.sessionId, agentId: result.sessionId }]);
+      expect(faux.state.callCount).toBe(1);
+    } finally {
+      await executor.dispose();
+      faux.unregister();
+    }
+  });
+
   it("persists routed sessions, reuses live runtimes, and safely evicts/reopens them", async () => {
     process.env.FRIDAY_MODEL_PROVIDER = "faux";
     process.env.FRIDAY_MODEL_ID = "faux-1";

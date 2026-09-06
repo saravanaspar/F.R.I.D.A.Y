@@ -302,6 +302,26 @@ describe("protected channel interactions", () => {
     expect(observed).toHaveLength(0);
   });
 
+  it("keeps concurrent approvals correlated to their request and job ids", async () => {
+    const { hub, sent } = protectedHub();
+    const first = hub.requestApproval({ principal: principal(), actionId: "task.one", effect: "write", resource: "one", reason: "first", jobId: "job-one" });
+    const second = hub.requestApproval({ principal: principal(), actionId: "task.two", effect: "write", resource: "two", reason: "second", jobId: "job-two" });
+    await Promise.resolve();
+    const pending = hub.pendingApprovals();
+    expect(pending).toHaveLength(2);
+    expect(sent.join("\n")).toContain("Job ID: job-one");
+    expect(sent.join("\n")).toContain("Job ID: job-two");
+
+    const secondRequest = pending.find((entry) => entry.jobId === "job-two")!;
+    expect((await hub.ingest(inbound(`deny ${secondRequest.code}`))).approval?.requestId).toBe(secondRequest.id);
+    await expect(second).resolves.toBe(false);
+    expect(hub.pendingApprovals()).toHaveLength(1);
+
+    const firstRequest = hub.pendingApprovals()[0]!;
+    expect((await hub.ingest({ ...inbound(""), protectedAction: { requestId: firstRequest.id, decision: "approve" } })).approval?.requestId).toBe(firstRequest.id);
+    await expect(first).resolves.toBe(true);
+  });
+
   it("keeps resolved and stopped approval codes fail-closed without blocking a fresh request", async () => {
     const stateDirectory = mkdtempSync(join(tmpdir(), "friday-approval-replay-"));
     tempDirs.push(stateDirectory);
@@ -474,6 +494,38 @@ describe("protected channel interactions", () => {
     expect(observed).toHaveLength(1);
   });
 
+  it("captures concurrent question buttons and coded custom answers by exact request id", async () => {
+    const { hub } = protectedHub();
+    const first = hub.requestPrompt({
+      principal: principal(),
+      title: "Choose environment",
+      message: "Where should task one run?",
+      options: [{ label: "Staging", value: "staging" }, { label: "Production", value: "production" }],
+      allowCustom: false,
+      jobId: "job-one",
+    });
+    const second = hub.requestPrompt({
+      principal: principal(),
+      title: "Choose branch",
+      message: "Which branch should task two use?",
+      options: [{ label: "Main", value: "main" }, { label: "Release", value: "release" }],
+      jobId: "job-two",
+    });
+    await Promise.resolve();
+    const pending = hub.pendingPrompts();
+    expect(pending).toHaveLength(2);
+
+    const firstRequest = pending.find((entry) => entry.jobId === "job-one")!;
+    const selected = await hub.ingest({ ...inbound(""), protectedAction: { requestId: firstRequest.id, selection: 1 } });
+    expect(selected.prompt?.requestId).toBe(firstRequest.id);
+    await expect(first).resolves.toBe("production");
+
+    const secondRequest = hub.pendingPrompts()[0]!;
+    const custom = await hub.ingest(inbound(`answer ${secondRequest.code} feature/correlated-questions`));
+    expect(custom.prompt?.requestId).toBe(secondRequest.id);
+    await expect(second).resolves.toBe("feature/correlated-questions");
+  });
+
   it("intercepts the exact cancellation code while unrelated text continues as an ordinary message", async () => {
     const { hub } = protectedHub();
     const handle = await hub.watchCancellation({ principal: principal(), label: "self-improvement" });
@@ -583,6 +635,29 @@ describe("protected channel interactions", () => {
     expect((await second.ingest(inbound(`cancel ${cancellation.request.code}`))).classification).toBe("cancellation-requested");
     expect(cancellation.signal.aborted).toBe(true);
     expect((await second.ingest(inbound("stale prompt value"))).classification).toBe("prompt-error");
+  });
+
+  it("lets an exact new question answer outrank an older prompt tombstone", async () => {
+    const stateDirectory = mkdtempSync(join(tmpdir(), "friday-protected-new-question-"));
+    tempDirs.push(stateDirectory);
+    const statePath = join(stateDirectory, "protected.json");
+    const transport: ChannelTransport = { channel: "telegram", accountId: "default", start: async () => undefined, stop: async () => undefined, status: () => ({ channel: "telegram", accountId: "default", state: "running" }), send: async (target) => ({ channel: "telegram", accountId: "default", conversationId: target.conversationId, messageIds: ["1"] }) };
+    const first = new ChannelHub({ credentialVault: new FakeVault(), protectedStatePath: statePath });
+    first.registerTransport(transport);
+    const stalePrompt = first.requestPrompt({ principal: principal(), message: "Old question" });
+    void stalePrompt.catch(() => undefined);
+    await Promise.resolve();
+    await first.stopAll();
+
+    const second = new ChannelHub({ credentialVault: new FakeVault(), protectedStatePath: statePath });
+    second.registerTransport(transport);
+    const currentPrompt = second.requestPrompt({ principal: principal(), message: "New question" });
+    await Promise.resolve();
+    const current = second.pendingPrompts()[0]!;
+    const response = await second.ingest(inbound(`answer ${current.code} current-value`));
+    expect(response).toMatchObject({ classification: "prompt-resolved", prompt: { requestId: current.id } });
+    await expect(currentPrompt).resolves.toBe("current-value");
+    await expect(stalePrompt).rejects.toThrow(/stopped/);
   });
 });
 

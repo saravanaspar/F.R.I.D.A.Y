@@ -393,6 +393,8 @@ export class MemoryDatabase {
 
     try {
       configureDatabase(this.#db, this.path !== undefined);
+      this.#db.function("memory_relation_search_text", { deterministic: true }, (subject, predicate, object, context) =>
+        `${subject} ${String(predicate).replaceAll("_", " ")} ${object} ${context}`.toLowerCase());
       if (this.path) chmodSync(this.path, previousMode ?? 0o600);
       if (legacyState) this.replaceState(legacyState);
     } catch (error) {
@@ -749,7 +751,7 @@ export class MemoryDatabase {
     });
   }
 
-  listRelations(query: MemoryRelationQuery = {}): MemoryRelation[] {
+  listRelations(query: MemoryRelationQuery = {}, terms: readonly string[] = []): MemoryRelation[] {
     this.#assertOpen();
     const clauses = ["scope = ?"];
     const parameters: Array<string | number> = [this.scope];
@@ -759,6 +761,10 @@ export class MemoryDatabase {
     if (query.minimumOccurrences !== undefined) {
       clauses.push("occurrences >= ?");
       parameters.push(query.minimumOccurrences);
+    }
+    if (terms.length > 0) {
+      clauses.push(`(${terms.map(() => "instr(memory_relation_search_text(subject, predicate, object, context_json), ?) > 0").join(" OR ")})`);
+      parameters.push(...terms);
     }
     parameters.push(Math.min(500, Math.max(query.limit ?? 100, 100)));
     const rows = this.#db.prepare(`

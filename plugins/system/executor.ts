@@ -148,6 +148,7 @@ function plannerSystemPrompt(): string {
     "Return exactly one JSON object and no prose.",
     "Choose exactly one host-supplied actionId. Never invent action ids.",
     "Use only input fields declared by the selected action.",
+    "For an operator dashboard or a combined view of jobs, approvals, schedules, delivery failures, and usage choose operator.dashboard.",
     "For general FRIDAY health/status requests choose system.status.",
     "For questions specifically asking what work/tasks/jobs are currently running, choose session.jobs.list when that action is available.",
     "For requests to stop/cancel background project work, choose session.jobs.cancel; the action itself performs deterministic disambiguation and confirmation.",
@@ -309,6 +310,7 @@ export function createSystemTurnExecutor(options: SystemTurnExecutorOptions): Tu
         access: permissionEffectAccess(permission.effect),
         action: permission,
         reason: `system action ${action.id}`,
+        ...(context.jobId === undefined ? {} : { jobId: context.jobId }),
       });
       context.signal?.throwIfAborted();
       const afterReply: Array<() => void | Promise<void>> = [];
@@ -404,6 +406,33 @@ export function createSystemStatusAction(
         sections[id] = { label: status.label, snapshot };
       }
       return sections;
+    },
+  });
+}
+
+export function createOperatorDashboardAction(
+  statuses: () => readonly SystemStatusContribution[],
+): SystemActionContribution {
+  return Object.freeze({
+    id: "operator.dashboard",
+    label: "Operator dashboard",
+    description: "Show one correlated operator view of active jobs, pending approvals/questions, delivery failures, schedules, and current usage.",
+    parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+    permission() {
+      return { id: "operator.dashboard", effect: "global-operational-read", resource: "system:operator-dashboard", network: false } as const;
+    },
+    async execute() {
+      const sections: Record<string, SystemJsonValue> = {};
+      const seen = new Set<string>();
+      for (const status of [...statuses()].sort((left, right) => left.id.localeCompare(right.id))) {
+        const id = nonEmptyString(status.id, "operator dashboard status id");
+        if (seen.has(id)) throw new Error(`Duplicate system status contribution: ${id}`);
+        seen.add(id);
+        const snapshot = await status.snapshot();
+        assertJsonValue(snapshot, `operator dashboard ${id}`);
+        sections[id] = { label: status.label, snapshot };
+      }
+      return { generatedAt: new Date().toISOString(), sections };
     },
   });
 }

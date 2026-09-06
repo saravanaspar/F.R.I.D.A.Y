@@ -6,6 +6,7 @@ import type {
   ChannelPrincipal,
   ChannelSendResult,
   ChannelProtectedAction,
+  ChannelProtectedQuestion,
   ChannelTarget,
   ChannelTransport,
   ChannelTransportStatus,
@@ -248,6 +249,22 @@ export class DiscordChannelTransport implements ChannelTransport {
           { type: 2, style: 3, label: action.approveLabel ?? "Approve", custom_id: `friday:${action.requestId}:approve` },
           { type: 2, style: 4, label: action.denyLabel ?? "Deny", custom_id: `friday:${action.requestId}:deny` },
         ] }],
+      },
+    });
+    return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze(result.id ? [result.id] : []) });
+  }
+
+  async sendProtectedQuestion(target: ChannelTarget, text: string, question: ChannelProtectedQuestion): Promise<ChannelSendResult> {
+    const result = await this.#api<{ id?: string }>(`/channels/${encodeURIComponent(target.conversationId)}/messages`, {
+      method: "POST",
+      body: {
+        content: text,
+        components: [{ type: 1, components: question.choices.map((choice, index) => ({
+          type: 2,
+          style: 2,
+          label: choice.label,
+          custom_id: `fridayq:${question.requestId}:${index}`,
+        })) }],
       },
     });
     return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze(result.id ? [result.id] : []) });
@@ -499,16 +516,20 @@ export class DiscordChannelTransport implements ChannelTransport {
     if (interaction.type !== 3 || !interaction.id || !interaction.token || !interaction.channel_id) return;
     const data = interaction.data?.custom_id ?? "";
     const match = /^friday:([0-9a-f-]{36}):(approve|deny)$/.exec(data);
+    const questionMatch = /^fridayq:([0-9a-f-]{36}):(\d)$/.exec(data);
     const user = interaction.member?.user ?? interaction.user;
-    if (!match || !user?.id || user.bot) return;
+    if ((!match && !questionMatch) || !user?.id || user.bot) return;
     const type = interaction.guild_id ? "group" as const : "dm" as const;
     const principal: ChannelPrincipal = { channel: this.channel, accountId: this.accountId, conversationId: interaction.channel_id, senderId: user.id };
     if (!channelPrincipalAllowed(principal, type, this.#config)) return;
-    const result = await this.#handler?.({ id: `interaction-${interaction.id}`, principal, chatType: type, text: "", timestamp: Date.now(), attachments: [], protectedAction: { requestId: match[1]!, decision: match[2] as "approve" | "deny" } });
-    const accepted = result?.classification === "approval-resolved";
+    const protectedAction = match
+      ? { requestId: match[1]!, decision: match[2] as "approve" | "deny" } as const
+      : { requestId: questionMatch![1]!, selection: Number(questionMatch![2]) } as const;
+    const result = await this.#handler?.({ id: `interaction-${interaction.id}`, principal, chatType: type, text: "", timestamp: Date.now(), attachments: [], protectedAction });
+    const accepted = result?.classification === (match ? "approval-resolved" : "prompt-resolved");
     await this.#api(`/interactions/${encodeURIComponent(interaction.id)}/${encodeURIComponent(interaction.token)}/callback`, {
       method: "POST",
-      body: { type: 4, data: { content: accepted ? (match[2] === "approve" ? "Approved." : "Denied.") : "This action is no longer valid.", flags: 64 } },
+      body: { type: 4, data: { content: accepted ? (match ? (match[2] === "approve" ? "Approved." : "Denied.") : "Answer recorded.") : "This action is no longer valid.", flags: 64 } },
     }).catch((error: unknown) => {
       reportOperationalError({ component: "channels.discord", operation: "acknowledge protected interaction", error, severity: "warn" });
     });

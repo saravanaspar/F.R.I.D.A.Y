@@ -65,10 +65,16 @@ describe("Turn Loop detached session jobs", () => {
       idFactory: () => "job-1234",
       resolveLabel: () => "PSCLS — brain",
       progressNotifyIntervalMs: 0,
+      finalizeNotification: async (_job, descriptors, context) => {
+        expect(descriptors).toEqual([{ type: "test.finalize", payload: { request: "m1" } }]);
+        expect(context).toEqual({ turnId: "m1", text: "work on PSCLS brain" });
+        finalized = true;
+      },
     });
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let executions = 0;
+    let finalized = false;
     const executor: TurnExecutor = {
       id: "agent-session",
       canHandle: () => true,
@@ -76,7 +82,10 @@ describe("Turn Loop detached session jobs", () => {
         executions += 1;
         await context.progress?.({ kind: "tool", message: "Running persistence tests" });
         await gate;
-        return { text: "PSCLS report complete", sessionId: "pscls-brain" };
+        return {
+          text: "PSCLS report complete", sessionId: "pscls-brain",
+          afterReplyFinalizers: [{ type: "test.finalize", payload: { request: "m1" } }],
+        };
       },
     };
     const routing: RoutingService = {
@@ -117,6 +126,7 @@ describe("Turn Loop detached session jobs", () => {
     await waitUntil(() => jobs.get("job-1234")?.status === "completed", "job completion");
     await waitUntil(() => replies.at(-1)?.includes("PSCLS report complete") === true, "completion notification");
     expect(replies.at(-1)).toContain("PSCLS report complete");
+    await waitUntil(() => finalized && jobs.get("job-1234")?.deliveryStatus === undefined, "durable finalizer forwarding");
     await jobs.close();
     await rm(root, { recursive: true, force: true });
   });

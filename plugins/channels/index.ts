@@ -9,7 +9,7 @@ import {
   type JsonValue,
 } from "../scheduler/contract.js";
 import { SYSTEM_STATUS_CONTRIBUTION } from "../system/contract.js";
-import { TURN_INGRESS_HOOK } from "../turn-loop/contract.js";
+import { AGENT_TOOL_CONTRIBUTION, TURN_INGRESS_HOOK, type AgentExtensionJsonValue } from "../turn-loop/contract.js";
 import { VAULT_CAPABILITY } from "../vault/contract.js";
 import { VAULT_TRUSTED_CAPABILITY } from "../vault/trusted-contract.js";
 import {
@@ -139,6 +139,20 @@ function scheduledString(value: JsonValue | undefined, label: string, maximum = 
   if (!normalized) throw new Error(`${label} must not be empty`);
   if (normalized.length > maximum) throw new Error(`${label} exceeds ${maximum} characters`);
   return normalized;
+}
+
+function questionOptions(value: AgentExtensionJsonValue | undefined): readonly { label: string; value: string; description?: string | undefined }[] {
+  if (value === undefined) return Object.freeze([]);
+  if (!Array.isArray(value) || value.length < 1 || value.length > 5) throw new Error("options must contain between 1 and 5 choices");
+  return Object.freeze(value.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error(`options[${index}] must be an object`);
+    const option = entry as Record<string, AgentExtensionJsonValue>;
+    const label = typeof option.label === "string" ? option.label.trim() : "";
+    const optionValue = typeof option.value === "string" ? option.value.trim() : "";
+    const description = typeof option.description === "string" ? option.description.trim() : undefined;
+    if (!label || !optionValue) throw new Error(`options[${index}] requires label and value`);
+    return { label, value: optionValue, ...(description ? { description } : {}) };
+  }));
 }
 
 function reminderPayload(value: JsonValue): {
@@ -418,6 +432,66 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
       watchCancellation: (request: Parameters<ChannelsTrustedService["watchCancellation"]>[0]) => hub.watchCancellation(request),
     });
 
+    ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+      id: "channels.ask-user",
+      name: "ask_user",
+      label: "Ask user",
+      description: "Ask the originating user one request-scoped question with selectable options and an optional custom answer. Use only when their choice is required to continue. Each question is correlated to its exact request and job.",
+      executionMode: "sequential",
+      parameters: Object.freeze({
+        type: "object",
+        properties: {
+          header: { type: "string", description: "Short heading that identifies the decision" },
+          question: { type: "string", description: "The concrete question to ask" },
+          notes: { type: "string", description: "Optional context or tradeoff notes" },
+          options: {
+            type: "array",
+            minItems: 1,
+            maxItems: 5,
+            items: {
+              type: "object",
+              properties: {
+                label: { type: "string" },
+                value: { type: "string" },
+                description: { type: "string" },
+              },
+              required: ["label", "value"],
+              additionalProperties: false,
+            },
+          },
+          allowCustom: { type: "boolean", description: "Whether the user may type an answer not listed in options" },
+        },
+        required: ["header", "question", "options"],
+        additionalProperties: false,
+      }),
+      async execute(input, signal, context) {
+        signal?.throwIfAborted();
+        const turn = context?.turn;
+        if (!turn || turn.principal.authority !== "channel") throw new Error("ask_user requires an originating channel conversation");
+        const header = typeof input.header === "string" ? input.header.trim() : "";
+        const question = typeof input.question === "string" ? input.question.trim() : "";
+        const notes = typeof input.notes === "string" ? input.notes.trim() : undefined;
+        if (!header || !question) throw new Error("header and question are required");
+        const answer = await hub.requestPrompt({
+          principal: {
+            channel: turn.principal.channel,
+            accountId: turn.principal.accountId,
+            conversationId: turn.principal.conversationId,
+            senderId: turn.principal.senderId,
+            ...(turn.principal.threadId === undefined ? {} : { threadId: turn.principal.threadId }),
+          },
+          title: header,
+          message: question,
+          ...(notes ? { notes } : {}),
+          options: questionOptions(input.options),
+          allowCustom: input.allowCustom !== false,
+          ...(context?.jobId === undefined ? {} : { jobId: context.jobId }),
+        });
+        signal?.throwIfAborted();
+        return { output: { answer, ...(context?.jobId === undefined ? {} : { jobId: context.jobId }) } };
+      },
+    });
+
     ctx.contribute(SCHEDULED_ACTION_CONTRIBUTION, {
       id: "channels.reminder",
       label: "Reminder to this conversation",
@@ -459,7 +533,29 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
     ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
       id: "channels",
       label: "Channels",
-      snapshot: () => safe.status() as unknown as JsonValue,
+      snapshot: () => ({
+        ...(safe.status() as unknown as Record<string, JsonValue>),
+        pendingInteractions: {
+          approvals: hub.pendingApprovals().map((entry) => ({
+            requestId: entry.id,
+            code: entry.code,
+            ...(entry.jobId === undefined ? {} : { jobId: entry.jobId }),
+            actionId: entry.actionId,
+            effect: entry.effect,
+            resource: entry.resource,
+            expiresAt: new Date(entry.expiresAt).toISOString(),
+          })),
+          questions: hub.pendingPrompts().map((entry) => ({
+            requestId: entry.id,
+            code: entry.code,
+            ...(entry.jobId === undefined ? {} : { jobId: entry.jobId }),
+            title: entry.title,
+            question: entry.message,
+            choices: entry.options.map((option) => option.label),
+            expiresAt: new Date(entry.expiresAt).toISOString(),
+          })),
+        },
+      }),
     });
 
     ctx.effect(() => hub.stopAll());

@@ -154,6 +154,7 @@ export interface ModelUsageQuery {
   provider?: string | undefined;
   model?: string | undefined;
   sessionId?: string | undefined;
+  rootSessionId?: string | undefined;
   agentId?: string | undefined;
   jobId?: string | undefined;
   limit?: number | undefined;
@@ -171,6 +172,9 @@ export interface ModelUsageTotals {
   actualCostRecords: number;
   estimatedCost: number;
   estimatedCostRecords: number;
+  /** Actual cost when present, otherwise catalog estimate, counted once per request. */
+  billableCost: number;
+  billableCostRecords: number;
   currency: string;
 }
 

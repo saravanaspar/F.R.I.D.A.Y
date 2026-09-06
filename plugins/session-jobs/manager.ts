@@ -4,6 +4,7 @@ import { lstat, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { EventsService } from "../events/contract.js";
 import type {
+  SessionJobFinalizerDescriptor,
   SessionJobListOptions,
   SessionJobProgress,
   SessionJobRecord,
@@ -25,9 +26,17 @@ const MAX_STATUS = 512;
 const DEFAULT_PROGRESS_NOTIFY_MS = 30_000;
 const DEFAULT_QUIESCE_TIMEOUT_MS = 20_000;
 
+interface PendingNotification {
+  text: string;
+  delivered: boolean;
+  requiresFinalization: boolean;
+  finalizers: readonly SessionJobFinalizerDescriptor[];
+}
+
 type MutableJob = {
   id: string;
   sourceKey?: string;
+  turnId?: string;
   destinationId: string;
   sessionId?: string;
   label: string;
@@ -45,6 +54,7 @@ type MutableJob = {
   retryMax?: number;
   error?: string;
   resultPreview?: string;
+  notification?: PendingNotification;
   timeline: SessionJobTimelineEntry[];
 };
 
@@ -71,6 +81,7 @@ export interface SessionJobManagerOptions {
   /** Successors inspect persisted state without mutating it until takeover release. */
   readonly recoverInterrupted?: boolean | undefined;
   readonly startSuspended?: boolean | undefined;
+  readonly finalizeNotification?: ((job: SessionJobRecord, finalizers: readonly SessionJobFinalizerDescriptor[], context: { turnId: string; text: string }) => Promise<void>) | undefined;
 }
 
 function clip(value: string, maximum: number): string {
@@ -81,6 +92,7 @@ function clip(value: string, maximum: number): string {
 function cloneMutable(job: MutableJob): MutableJob {
   return {
     ...job,
+    ...(job.notification ? { notification: structuredClone(job.notification) } : {}),
     origin: { ...job.origin },
     timeline: job.timeline.map((entry) => ({ ...entry })),
   };
@@ -88,9 +100,10 @@ function cloneMutable(job: MutableJob): MutableJob {
 
 function clone(job: MutableJob): SessionJobRecord {
   const snapshot = cloneMutable(job);
-  const { requestText: _privateRequestText, ...publicSnapshot } = snapshot;
+  const { requestText: _privateRequestText, notification, turnId: _turnId, ...publicSnapshot } = snapshot;
   return Object.freeze({
     ...publicSnapshot,
+    ...(notification ? { deliveryStatus: notification.delivered ? "finalizing" as const : "pending" as const } : {}),
     origin: Object.freeze(publicSnapshot.origin),
     timeline: Object.freeze(publicSnapshot.timeline.map((entry) => Object.freeze(entry))),
   });
@@ -98,6 +111,26 @@ function clone(job: MutableJob): SessionJobRecord {
 
 function isActive(status: SessionJobRecord["status"]): boolean {
   return status === "queued" || status === "running" || status === "retrying";
+}
+
+function needsRetention(job: MutableJob): boolean {
+  return isActive(job.status) || job.notification !== undefined;
+}
+
+function parseNotification(value: unknown): PendingNotification {
+  const raw = record(value);
+  if (!raw || typeof raw.delivered !== "boolean" || typeof raw.requiresFinalization !== "boolean"
+    || !Array.isArray(raw.finalizers) || raw.finalizers.length > 64) throw new Error("Session-job notification is invalid");
+  const text = persistedString(raw, "text", 128_000)!;
+  const finalizers = raw.finalizers.map((value) => {
+    const descriptor = record(value);
+    if (!descriptor || typeof descriptor.type !== "string" || !/^[a-z][a-z0-9.-]{0,127}$/.test(descriptor.type)
+      || !("payload" in descriptor)) throw new Error("Session-job notification finalizer is invalid");
+    // Round-trip only bounded, JSON-safe descriptors; the owning finalizer validates its payload.
+    const payload = JSON.parse(JSON.stringify(descriptor.payload)) as SessionJobFinalizerDescriptor["payload"];
+    return { type: descriptor.type, payload };
+  });
+  return { text, delivered: raw.delivered, requiresFinalization: raw.requiresFinalization, finalizers };
 }
 
 function selectorText(value: string): string {
@@ -191,6 +224,7 @@ function parsePersistedJob(value: unknown): MutableJob {
   return {
     id: persistedString(raw, "id", 96)!,
     ...(raw.sourceKey === undefined ? {} : { sourceKey: persistedString(raw, "sourceKey", 256)! }),
+    ...(raw.turnId === undefined ? {} : { turnId: persistedString(raw, "turnId", 256)! }),
     destinationId: persistedString(raw, "destinationId", 256)!,
     ...(raw.sessionId === undefined ? {} : { sessionId: persistedString(raw, "sessionId", 256)! }),
     label: persistedString(raw, "label", 160)!,
@@ -207,6 +241,7 @@ function parsePersistedJob(value: unknown): MutableJob {
     ...(raw.retryMax === undefined ? {} : { retryMax: persistedPositiveInteger(raw, "retryMax")! }),
     ...(raw.error === undefined ? {} : { error: persistedString(raw, "error", MAX_STATUS)! }),
     ...(raw.resultPreview === undefined ? {} : { resultPreview: persistedString(raw, "resultPreview", MAX_PREVIEW)! }),
+    ...(raw.notification === undefined ? {} : { notification: parseNotification(raw.notification) }),
     timeline: parseTimeline(raw.timeline),
   };
 }
@@ -279,11 +314,16 @@ export class SessionJobManager implements SessionJobsService {
     readonly quiesceTimeoutMs: number;
     readonly now: () => number;
     readonly idFactory: () => string;
+    readonly finalizeNotification?: SessionJobManagerOptions["finalizeNotification"];
   };
   private readonly jobs = new Map<string, MutableJob>();
   private readonly store: SessionJobStore<MutableJob>;
   private readonly active = new Map<string, ActiveRun>();
   private readonly queues = new Map<string, Promise<void>>();
+  private readonly deliveryQueues = new Map<string, Promise<void>>();
+  private readonly notificationSends = new Set<Promise<void>>();
+  private readonly notificationFinalizers = new Map<string, () => void | Promise<void>>();
+  private readonly deferredFinalizers = new Map<string, NodeJS.Immediate>();
   private persistTail: Promise<void> = Promise.resolve();
   private admissionTail: Promise<void> = Promise.resolve();
   private closed = false;
@@ -321,7 +361,7 @@ export class SessionJobManager implements SessionJobsService {
       stateDir,
       maxRecords: MAX_RECORDS,
       maxActiveRecords: MAX_ACTIVE_JOBS,
-      isActive,
+      isActive: needsRetention,
       parse: parsePersistedJob,
       loadLegacy: async (path) => (await loadLegacyState(path)).jobs,
     });
@@ -378,7 +418,7 @@ export class SessionJobManager implements SessionJobsService {
       const existing = [...this.jobs.values()].find((job) => job.sourceKey === sourceKey);
       if (existing) return clone(existing);
     }
-    const activeCount = [...this.jobs.values()].filter((job) => isActive(job.status)).length;
+    const activeCount = [...this.jobs.values()].filter(needsRetention).length;
     if (activeCount >= MAX_ACTIVE_JOBS) {
       throw new Error(`session-jobs active job limit reached (${MAX_ACTIVE_JOBS})`);
     }
@@ -388,7 +428,7 @@ export class SessionJobManager implements SessionJobsService {
     if (!id || this.jobs.has(id)) throw new Error(`session job id is unavailable: ${id || "empty"}`);
     const createdAt = new Date(Number.isFinite(request.timestamp) ? request.timestamp : this.options.now()).toISOString();
     const label = clip(await this.options.resolveLabel?.(destinationId, request.text, request.origin) ?? defaultLabel(destinationId, request.text), 160);
-    const activeAfterLabelResolution = [...this.jobs.values()].filter((job) => isActive(job.status)).length;
+    const activeAfterLabelResolution = [...this.jobs.values()].filter(needsRetention).length;
     if (activeAfterLabelResolution >= MAX_ACTIVE_JOBS) {
       throw new Error(`session-jobs active job limit reached (${MAX_ACTIVE_JOBS})`);
     }
@@ -397,6 +437,7 @@ export class SessionJobManager implements SessionJobsService {
     const job: MutableJob = {
       id,
       ...(sourceKey === undefined ? {} : { sourceKey }),
+      ...(request.turnId === undefined ? {} : { turnId: clip(request.turnId, 256) }),
       destinationId,
       ...(destinationId.startsWith("session:") && destinationId !== "session:new"
         ? { sessionId: destinationId.slice("session:".length) }
@@ -504,6 +545,8 @@ export class SessionJobManager implements SessionJobsService {
       return;
     }
     this.closed = true;
+    for (const handle of this.deferredFinalizers.values()) clearImmediate(handle);
+    this.deferredFinalizers.clear();
     const changed: MutableJob[] = [];
     for (const [id, run] of this.active) {
       if (!run.settled) run.controller.abort("FRIDAY session-jobs manager is shutting down");
@@ -532,6 +575,7 @@ export class SessionJobManager implements SessionJobsService {
     const completions = [...this.active.values()]
       .map((run) => run.completion)
       .filter((completion): completion is Promise<void> => completion !== undefined);
+    completions.push(...this.notificationSends);
     if (completions.length > 0) {
       let timer: NodeJS.Timeout | undefined;
       try {
@@ -623,6 +667,69 @@ export class SessionJobManager implements SessionJobsService {
     return clone(job);
   }
 
+  /** Host-only outbox access. Reply bodies never enter public job lists or Events. */
+  pendingDeliveries(): readonly SessionJobRecord[] {
+    return Object.freeze([...this.jobs.values()].filter((job) => job.notification !== undefined).map(clone));
+  }
+
+  async deliverPending(jobId: string, notify: (text: string) => Promise<void>, deferFinalization = false): Promise<void> {
+    return queueSerial(this.deliveryQueues, jobId, async () => {
+      if (this.closed || this.databaseClosed) throw new Error("session-jobs delivery is suspended");
+      const job = this.jobs.get(jobId);
+      if (!job?.notification) return;
+      if (!job.notification.delivered) {
+        const text = job.notification.text;
+        const sending = Promise.resolve().then(() => notify(text));
+        this.notificationSends.add(sending);
+        try {
+          await sending;
+        } finally {
+          this.notificationSends.delete(sending);
+        }
+        if (this.closed || this.databaseClosed) throw new Error("session-jobs delivery suspended before acknowledgement");
+        const delivered = cloneMutable(job);
+        delivered.notification!.delivered = true;
+        await this.persist([delivered]);
+        Object.assign(job, delivered);
+      }
+      if (job.notification!.requiresFinalization) {
+        if (deferFinalization) {
+          // Release the Events delivery before a handoff can quiesce Events itself.
+          // The acknowledged reply and unfinished continuation remain durable.
+          if (!this.deferredFinalizers.has(jobId)) {
+            this.deferredFinalizers.set(jobId, setImmediate(() => {
+              this.deferredFinalizers.delete(jobId);
+              if (this.closed) return;
+              void this.deliverPending(jobId, notify).catch((error: unknown) => {
+                reportOperationalError({ component: "session-jobs", operation: `finalize delivered background job ${jobId}`, error });
+              });
+            }));
+          }
+          return;
+        }
+        const callback = this.notificationFinalizers.get(jobId);
+        if (callback) await callback();
+        else {
+          if (!this.options.finalizeNotification || job.notification!.finalizers.length === 0) {
+            throw new Error("Required background-job continuation cannot be reconstructed after restart");
+          }
+          await this.options.finalizeNotification(clone(job), structuredClone(job.notification!.finalizers), {
+            turnId: job.turnId ?? job.id,
+            text: job.requestText ?? job.requestPreview,
+          });
+        }
+      }
+      const finalized = cloneMutable(job);
+      delete finalized.notification;
+      delete finalized.requestText;
+      await this.persist([finalized]);
+      Object.assign(job, finalized);
+      delete job.notification;
+      delete job.requestText;
+      this.notificationFinalizers.delete(jobId);
+    });
+  }
+
   async close(): Promise<void> {
     if (this.databaseClosed) return;
     const errors: Error[] = [];
@@ -650,7 +757,7 @@ export class SessionJobManager implements SessionJobsService {
       this.active.delete(job.id);
       return;
     }
-    let afterNotify: (() => void | Promise<void>) | undefined;
+    let notificationReady = false;
     try {
       const wasQueued = job.currentStatus?.startsWith("Queued") === true;
       const startedAt = new Date(this.options.now()).toISOString();
@@ -678,13 +785,19 @@ export class SessionJobManager implements SessionJobsService {
       completed.resultPreview = clip(result.text, MAX_PREVIEW);
       completed.completedAt = completedAt;
       completed.updatedAt = completedAt;
-      delete completed.requestText;
+      completed.notification = parseNotification({
+        text: clip([`Completed ${job.label} (${job.id}).`, "", result.text].join("\n"), 128_000),
+        delivered: false,
+        requiresFinalization: result.afterNotify !== undefined || (result.afterNotifyFinalizers?.length ?? 0) > 0,
+        finalizers: result.afterNotifyFinalizers ?? [],
+      });
+      if (!completed.notification.requiresFinalization) delete completed.requestText;
       await this.persist([completed]);
       Object.assign(job, completed);
-      delete job.requestText;
+      if (completed.requestText === undefined) delete job.requestText;
+      if (result.afterNotify) this.notificationFinalizers.set(job.id, result.afterNotify);
+      notificationReady = true;
       this.publish("session-job.completed", job);
-      await this.safeNotify(run.request.notify, [`Completed ${job.label} (${job.id}).`, "", result.text].join("\n"));
-      afterNotify = result.afterNotify;
     } catch (error) {
       if (run.controller.signal.aborted || !isActive(job.status)) return;
       const completedAt = new Date(this.options.now()).toISOString();
@@ -695,11 +808,18 @@ export class SessionJobManager implements SessionJobsService {
       failed.completedAt = completedAt;
       failed.updatedAt = completedAt;
       delete failed.requestText;
+      failed.notification = {
+        text: [`${job.label} (${job.id}) failed.`, `Reason: ${failed.error}`, "The session and any work already persisted are preserved."].join("\n"),
+        delivered: false,
+        requiresFinalization: false,
+        finalizers: [],
+      };
       let terminalPersistenceError: unknown;
       try {
         await this.persist([failed]);
         Object.assign(job, failed);
         delete job.requestText;
+        notificationReady = true;
       } catch (persistError) {
         terminalPersistenceError = persistError;
         // Reflect that execution has stopped without pretending the terminal state is
@@ -707,7 +827,7 @@ export class SessionJobManager implements SessionJobsService {
         Object.assign(job, failed, { currentStatus: "Failed; terminal persistence unavailable" });
       }
       this.publish("session-job.failed", job);
-      await this.safeNotify(run.request.notify, [
+      if (terminalPersistenceError !== undefined) await this.safeNotify(run.request.notify, [
         `${job.label} (${job.id}) failed.`,
         `Reason: ${job.error}`,
         ...(terminalPersistenceError === undefined ? [] : ["The terminal job record could not be persisted; the failure was logged and restart recovery will reconcile the durable record."]),
@@ -725,15 +845,16 @@ export class SessionJobManager implements SessionJobsService {
     // A post-notify continuation (notably verified self-improvement handoff) may
     // quiesce Session Jobs itself. Release this job's active ownership first so
     // the continuation can never deadlock waiting for the run that invoked it.
-    if (afterNotify) {
+    if (notificationReady) {
       try {
-        await afterNotify();
+        await this.deliverPending(job.id, run.request.notify);
       } catch (error) {
-        reportOperationalError({ component: "session-jobs", operation: `run post-notify continuation for ${job.id}`, error });
-        await this.safeNotify(
+        reportOperationalError({ component: "session-jobs", operation: `deliver background-job result or continuation for ${job.id}`, error });
+        if (job.notification?.delivered) await this.safeNotify(
           run.request.notify,
           `${job.label} (${job.id}) completed, but its post-completion continuation failed: ${errorMessage(error)}`,
         );
+        this.publish("session-job.delivery-requested", job);
       }
     }
   }

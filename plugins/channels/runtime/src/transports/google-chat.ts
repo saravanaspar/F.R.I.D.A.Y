@@ -5,6 +5,7 @@ import type {
   ChannelPrincipal,
   ChannelSendResult,
   ChannelProtectedAction,
+  ChannelProtectedQuestion,
   RawChannelInboundMessage,
   ChannelTarget,
   ChannelTransport,
@@ -161,6 +162,18 @@ export class GoogleChatChannelTransport implements ChannelTransport {
     return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze(payload.name ? [payload.name] : []) });
   }
 
+  async sendProtectedQuestion(target: ChannelTarget, text: string, question: ChannelProtectedQuestion): Promise<ChannelSendResult> {
+    const space = validateSpaceName(target.conversationId);
+    const token = await this.#accessToken();
+    const response = await fetchWithTimeout(this.#fetch, `${this.#config.chatApiBaseUrl?.replace(/\/$/, "") || "https://chat.googleapis.com/v1"}/${space}/messages`, {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ text, cardsV2: [{ cardId: `friday-${question.requestId}`, card: { sections: [{ widgets: [{ buttonList: { buttons: question.choices.map((choice, index) => ({ text: choice.label, onClick: { action: { function: "fridayProtectedQuestion", parameters: [{ key: "requestId", value: question.requestId }, { key: "selection", value: String(index) }] } } })) } }] }] } }], ...(target.threadId === undefined ? {} : { thread: { name: target.threadId } }) }),
+    });
+    const payload = await response.json() as { name?: string };
+    if (!response.ok) throw new Error(`Google Chat send failed with status ${response.status}`);
+    return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze(payload.name ? [payload.name] : []) });
+  }
+
   async #handleEvent(event: GoogleChatEvent): Promise<void> {
     if (!this.#handler) return;
     const eventType = event.type ?? event.eventType;
@@ -179,12 +192,17 @@ export class GoogleChatChannelTransport implements ChannelTransport {
     const currentAction = common?.invokedFunction === "fridayProtectedAction"
       ? { requestId: common.parameters?.requestId, decision: common.parameters?.decision }
       : undefined;
+    const currentQuestion = common?.invokedFunction === "fridayProtectedQuestion"
+      ? { requestId: common.parameters?.requestId, selection: common.parameters?.selection }
+      : undefined;
     const legacyMatch = /^friday:([0-9a-f-]{36}):(approve|deny)$/.exec(event.action?.actionMethodName ?? "");
     const requestId = currentAction?.requestId ?? legacyMatch?.[1];
     const decision = currentAction?.decision ?? legacyMatch?.[2];
     const protectedAction: RawChannelInboundMessage["protectedAction"] = requestId && /^[0-9a-f-]{36}$/.test(requestId) && (decision === "approve" || decision === "deny")
       ? { requestId, decision }
-      : undefined;
+      : currentQuestion?.requestId && /^[0-9a-f-]{36}$/.test(currentQuestion.requestId) && /^[0-4]$/.test(currentQuestion.selection ?? "")
+        ? { requestId: currentQuestion.requestId, selection: Number(currentQuestion.selection) }
+        : undefined;
     const hasUnsupportedAttachment = (message.attachment?.length ?? 0) > 0;
     const text = [(message.argumentText ?? message.text ?? "").trim(), hasUnsupportedAttachment ? "[attachment received; Google Chat media retrieval is not enabled]" : ""].filter(Boolean).join("\n");
     if (eventType === "CARD_CLICKED" && !protectedAction) return;

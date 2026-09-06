@@ -82,7 +82,10 @@ export interface RawChannelInboundMessage {
   readonly conversationName?: string | undefined;
   readonly replyToMessageId?: string | undefined;
   readonly attachments?: readonly ChannelAttachment[] | undefined;
-  readonly protectedAction?: { readonly requestId: string; readonly decision: "approve" | "deny" } | undefined;
+  readonly protectedAction?:
+    | { readonly requestId: string; readonly decision: "approve" | "deny" }
+    | { readonly requestId: string; readonly selection: number }
+    | undefined;
 }
 
 export interface ChannelTarget {
@@ -106,6 +109,18 @@ export interface ChannelProtectedAction {
   readonly requestId: string;
   readonly approveLabel?: string | undefined;
   readonly denyLabel?: string | undefined;
+}
+
+export interface ChannelProtectedChoice {
+  readonly label: string;
+}
+
+/** A provider-native, request-scoped question. The selected array index is
+ * returned with the authenticated callback, so identical labels or concurrent
+ * questions can never be confused. */
+export interface ChannelProtectedQuestion {
+  readonly requestId: string;
+  readonly choices: readonly ChannelProtectedChoice[];
 }
 
 export interface ChannelTransportStatus {
@@ -165,6 +180,7 @@ export interface ChannelTransport {
   stop(): Promise<void>;
   send(target: ChannelTarget, text: string): Promise<ChannelSendResult>;
   sendProtectedAction?(target: ChannelTarget, text: string, action: ChannelProtectedAction): Promise<ChannelSendResult>;
+  sendProtectedQuestion?(target: ChannelTarget, text: string, question: ChannelProtectedQuestion): Promise<ChannelSendResult>;
   /** Optional trusted fetch port for attachments previously emitted by this transport. */
   fetchAttachment?(attachment: ChannelAttachment, maxBytes: number): Promise<ChannelAttachmentContent>;
   /** Optional provider UI privacy control used while trusted credential capture is active. */
@@ -229,6 +245,8 @@ export interface ChannelApprovalRequest {
   readonly reason: string;
   /** True when the protected action requests outbound network access. */
   readonly network?: boolean | undefined;
+  /** Durable Session Jobs attribution shown to the operator. */
+  readonly jobId?: string | undefined;
   readonly ttlMs?: number | undefined;
 }
 
@@ -241,6 +259,7 @@ export interface PendingChannelApproval {
   readonly resource: string;
   readonly reason: string;
   readonly network: boolean;
+  readonly jobId?: string | undefined;
   readonly createdAt: number;
   readonly expiresAt: number;
 }
@@ -248,6 +267,16 @@ export interface PendingChannelApproval {
 export interface ChannelPromptRequest {
   readonly principal: ChannelPrincipal;
   readonly message: string;
+  readonly title?: string | undefined;
+  readonly notes?: string | undefined;
+  readonly options?: readonly {
+    readonly label: string;
+    readonly value: string;
+    readonly description?: string | undefined;
+  }[] | undefined;
+  readonly allowCustom?: boolean | undefined;
+  /** Durable Session Jobs attribution shown to the operator. */
+  readonly jobId?: string | undefined;
   readonly placeholder?: string | undefined;
   readonly allowEmpty?: boolean | undefined;
   readonly maxLength?: number | undefined;
@@ -256,8 +285,18 @@ export interface ChannelPromptRequest {
 
 export interface PendingChannelPrompt {
   readonly id: string;
+  readonly code: string;
   readonly principal: ChannelPrincipal;
   readonly message: string;
+  readonly title: string;
+  readonly notes?: string | undefined;
+  readonly options: readonly {
+    readonly label: string;
+    readonly value: string;
+    readonly description?: string | undefined;
+  }[];
+  readonly allowCustom: boolean;
+  readonly jobId?: string | undefined;
   readonly createdAt: number;
   readonly expiresAt: number;
 }
