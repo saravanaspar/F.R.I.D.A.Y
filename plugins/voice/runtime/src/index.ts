@@ -117,7 +117,7 @@ export const LOCAL_STT_CATALOG = Object.freeze([
 ] as const);
 
 export const LOCAL_TTS_CATALOG = Object.freeze([
-  Object.freeze({ id: "chatterbox-nano", label: "Chatterbox Nano 110M", ram: "~0.8-1.0 GB target; host-dependent", cloning: true, expression: true, accuracy: "best expressiveness / clone" }),
+  Object.freeze({ id: "chatterbox-nano", label: "Chatterbox Nano 110M", ram: "~0.8-1.0 GB target; host-dependent", cloning: true, expression: true, accuracy: "best expressiveness / clone · ~1.94 GB required model assets" }),
   Object.freeze({ id: "kitten-nano-int8", label: "KittenTTS Nano int8 15M", ram: "well under 500 MB target", cloning: false, expression: false, accuracy: "tiny / efficient" }),
   Object.freeze({ id: "piper", label: "Piper", ram: "typically under 500 MB target", cloning: false, expression: false, accuracy: "fast / robust / Pi-friendly" }),
 ] as const);

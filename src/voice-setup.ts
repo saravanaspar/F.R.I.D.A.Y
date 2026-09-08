@@ -161,7 +161,7 @@ async function chooseTts(io: OnboardingIO, existing: VoiceSettings | undefined, 
     showInfo(io, "No usable NVIDIA CUDA GPU was detected; Chatterbox will use CPU-only PyTorch.");
   }
 
-  showInfo(io, "Chatterbox Nano supports zero-shot voice cloning plus FRIDAY expression intents such as laugh, chuckle, sigh, angry/annoyed cues, tsundere, gasp, groan, and tsk. Voice identity stays separate from expression. Use a clean reference clip longer than 5 seconds for cloning. Its 110M model targets the 0.8–1.0 GB class, but Python/PyTorch overhead can make peak RSS host-dependent.");
+  showInfo(io, "Chatterbox Nano supports zero-shot voice cloning plus FRIDAY expression intents such as laugh, chuckle, sigh, angry/annoyed cues, tsundere, gasp, groan, and tsk. Voice identity stays separate from expression. Use a clean reference clip longer than 5 seconds for cloning. Its 110M model targets the 0.8–1.0 GB class, but Python/PyTorch overhead can make peak RSS host-dependent. The official Nano deployment needs about 1.94 GB of model assets; FRIDAY downloads only the exact required files and excludes the unused 1.06 GB s3gen checkpoint.");
   const existingReference = existing?.tts?.provider === "local" && existing.tts.model === model ? existing.tts.referenceAudio : undefined;
   const referenceInput = (await text(io, "Optional reference voice clip path (leave blank for default voice)", existingReference)).trim();
   if (!referenceInput) return Object.freeze({ provider, model, voice, format: "wav" as const, compute });
