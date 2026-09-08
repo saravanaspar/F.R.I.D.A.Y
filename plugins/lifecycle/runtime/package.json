@@ -1,6 +1,6 @@
 {
   "name": "@friday/lifecycle",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "FRIDAY process replacement lifecycle and restart readiness coordination",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,7 +20,7 @@
     "test": "vitest run --config vitest.config.ts --configLoader runner --no-cache"
   },
   "dependencies": {
-    "@friday/operational-errors": "1.0.1"
+    "@friday/operational-errors": "1.0.2"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",

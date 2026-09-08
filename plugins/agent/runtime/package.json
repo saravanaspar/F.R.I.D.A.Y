@@ -1,6 +1,6 @@
 {
   "name": "@friday/agent",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "FRIDAY generic agent loop and agent state",
   "type": "module",
   "main": "./dist/index.js",
@@ -28,7 +28,7 @@
     "test": "vitest run --config vitest.config.ts --configLoader runner --no-cache"
   },
   "dependencies": {
-    "@friday/operational-errors": "1.0.1",
+    "@friday/operational-errors": "1.0.2",
     "typebox": "^1.3.9"
   },
   "license": "MIT",
