@@ -17,7 +17,6 @@ describe("evaluation plugin", () => {
     await friday.activatePlugin(sessionResourcesPlugin);
     await friday.activatePlugin(executionPlugin);
     provideCapability(SANDBOX_CAPABILITY, {
-      sandboxKind: "podman",
       image: "test",
       assertAvailable() {},
       registerTrustedReadOnlyMount() { return () => {}; },

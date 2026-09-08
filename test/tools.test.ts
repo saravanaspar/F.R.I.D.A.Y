@@ -36,7 +36,6 @@ describe("tools plugin", () => {
     });
     provideCapability(PERMISSIONS_CAPABILITY, permissionController.permissions);
     provideCapability(SANDBOX_CAPABILITY, {
-      sandboxKind: "podman",
       image: "test",
       assertAvailable() {},
       registerTrustedReadOnlyMount() { return () => {}; },

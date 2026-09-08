@@ -123,6 +123,7 @@ async function runHelper(
   });
   const result = await execution.execCommand(context.command, context.args, context.cwd, {
     env: context.env,
+    replaceEnv: true,
     timeout: EDIT_COMMAND_TIMEOUT_MS,
     maxOutputBytes: MAX_EDIT_COMMAND_OUTPUT_BYTES,
     ...(input === undefined ? {} : { stdin: input }),

@@ -62,8 +62,8 @@ key; recovery validates existing records before replacing a key.
 ### Distribution is host-native
 
 The release builder produces one Node SEA executable per operating system/CPU,
-embedding FRIDAY code, native ZeroMQ support and required runtime assets. Podman,
-Python environments and integration-specific services remain explicit host
+embedding FRIDAY code, native ZeroMQ support and required runtime assets. The selected
+sandbox provider, Python environments and integration-specific services remain explicit host
 dependencies because silently installing privileged system software would break
 the authorization boundary.
 

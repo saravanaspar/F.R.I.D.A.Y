@@ -53,7 +53,7 @@ You can talk to the same assistant from a configured messaging channel, give it 
 | Skills | Installs and creates reusable skills that can be surfaced to the agent when relevant. |
 | MCP and integrations | Connects external tools and services through permission-gated capability boundaries. |
 | Secure secrets | Stores credentials in an encrypted Vault instead of plaintext runtime configuration. |
-| Sandboxed execution | Supports rootless Podman isolation and a private Python execution environment. |
+| Sandboxed execution | Uses a pluggable sandbox-provider contract; kern is the built-in default, while other providers can be registered without changing tools or execution policy. |
 | Crash recovery | Writes secret-redacted crash records and supports supervised automatic restart. |
 | Self-extension | Can feasibility-check, build, evaluate, promote, restart, and resume after adding a missing software capability. |
 
@@ -191,7 +191,7 @@ The core assistant does not silently install privileged host software. Enable on
 | Capability | Host requirement | Notes |
 | --- | --- | --- |
 | Private execution Python | `uv` **or** Python 3.11 | Provision with `friday setup execution-python`; the environment pins the kernel dependencies exactly. |
-| Rootless coding sandbox | Rootless Podman | Build the local image with `friday setup sandbox`. Sandbox internet is blocked by default and network-bearing commands require an explicit request/permission approval. |
+| Coding sandbox | Configured SandboxProvider (kern built in) | Install the selected provider, then run `friday setup sandbox`; see [`docs/SANDBOX.md`](docs/SANDBOX.md). Sandbox internet is blocked by default and network-bearing commands require an explicit request/permission approval. |
 | Self-improvement from source | Git + npm + a clean F.R.I.D.A.Y checkout | Save the canonical checkout with `friday setup self-repository /path/to/F.R.I.D.A.Y`. Release-binary self-improvement builds, verifies, stages, and hands off to a new host-native binary before activation. |
 | WhatsApp bridge | npm/Node tooling | Provision bridge dependencies with `friday setup whatsapp`. |
 | Voice | Provider API access | Configure and preflight STT/TTS with `friday setup voice`. OpenAI reuses the canonical model-provider Vault credential; Deepgram and ElevenLabs keys are stored in Voice-owned Vault refs. |
@@ -268,7 +268,7 @@ The key design rule is separation of authority: model-facing plugins do not auto
 - **Memory** - SQLite hybrid search plus bounded preference/relationship memory.
 - **Scheduler** - durable one-shot and recurring work with leases and retries.
 - **Channels** - trusted ingress/egress adapters and protected interactions.
-- **Execution / Sandbox** - process supervision, Python kernel execution, and rootless isolation.
+- **Execution / Sandbox** - process supervision, Python kernel execution, and provider-enforced isolation.
 - **Vault** - authenticated encrypted secret persistence.
 - **Permissions** - effect-aware authorization for reads, writes, credentials, network, and system changes.
 - **Self Improvement** - reuse-first action/tool/capability feasibility with MCP as an external-integration placement, candidate worktrees only when code is needed, evaluation, generations, promotion, rollback, and verified restart handoff.
@@ -345,7 +345,7 @@ F.R.I.D.A.Y is built around explicit trust boundaries rather than assuming the m
 - Vault secrets are encrypted at rest and model-facing code does not receive raw master-key access.
 - Channel principals carry trusted identity metadata separate from model text.
 - Permissions classify effects such as external reads/writes, credential writes, and system mutations.
-- Rootless sandbox execution is available for model-generated work; outbound internet is **off by default** and a command must explicitly request network access, which then follows the normal permission/approval path back to the originating trusted channel.
+- The configured sandbox provider isolates model-generated work; outbound internet is **off by default** and a command must explicitly request network access, which then follows the normal permission/approval path back to the originating trusted channel. FRIDAY never silently falls back to unsandboxed execution.
 - Session, scheduler, job, generation, and event persistence fail closed on malformed or unsafe state in security-sensitive paths.
 - Audit and observability are separated from execution authority.
 

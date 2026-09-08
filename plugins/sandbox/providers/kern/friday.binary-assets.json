@@ -3,7 +3,7 @@
   "assets": [
     {
       "source": "Containerfile",
-      "target": "sandbox/Containerfile",
+      "target": "sandbox/providers/kern/Containerfile",
       "role": "sandbox-containerfile",
       "context": "."
     }

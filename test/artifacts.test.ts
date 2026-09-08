@@ -77,7 +77,6 @@ async function assemble(
   }), { defer: true });
   await friday.activatePlugin(definePlugin({ id: "test-artifact-sandbox", provides: [SANDBOX_CAPABILITY] }, (ctx) => {
     ctx.services.provide(SANDBOX_CAPABILITY, {
-      sandboxKind: "podman",
       image: "test",
       assertAvailable() {},
       registerTrustedReadOnlyMount: () => () => undefined,

@@ -33,7 +33,6 @@ describe("autonomy plugin", () => {
     provideCapability(TOOLS_CAPABILITY, {} as never);
     const sandboxProcessRequests: SandboxProcessRequest[] = [];
     provideCapability(SANDBOX_CAPABILITY, {
-      sandboxKind: "podman",
       image: "test",
       assertAvailable() {},
       registerTrustedReadOnlyMount() { return () => {}; },

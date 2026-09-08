@@ -39,7 +39,7 @@ friday doctor --fix
 | Installation | platform support, runtime mode, FRIDAY_HOME existence/privacy |
 | Configuration | model/runtime settings, durable model credential, optional Voice credentials, ingress channels, canonical self-improvement checkout |
 | Security | dedicated workspace/state isolation, permission mode, channel exposure, Vault metadata/key boundary, sandbox network policy |
-| Tooling | Git, npm, source Node pin, stable execution-Python tooling, WhatsApp sidecar readiness, rootless Podman sandbox |
+| Tooling | Git, npm, source Node pin, stable execution-Python tooling, WhatsApp sidecar readiness, configured sandbox provider |
 | Recovery | encrypted state backups, fatal crash records, free disk space |
 
 Each check has one of four levels:

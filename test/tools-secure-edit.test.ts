@@ -9,7 +9,6 @@ import { createSecureEditOperations } from "../plugins/tools/secure-edit.js";
 
 function directSandbox(): SandboxService {
   return {
-    sandboxKind: "podman",
     image: "test",
     assertAvailable() {},
     registerTrustedReadOnlyMount() {

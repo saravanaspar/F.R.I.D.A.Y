@@ -5,13 +5,9 @@
  * It is only intended for CLI use, not browser environments.
  */
 
-// NEVER convert to top-level imports - breaks browser/Vite builds
-let _randomBytes: typeof import("node:crypto").randomBytes | null = null;
+// NEVER convert node:http to a top-level import - breaks browser/Vite builds
 let _http: typeof import("node:http") | null = null;
 if (typeof process !== "undefined" && (process.versions?.node || process.versions?.bun)) {
-	import("node:crypto").then((m) => {
-		_randomBytes = m.randomBytes;
-	});
 	import("node:http").then((m) => {
 		_http = m;
 	});
@@ -21,8 +17,7 @@ import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.js";
 import { generatePKCE } from "./pkce.js";
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthPrompt, OAuthProviderInterface } from "./types.js";
 import { oauthFetch } from "./fetch.js";
-
-const CALLBACK_HOST = process.env.FRIDAY_OAUTH_CALLBACK_HOST || "127.0.0.1";
+import { createOAuthState, oauthCallbackHost } from "./security.js";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
@@ -40,13 +35,6 @@ type JwtPayload = {
 	};
 	[key: string]: unknown;
 };
-
-function createState(): string {
-	if (!_randomBytes) {
-		throw new Error("OpenAI Codex OAuth is only available in Node.js environments");
-	}
-	return _randomBytes(16).toString("hex");
-}
 
 function authorizationParts(
 	code: string | null | undefined,
@@ -222,11 +210,11 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResult> {
 	}
 }
 
-async function createAuthorizationFlow(
+export async function createAuthorizationFlow(
 	originator: string = "pi",
 ): Promise<{ verifier: string; state: string; url: string }> {
 	const { verifier, challenge } = await generatePKCE();
-	const state = createState();
+	const state = createOAuthState();
 
 	const url = new URL(AUTHORIZE_URL);
 	url.searchParams.set("response_type", "code");
@@ -299,7 +287,7 @@ function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
 
 	return new Promise((resolve) => {
 		server
-			.listen(1455, CALLBACK_HOST, () => {
+			.listen(1455, oauthCallbackHost(), () => {
 				resolve({
 					close: () => server.close(),
 					cancelWait: () => {

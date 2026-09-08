@@ -34,7 +34,7 @@ const toolsPlugin: FridayPlugin = definePlugin({ id: "tools", requires: [EXECUTI
     } catch (error) {
       reportOperationalError({
         component: "tools",
-        operation: "clean stale managed Podman processes",
+        operation: "clean stale managed sandbox processes",
         operationCode: "sandbox.stale-cleanup-failed",
         error,
         severity: "warn",

@@ -73,7 +73,7 @@ describe("workspace and binary packaging discovery", () => {
   it("collects embedded runtime files from owner manifests with layout-independent targets", async () => {
     const assets = runJson("scripts/binary-assets.mjs", ["list", "--json"]) as AssetRecord[];
     expect(assets).toEqual(expect.arrayContaining([
-      expect.objectContaining({ target: "sandbox/Containerfile", role: "sandbox-containerfile", context: "plugins/sandbox" }),
+      expect.objectContaining({ target: "sandbox/providers/kern/Containerfile", role: "sandbox-containerfile", context: "plugins/sandbox/providers/kern" }),
       expect.objectContaining({ target: "channels/email/email_bridge.py" }),
       expect.objectContaining({ target: "channels/whatsapp/bridge.mjs" }),
       expect.objectContaining({ target: "rlm/python/rlm/__init__.py" }),
@@ -84,18 +84,17 @@ describe("workspace and binary packaging discovery", () => {
 
   it("keeps bundled-runtime consumers on the stable logical asset targets", async () => {
     const [sandbox, email, whatsapp, rlm, setup] = await Promise.all([
-      readFile("plugins/sandbox/podman.ts", "utf8"),
+      readFile("plugins/sandbox/providers/kern/index.ts", "utf8"),
       readFile("plugins/channels/runtime/src/transports/email.ts", "utf8"),
       readFile("plugins/channels/runtime/src/transports/whatsapp.ts", "utf8"),
       readFile("plugins/rlm/runtime/src/python-runtime.ts", "utf8"),
       readFile("src/setup-cli.ts", "utf8"),
     ]);
-    expect(sandbox).toContain('join(bundled, "sandbox", "Containerfile")');
+    expect(sandbox).toContain('join(bundled, "sandbox", "providers", "kern", "Containerfile")');
     expect(email).toContain('join(bundled, "channels", "email", "email_bridge.py")');
     expect(whatsapp).toContain('join(bundled, "channels", "whatsapp")');
     expect(rlm).toContain('resolve(bundled, "rlm", "python")');
     expect(setup).toContain('join(bundledRoot()!, "channels", "whatsapp")');
-    expect(setup).toContain('join(bundledRoot()!, "sandbox")');
   });
 
   it("keeps CI and the SEA builder independent from plugin-internal asset paths", async () => {
@@ -104,10 +103,10 @@ describe("workspace and binary packaging discovery", () => {
       readFile("scripts/build-binary.mjs", "utf8"),
     ]);
     expect(ci).toContain("npm run verify");
-    expect(ci).toContain("npm run build:sandbox-image -- --tag friday-sandbox:ci");
-    expect(ci).not.toContain("plugins/sandbox/Containerfile");
+    expect(ci).toContain("test/sandbox-provider.test.ts test/security.test.ts");
+    expect(ci).not.toContain("plugins/sandbox/providers/kern/Containerfile");
     expect(binaryBuilder).toContain("discoverBinaryAssets");
-    expect(binaryBuilder).not.toContain("plugins/sandbox/Containerfile");
+    expect(binaryBuilder).not.toContain("plugins/sandbox/providers/kern/Containerfile");
     expect(binaryBuilder).not.toContain("bridge/email/email_bridge.py");
     expect(binaryBuilder).not.toContain("plugins/rlm/runtime/python");
   });

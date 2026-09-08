@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { PermissionRequest } from "../plugins/permissions/contract.js";
 import { createPermissionsController, createPermissionsService } from "../plugins/permissions/policy.js";
-import { createPodmanSandboxService, ensurePodmanSandboxImage } from "../plugins/sandbox/podman.js";
+import { createKernSandboxProvider, createKernSandboxService } from "../plugins/sandbox/providers/kern/index.js";
 
 const tempPaths: string[] = [];
 
@@ -112,17 +112,22 @@ describe("permissions policy", () => {
   });
 });
 
-describe("Podman sandbox", () => {
-  function podmanResult(stdout = "", status = 0) {
+describe("kern sandbox provider", () => {
+  function commandResult(stdout = "", status = 0) {
     return { pid: 1, output: [null, stdout, ""], stdout, stderr: "", status, signal: null } as never;
   }
 
-  it("builds a rootless read-only, network-off command for read operations", async () => {
-    const workspace = await tempDir("friday-podman-");
+  const kernBoxHelp = "--image --security-profile --require-limits --memory --cpus --pids-limit --tmpfs --shm-size --net --egress-allow --label -v -w -e -i\n";
+  const kernPsHelp = "-q --filter\n";
+  const kernStopHelp = "stop <name>...\n";
+  const kernBuildHelp = "-t -f\n";
+
+  it("builds a rootless untrusted, network-off kern command for read operations", async () => {
+    const workspace = await tempDir("friday-kern-");
     const cwd = join(workspace, "src");
     await mkdir(cwd);
-    const sandbox = createPodmanSandboxService({
-      probe: () => ({ available: true }),
+    const sandbox = createKernSandboxService({
+      probe: () => ({ available: true, status: "ready" }),
       networkMode: "requested",
     });
     const context = sandbox.sandboxShell({
@@ -134,157 +139,82 @@ describe("Podman sandbox", () => {
       env: { PATH: "/usr/bin", SECRET: "host-only" },
     });
 
-    expect(sandbox.sandboxKind).toBe("podman");
-    expect(context.command).toContain("'--pull=never'");
-    expect(context.command).toContain("'--userns=keep-id'");
-    expect(context.command).toContain("'--read-only'");
-    expect(context.command).toContain("'--cap-drop=ALL'");
-    expect(context.command).toContain("'--security-opt=no-new-privileges'");
-    expect(context.command).toContain("'--http-proxy=false'");
-    expect(context.command).toContain("'--network=none'");
-    expect(context.command).toContain(`'--volume=${workspace}:${workspace}:ro'`);
-    expect(context.command).toContain(`'--workdir=${cwd}'`);
-    expect(context.command).toContain(`'--env=PATH=${join(workspace, "node_modules", ".bin")}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'`);
+    expect(sandbox.provider?.id).toBe("kern");
+    expect(context.command).toContain("'box'");
+    expect(context.command).toContain("'--security-profile' 'untrusted'");
+    expect(context.command).toContain("'--require-limits'");
+    expect(context.command).toContain("'--memory' '2g'");
+    expect(context.command).toContain("'--pids-limit' '1024'");
+    expect(context.command).toContain("'--tmpfs' '/tmp/.friday-sandbox:64m'");
+    expect(context.command).not.toContain("'--tmpfs' '/tmp:64m'");
+    expect(context.command).toContain("'HOME=/tmp/.friday-sandbox'");
+    expect(context.command).toContain("'TMPDIR=/tmp/.friday-sandbox'");
+    expect(context.command).toContain(`'${workspace}:${workspace}:ro'`);
+    expect(context.command).toContain(`'-w' '${cwd}'`);
+    expect(context.command).toContain("'FRIDAY_SANDBOX_PROVIDER=kern'");
+    expect(context.command).toContain("'/bin/bash' '-c'");
+    expect(context.command).not.toContain("'/bin/bash' '-lc'");
     expect(context.command).toContain("'git status --short'");
+    expect(context.command).not.toContain("'--net' 'host'");
+    expect(context.command).not.toContain("'--egress-allow'");
     expect(context.command).not.toContain("SECRET=host-only");
-    expect(context.env.SECRET).toBe("host-only");
+    expect(context.env.SECRET).toBeUndefined();
   });
 
-  it("allows an explicitly authorized writable workspace and network without auto-pulling images", async () => {
-    const workspace = await tempDir("friday-podman-rw-");
-    const sandbox = createPodmanSandboxService({ probe: () => ({ available: true }) });
-    const context = sandbox.sandboxShell({
+  it("uses kern's isolated egress allowlist for explicitly requested networking", async () => {
+    const workspace = await tempDir("friday-kern-network-");
+    const sandbox = createKernSandboxService({
+      probe: () => ({ available: true, status: "ready" }),
+      egressAllow: ["registry.npmjs.org", "files.pythonhosted.org"],
+    });
+    const blocked = sandbox.sandboxShell({ command: "true", cwd: workspace, workspace, access: "write", network: false, env: {} });
+    const allowed = sandbox.sandboxShell({ command: "npm install", cwd: workspace, workspace, access: "write", network: true, env: {} });
+    expect(sandbox.networkMode).toBe("requested");
+    expect(sandbox.egressAllow).toEqual(["registry.npmjs.org", "files.pythonhosted.org"]);
+    expect(blocked.command).not.toContain("'--net' 'host'");
+    expect(blocked.command).not.toContain("'--egress-allow'");
+    expect(allowed.command).toContain("'--egress-allow' 'registry.npmjs.org,files.pythonhosted.org'");
+    expect(allowed.command).not.toContain("'--net' 'host'");
+    expect(allowed.command).toContain(`'${workspace}:${workspace}:rw'`);
+  });
+
+  it("fails closed instead of widening requested networking to the host namespace", async () => {
+    const workspace = await tempDir("friday-kern-network-closed-");
+    const sandbox = createKernSandboxService({
+      probe: () => ({ available: true, status: "ready" }),
+      egressAllow: [],
+    });
+    expect(() => sandbox.sandboxShell({
       command: "npm install",
       cwd: workspace,
       workspace,
       access: "write",
       network: true,
       env: {},
+    })).toThrow(/FRIDAY_SANDBOX_EGRESS_ALLOW/);
+  });
+
+  it("shares the host network only under the explicit unrestricted override", async () => {
+    const workspace = await tempDir("friday-kern-network-unrestricted-");
+    const sandbox = createKernSandboxService({
+      probe: () => ({ available: true, status: "ready" }),
+      networkMode: "unrestricted",
     });
-    expect(context.command).toContain(`'--volume=${workspace}:${workspace}:rw'`);
-    expect(context.command).toContain(`'--env=PATH=${join(workspace, "node_modules", ".bin")}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'`);
-    expect(context.command).not.toContain("'--network=none'");
-    expect(context.command).toContain("'--pull=never'");
+    const context = sandbox.sandboxShell({ command: "true", cwd: workspace, workspace, access: "read", network: false, env: {} });
+    expect(context.command).toContain("'--net' 'host'");
+    expect(context.command).not.toContain("'--egress-allow'");
   });
 
-  it("blocks network by default until the operation explicitly requests it", async () => {
-    const workspace = await tempDir("friday-podman-network-");
-    const sandbox = createPodmanSandboxService({ probe: () => ({ available: true }) });
-    const context = sandbox.sandboxShell({
-      command: "node detached-task.mjs",
-      cwd: workspace,
-      workspace,
-      access: "write",
-      network: false,
-      env: {},
-    });
-
-    expect(sandbox.networkMode).toBe("requested");
-    expect(context.command).toContain("'--network=none'");
-    expect(context.command).toContain("'--http-proxy=false'");
+  it("rejects malformed egress allowlist entries before a sandbox can launch", () => {
+    expect(() => createKernSandboxService({
+      probe: () => ({ available: true, status: "ready" }),
+      egressAllow: ["registry.npmjs.org,evil.example"],
+    })).toThrow(/egress domain is invalid/);
   });
 
-  it("labels managed background containers so startup cleanup can target only FRIDAY-owned work", async () => {
-    const workspace = await tempDir("friday-podman-managed-");
-    const previousFridayHome = process.env.FRIDAY_HOME;
-    process.env.FRIDAY_HOME = join(workspace, ".friday-test");
-    try {
-      const sandbox = createPodmanSandboxService({ probe: () => ({ available: true }) });
-      const context = sandbox.sandboxProcess({
-        command: "/bin/bash",
-        args: ["-c", "npm run dev"],
-        cwd: workspace,
-        workspace,
-        access: "write",
-        network: false,
-        env: {},
-        managed: { id: "proc-abc123", runId: "run-xyz" },
-      });
-
-      expect(context.command).toBe("podman");
-      expect(context.args).toContain("--name=friday-bg-proc-abc123");
-      expect(context.args).toContain("--label=io.friday.managed=true");
-      expect(context.args).toContain("--label=io.friday.process=proc-abc123");
-      expect(context.args).toContain("--label=io.friday.run=run-xyz");
-      expect(context.args).toContain(`--label=io.friday.runtime-pid=${process.pid}`);
-      expect(context.args.some((arg) => /^--label=io\.friday\.runtime-start=(?:[a-f0-9]{32}|unverifiable)$/.test(arg))).toBe(true);
-      expect(context.args.some((arg) => /^--label=io\.friday\.owner=[a-f0-9]{24}$/.test(arg))).toBe(true);
-      expect(context.args.slice(-3)).toEqual(["localhost/friday-sandbox:gen0", "-c", "npm run dev"]);
-    } finally {
-      if (previousFridayHome === undefined) delete process.env.FRIDAY_HOME;
-      else process.env.FRIDAY_HOME = previousFridayHome;
-    }
-  });
-
-  it("keeps a live predecessor container during successor cleanup and removes only proven-stale owners", () => {
-    const calls: Array<{ command: string; args: readonly string[] }> = [];
-    const identities = new Map<number, string | undefined>([
-      [303, "current-birth"],
-      [101, "live-birth"],
-      [202, "new-birth-after-pid-reuse"],
-      [404, undefined],
-      [505, undefined],
-    ]);
-    const sandbox = createPodmanSandboxService({
-      probe: () => ({ available: true }),
-      runtimePid: 303,
-      processIdentity: (pid) => identities.get(pid),
-      processAlive: (pid) => pid === 404 ? true : pid === 505 ? false : undefined,
-      run(command, args) {
-        calls.push({ command, args });
-        if (args[0] === "ps") return podmanResult("live-id\nstale-id\nprobe-failed-live-id\ndead-id\nlegacy-id\n");
-        if (args[0] === "inspect") {
-          return podmanResult([
-            "live-id\t101\tlive-birth",
-            "stale-id\t202\told-birth-before-pid-reuse",
-            "probe-failed-live-id\t404\tlive-but-proc-unreadable",
-            "dead-id\t505\tdead-birth",
-            "legacy-id\t999\tunverifiable",
-          ].join("\n"));
-        }
-        if (args[0] === "rm") return podmanResult();
-        throw new Error(`Unexpected command: ${command} ${args.join(" ")}`);
-      },
-    });
-
-    sandbox.cleanupStaleManagedProcesses?.();
-
-    const removal = calls.find((call) => call.args[0] === "rm");
-    expect(removal?.args).toEqual(["rm", "-f", "stale-id", "dead-id"]);
-    expect(removal?.args).not.toContain("live-id");
-    expect(removal?.args).not.toContain("probe-failed-live-id");
-    expect(removal?.args).not.toContain("legacy-id");
-  });
-
-  it("keeps project source on the exact host bind mount across runtime generations", async () => {
-    const workspace = await tempDir("friday-podman-host-source-");
-    await writeFile(join(workspace, "live-source.ts"), "export const generation = 1;\n");
-    const first = createPodmanSandboxService({ probe: () => ({ available: true }), runtimePid: 101, processIdentity: () => "birth-1" });
-    const successor = createPodmanSandboxService({ probe: () => ({ available: true }), runtimePid: 202, processIdentity: () => "birth-2" });
-    const request = {
-      command: "git status --short",
-      cwd: workspace,
-      workspace,
-      access: "write" as const,
-      network: false,
-      env: {},
-    };
-
-    const firstCommand = first.sandboxShell(request).command;
-    const successorCommand = successor.sandboxShell(request).command;
-
-    expect(firstCommand).toContain(`'--volume=${workspace}:${workspace}:rw'`);
-    expect(successorCommand).toContain(`'--volume=${workspace}:${workspace}:rw'`);
-    expect(firstCommand.match(/--volume=/g)).toHaveLength(1);
-    expect(successorCommand.match(/--volume=/g)).toHaveLength(1);
-  });
-
-  it("builds direct internal processes inside the same network-off sandbox boundary", async () => {
-    const workspace = await tempDir("friday-podman-process-");
-    const sandbox = createPodmanSandboxService({
-      probe: () => ({ available: true }),
-      networkMode: "requested",
-    });
+  it("runs direct processes through kern without inheriting host secrets and labels managed work", async () => {
+    const workspace = await tempDir("friday-kern-process-");
+    const sandbox = createKernSandboxService({ probe: () => ({ available: true, status: "ready" }) });
     const context = sandbox.sandboxProcess({
       command: "git",
       args: ["status", "--short"],
@@ -293,159 +223,124 @@ describe("Podman sandbox", () => {
       access: "read",
       network: false,
       env: { PATH: "/usr/bin", SECRET: "host-only" },
+      managed: { id: "proc-abc123", runId: "run-xyz" },
     });
-
-    expect(context.command).toBe("podman");
-    expect(context.args).toContain("--network=none");
-    expect(context.args).toContain(`--volume=${workspace}:${workspace}:ro`);
-    expect(context.args).toContain(`--env=PATH=${join(workspace, "node_modules", ".bin")}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`);
-    expect(context.args).toContain("--entrypoint=git");
-    expect(context.args.slice(-3)).toEqual(["localhost/friday-sandbox:gen0", "status", "--short"]);
+    expect(context.command).toBe("kern");
+    expect(context.args[0]).toBe("box");
+    expect(context.args[1]).toMatch(/^friday-bg-\d+-(?:[a-f0-9]{32}|unverifiable)-proc-abc123-[a-f0-9]{8}$/);
+    expect(context.args).toContain("--security-profile");
+    expect(context.args).toContain("--require-limits");
+    expect(context.args).toContain("--pids-limit");
+    expect(context.args).toContain("-c");
+    expect(context.args).not.toContain("-lc");
+    expect(context.args).toContain("io.friday.managed=true");
+    expect(context.args).toContain("io.friday.process=proc-abc123");
+    expect(context.args).toContain("io.friday.run=run-xyz");
+    expect(context.args).toContain("git");
+    expect(context.args.slice(-2)).toEqual(["status", "--short"]);
     expect(context.args.join("\0")).not.toContain("host-only");
-    expect(context.env.SECRET).toBe("host-only");
+    expect(context.env.SECRET).toBeUndefined();
   });
 
-  it("rejects trusted mounts that overlap the workspace boundary", async () => {
-    const parent = await tempDir("friday-podman-overlap-");
-    const workspace = join(parent, "workspace");
-    const inside = join(workspace, "inside");
-    await mkdir(inside, { recursive: true });
-    const sandbox = createPodmanSandboxService({
-      probe: () => ({ available: true }),
-      networkMode: "requested",
+  it("stops one managed kern process through owner-scoped labels", () => {
+    const calls: Array<{ command: string; args: readonly string[] }> = [];
+    const sandbox = createKernSandboxService({
+      probe: () => ({ available: true, status: "ready" }),
+      processIdentity: () => "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      runtimePid: 303,
+      run(command, args) {
+        calls.push({ command, args: [...args] });
+        if (args[0] === "ps") return commandResult("friday-bg-303-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-proc-abc123-deadbeef\n");
+        if (args[0] === "stop") return commandResult();
+        throw new Error(`unexpected kern command: ${command} ${args.join(" ")}`);
+      },
+    });
+    sandbox.cleanupManagedProcess?.("proc-abc123");
+    expect(calls[0]?.args).toContain("label=io.friday.process=proc-abc123");
+    expect(calls[1]?.args).toEqual(["stop", "friday-bg-303-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-proc-abc123-deadbeef"]);
+  });
+
+  it("keeps a live predecessor during stale cleanup and stops only proven-stale kern boxes", () => {
+    const liveIdentity = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const staleExpectedIdentity = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const staleActualIdentity = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const unreadableLiveIdentity = "cccccccccccccccccccccccccccccccc";
+    const deadIdentity = "dddddddddddddddddddddddddddddddd";
+    const liveName = `friday-bg-101-${liveIdentity}-proc-live-11111111`;
+    const staleName = `friday-bg-202-${staleExpectedIdentity}-proc-stale-22222222`;
+    const unreadableLiveName = `friday-bg-404-${unreadableLiveIdentity}-proc-unknown-33333333`;
+    const deadName = `friday-bg-505-${deadIdentity}-proc-dead-44444444`;
+    const unverifiableName = "friday-bg-606-unverifiable-proc-legacy-55555555";
+    const calls: Array<{ command: string; args: readonly string[] }> = [];
+    const identities = new Map<number, string | undefined>([
+      [303, "ffffffffffffffffffffffffffffffff"],
+      [101, liveIdentity],
+      [202, staleActualIdentity],
+      [404, undefined],
+      [505, undefined],
+      [606, undefined],
+    ]);
+    const sandbox = createKernSandboxService({
+      probe: () => ({ available: true, status: "ready" }),
+      runtimePid: 303,
+      processIdentity: (pid) => identities.get(pid),
+      processAlive: (pid) => pid === 404 ? true : pid === 505 ? false : undefined,
+      run(command, args) {
+        calls.push({ command, args: [...args] });
+        if (args[0] === "ps") {
+          return commandResult([liveName, staleName, unreadableLiveName, deadName, unverifiableName].join("\n") + "\n");
+        }
+        if (args[0] === "stop") return commandResult();
+        throw new Error(`unexpected kern command: ${command} ${args.join(" ")}`);
+      },
     });
 
-    expect(() => sandbox.registerTrustedReadOnlyMount(workspace, inside)).toThrow(/source.*disjoint/);
-    expect(() => sandbox.registerTrustedReadOnlyMount(workspace, parent)).toThrow(/source.*disjoint/);
+    sandbox.cleanupStaleManagedProcesses?.();
 
-    const external = await tempDir("friday-podman-overlap-source-");
-    expect(() => sandbox.registerTrustedReadOnlyMount(workspace, external, workspace)).toThrow(/target.*inside workspace/);
-    const outsideTarget = join(external, "target");
-    await mkdir(outsideTarget);
-    expect(() => sandbox.registerTrustedReadOnlyMount(workspace, external, outsideTarget)).toThrow(/target.*inside workspace/);
+    const stop = calls.find((call) => call.args[0] === "stop");
+    expect(stop?.args).toEqual(["stop", staleName, deadName]);
+    expect(stop?.args).not.toContain(liveName);
+    expect(stop?.args).not.toContain(unreadableLiveName);
+    expect(stop?.args).not.toContain(unverifiableName);
   });
 
-  it("mounts only host-registered external dependency targets", async () => {
-    const workspace = await tempDir("friday-podman-worktree-");
-    const dependencies = await tempDir("friday-podman-deps-");
+  it("mounts only host-registered external dependency targets and revalidates them", async () => {
+    const workspace = await tempDir("friday-kern-worktree-");
+    const dependencies = await tempDir("friday-kern-deps-");
+    const outside = await tempDir("friday-kern-outside-");
     const dependencyTarget = join(workspace, "node_modules");
     await mkdir(dependencyTarget);
-    const sandbox = createPodmanSandboxService({ probe: () => ({ available: true }) });
+    const sandbox = createKernSandboxService({ probe: () => ({ available: true, status: "ready" }) });
 
-    const untrusted = sandbox.sandboxShell({
-      command: "node --version",
-      cwd: workspace,
-      workspace,
-      access: "write",
-      network: false,
-      env: {},
-    });
-    expect(untrusted.command).not.toContain(`'--volume=${dependencies}:${dependencies}:ro'`);
+    const untrusted = sandbox.sandboxShell({ command: "node --version", cwd: workspace, workspace, access: "write", network: false, env: {} });
+    expect(untrusted.command).not.toContain(dependencies);
 
     const unregister = sandbox.registerTrustedReadOnlyMount(workspace, dependencies, dependencyTarget);
-    const trusted = sandbox.sandboxShell({
-      command: "node --version",
-      cwd: workspace,
-      workspace,
-      access: "write",
-      network: false,
-      env: {},
-    });
-    expect(trusted.command).toContain(`'--volume=${dependencies}:${dependencyTarget}:ro'`);
-
-    unregister();
-    const revoked = sandbox.sandboxShell({
-      command: "node --version",
-      cwd: workspace,
-      workspace,
-      access: "write",
-      network: false,
-      env: {},
-    });
-    expect(revoked.command).not.toContain(`'--volume=${dependencies}:${dependencyTarget}:ro'`);
-  });
-
-  it("revalidates a mutable in-workspace mount target before every sandbox launch", async () => {
-    const workspace = await tempDir("friday-podman-retarget-");
-    const dependencies = await tempDir("friday-podman-retarget-deps-");
-    const outside = await tempDir("friday-podman-retarget-outside-");
-    const dependencyTarget = join(workspace, "node_modules");
-    await mkdir(dependencyTarget);
-    const sandbox = createPodmanSandboxService({ probe: () => ({ available: true }) });
-    const unregister = sandbox.registerTrustedReadOnlyMount(workspace, dependencies, dependencyTarget);
+    const trusted = sandbox.sandboxShell({ command: "node --version", cwd: workspace, workspace, access: "write", network: false, env: {} });
+    expect(trusted.command).toContain(`'${dependencies}:${dependencyTarget}:ro'`);
 
     await rm(dependencyTarget, { recursive: true, force: true });
     await symlink(outside, dependencyTarget);
-    expect(() => sandbox.sandboxShell({
-      command: "node --version",
-      cwd: workspace,
-      workspace,
-      access: "write",
-      network: false,
-      env: {},
-    })).toThrow(/target became a symlink/);
+    expect(() => sandbox.sandboxShell({ command: "true", cwd: workspace, workspace, access: "write", network: false, env: {} })).toThrow(/target became a symlink/);
     unregister();
   });
 
-  it("scopes trusted auxiliary mounts to the exact registered workspace", async () => {
-    const workspace = await tempDir("friday-podman-workspace-a-");
-    const otherWorkspace = await tempDir("friday-podman-workspace-b-");
-    const dependencies = await tempDir("friday-podman-shared-deps-");
-    const dependencyTarget = join(workspace, "node_modules");
-    const otherDependencyTarget = join(otherWorkspace, "node_modules");
-    await mkdir(dependencyTarget);
-    await mkdir(otherDependencyTarget);
-    const sandbox = createPodmanSandboxService({ probe: () => ({ available: true }) });
-    const unregister = sandbox.registerTrustedReadOnlyMount(workspace, dependencies, dependencyTarget);
-
-    const authorized = sandbox.sandboxShell({
-      command: "node --version",
-      cwd: workspace,
-      workspace,
-      access: "write",
-      network: false,
-      env: {},
-    });
-    const unrelated = sandbox.sandboxShell({
-      command: "node --version",
-      cwd: otherWorkspace,
-      workspace: otherWorkspace,
-      access: "write",
-      network: false,
-      env: {},
-    });
-
-    expect(authorized.command).toContain(`'--volume=${dependencies}:${dependencyTarget}:ro'`);
-    expect(unrelated.command).not.toContain(dependencies);
-    unregister();
+  it("rejects trusted mounts that overlap the workspace boundary", async () => {
+    const parent = await tempDir("friday-kern-overlap-");
+    const workspace = join(parent, "workspace");
+    const inside = join(workspace, "inside");
+    await mkdir(inside, { recursive: true });
+    const sandbox = createKernSandboxService({ probe: () => ({ available: true, status: "ready" }) });
+    expect(() => sandbox.registerTrustedReadOnlyMount(workspace, inside)).toThrow(/source.*disjoint/);
+    expect(() => sandbox.registerTrustedReadOnlyMount(workspace, parent)).toThrow(/source.*disjoint/);
   });
 
-  it("does not trust an arbitrary external symlink chosen by the writable workspace", async () => {
-    const workspace = await tempDir("friday-podman-untrusted-");
-    const hostSecrets = await tempDir("friday-podman-host-secrets-");
-    await writeFile(join(hostSecrets, "secret.txt"), "do-not-mount");
-    await symlink(hostSecrets, join(workspace, "node_modules"));
-    const sandbox = createPodmanSandboxService({ probe: () => ({ available: true }) });
-    const context = sandbox.sandboxShell({
-      command: "find node_modules -maxdepth 1 -type f",
-      cwd: workspace,
-      workspace,
-      access: "write",
-      network: false,
-      env: {},
-    });
-    expect(context.command).not.toContain(hostSecrets);
-  });
-
-  it("launches IPython through a network-off Podman kernel using a shared IPC directory", async () => {
-    const workspace = await tempDir("friday-podman-kernel-workspace-");
-    const kernelDir = await tempDir("friday-podman-kernel-ipc-");
+  it("launches IPython in a network-off kern box with its IPC directory and bounded environment", async () => {
+    const workspace = await tempDir("friday-kern-kernel-workspace-");
+    const kernelDir = await tempDir("friday-kern-kernel-ipc-");
     const connectionPath = join(kernelDir, "connection.json");
     await writeFile(connectionPath, "{}", { mode: 0o600 });
-    const sandbox = createPodmanSandboxService({
-      probe: () => ({ available: true }),
-      networkMode: "requested",
-    });
+    const sandbox = createKernSandboxService({ probe: () => ({ available: true, status: "ready" }) });
     const context = sandbox.sandboxKernel({
       python: "/host/python",
       connectionPath,
@@ -454,89 +349,100 @@ describe("Podman sandbox", () => {
       workspace,
       env: { PATH: "/usr/bin", SECRET: "host-only", PYTHONPATH: join(workspace, "python") },
     });
-
-    expect(context.command).toBe("podman");
-    expect(context.args).toContain("--network=none");
-    expect(context.args).toContain(`--volume=${workspace}:${workspace}:rw`);
-    expect(context.args).toContain(`--volume=${kernelDir}:${kernelDir}:rw`);
-    expect(context.args).toContain("--env=HOME=/tmp");
-    expect(context.args).toContain(`--env=PATH=${join(workspace, "node_modules", ".bin")}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`);
-    expect(context.args).toContain("--env=FRIDAY_SANDBOX=podman");
-    expect(context.args).toContain(`--env=PYTHONPATH=${join(workspace, "python")}`);
+    expect(context.command).toBe("kern");
+    expect(context.args).toContain(`${workspace}:${workspace}:rw`);
+    expect(context.args).toContain(`${kernelDir}:${kernelDir}:rw`);
+    expect(context.args).toContain(`PYTHONPATH=${join(workspace, "python")}`);
+    expect(context.args).not.toContain("--net");
+    expect(context.args).not.toContain("--egress-allow");
     expect(context.args.join(" ")).not.toContain("SECRET=host-only");
-    expect(context.args.slice(-5)).toEqual(["localhost/friday-sandbox:gen0", "python3", "-m", "ipykernel_launcher", "-f", connectionPath].slice(-5));
   });
 
-  it("re-checks an initially missing image so an approved setup becomes usable without restart", async () => {
-    const workspace = await tempDir("friday-podman-refresh-");
+  it("re-checks a missing image so approved setup becomes usable without restart", async () => {
+    const workspace = await tempDir("friday-kern-refresh-");
     let imageReady = false;
-    const sandbox = createPodmanSandboxService({
+    const sandbox = createKernSandboxService({
       probe: () => imageReady
         ? ({ available: true, status: "ready" })
         : ({ available: false, status: "image-missing", reason: "image missing" }),
     });
-    expect(sandbox.sandboxKind).toBe("unavailable");
+    expect(() => sandbox.assertAvailable()).toThrow(/image missing/);
     imageReady = true;
-    expect(sandbox.sandboxKind).toBe("podman");
-    expect(() => sandbox.sandboxShell({
-      command: "true",
-      cwd: workspace,
-      workspace,
-      access: "read",
-      network: false,
-      env: {},
-    })).not.toThrow();
+    expect(() => sandbox.sandboxShell({ command: "true", cwd: workspace, workspace, access: "read", network: false, env: {} })).not.toThrow();
   });
 
-  it("checks for the sandbox image before building and verifies it afterward", async () => {
-    const buildContext = await tempDir("friday-podman-build-");
+  it("checks exact kern CLI flags instead of accepting prefix-only matches", () => {
+    const provider = createKernSandboxProvider({
+      image: "friday-sandbox:test",
+      probeRun(_command, args) {
+        if (args[0] === "--version") return commandResult("kern 0.7.0\n");
+        if (args[0] === "doctor") return commandResult("ok\n");
+        if (args[0] === "box") return commandResult(kernBoxHelp.replace("--pids-limit", "--pids-limit-extra"));
+        throw new Error(`probe should have failed before: ${args.join(" ")}`);
+      },
+    });
+    expect(provider.probe()).toMatchObject({
+      available: false,
+      status: "host-unready",
+    });
+    expect(provider.probe().reason).toMatch(/--pids-limit/);
+  });
+
+  it("checks the kern host/image before building and verifies the image afterward", async () => {
+    const buildContext = await tempDir("friday-kern-build-");
     const containerfile = join(buildContext, "Containerfile");
     await writeFile(containerfile, "FROM scratch\n");
-    let probes = 0;
-    const runs: Array<{ command: string; args: readonly string[] }> = [];
-    const result = ensurePodmanSandboxImage({
-      image: "localhost/friday-sandbox:test",
+    let imageReady = false;
+    const setupCalls: Array<{ command: string; args: readonly string[] }> = [];
+    const provider = createKernSandboxProvider({
+      image: "friday-sandbox:test",
       containerfile,
       contextDir: buildContext,
-      probe: () => {
-        probes += 1;
-        return probes === 1
-          ? { available: false, status: "image-missing", reason: "missing" }
-          : { available: true, status: "ready" };
+      probeRun(command, args) {
+        if (args[0] === "--version") return commandResult("kern 0.7.0\n");
+        if (args[0] === "doctor") return commandResult("ok\n");
+        if (args[0] === "box") return commandResult(kernBoxHelp);
+        if (args[0] === "ps") return commandResult(kernPsHelp);
+        if (args[0] === "stop") return commandResult(kernStopHelp);
+        if (args[0] === "build") return commandResult(kernBuildHelp);
+        if (args[0] === "images") return commandResult(imageReady ? '[{"reference":"friday-sandbox:test"}]' : "[]");
+        throw new Error(`unexpected probe: ${command} ${args.join(" ")}`);
       },
-      run: (command, args) => {
-        runs.push({ command, args: [...args] });
-        return { pid: 1, output: [], stdout: "", stderr: "", status: 0, signal: null, error: undefined } as never;
+      setupRun(command, args) {
+        setupCalls.push({ command, args: [...args] });
+        imageReady = true;
+        return commandResult();
       },
     });
-    expect(result).toEqual({ status: "built", image: "localhost/friday-sandbox:test" });
-    expect(probes).toBe(2);
-    expect(runs).toHaveLength(1);
-    expect(runs[0]).toEqual({
-      command: "podman",
-      args: ["build", "--pull=missing", "--tag", "localhost/friday-sandbox:test", "--file", containerfile, buildContext],
-    });
+    expect(provider.setup()).toEqual({ status: "prepared", providerId: "kern", image: "friday-sandbox:test" });
+    expect(setupCalls).toEqual([{ command: "kern", args: ["build", "-t", "friday-sandbox:test", "-f", containerfile, buildContext] }]);
   });
 
-  it("does not rebuild a sandbox image that is already available", () => {
-    let runs = 0;
-    const result = ensurePodmanSandboxImage({
-      image: "localhost/friday-sandbox:test",
-      probe: () => ({ available: true, status: "ready" }),
-      run: () => {
-        runs += 1;
-        throw new Error("must not build");
+  it("does not rebuild an image that kern already has", () => {
+    let setupCalls = 0;
+    const provider = createKernSandboxProvider({
+      image: "friday-sandbox:test",
+      probeRun(_command, args) {
+        if (args[0] === "box") return commandResult(kernBoxHelp);
+        if (args[0] === "ps") return commandResult(kernPsHelp);
+        if (args[0] === "stop") return commandResult(kernStopHelp);
+        if (args[0] === "build") return commandResult(kernBuildHelp);
+        if (args[0] === "images") return commandResult('[{"reference":"friday-sandbox:test"}]');
+        return commandResult("ok\n");
+      },
+      setupRun() {
+        setupCalls += 1;
+        return commandResult();
       },
     });
-    expect(result).toEqual({ status: "already-ready", image: "localhost/friday-sandbox:test" });
-    expect(runs).toBe(0);
+    expect(provider.setup()).toEqual({ status: "already-ready", providerId: "kern", image: "friday-sandbox:test" });
+    expect(setupCalls).toBe(0);
   });
 
-  it("fails closed when rootless Podman is unavailable", () => {
-    const sandbox = createPodmanSandboxService({
-      probe: () => ({ available: false, reason: "FRIDAY requires rootless Podman" }),
+  it("fails closed when kern is unavailable", () => {
+    const sandbox = createKernSandboxService({
+      probe: () => ({ available: false, status: "binary-unavailable", reason: "kern is unavailable" }),
     });
-    expect(sandbox.sandboxKind).toBe("unavailable");
-    expect(() => sandbox.assertAvailable()).toThrow(/rootless Podman/);
+    expect(() => sandbox.assertAvailable()).toThrow(/kern is unavailable/);
   });
 });

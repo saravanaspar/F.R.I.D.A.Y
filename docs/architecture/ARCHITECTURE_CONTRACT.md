@@ -138,7 +138,7 @@ subsystem in `friday.binary-assets.json`. Each declaration maps an owner-relativ
 source path to a stable logical bundled target. `scripts/build-binary.mjs`
 discovers those manifests; it must not contain plugin-internal asset paths. CI
 must invoke repository scripts such as `npm run verify` and
-`npm run build:sandbox-image` instead of naming plugin-internal paths directly.
+`npm run setup:sandbox` instead of naming plugin-internal paths directly.
 Moving an asset therefore changes its owner declaration, not the central binary
 builder or CI workflow. Native third-party addons selected from the **root-hoisted** `node_modules` remain
 distribution-layer exceptions because FRIDAY does not own their package layout.
@@ -343,7 +343,7 @@ installing a replacement key.
 
 The supported single-file distribution is a host-native Node SEA executable
 built separately per platform/architecture. It embeds code, native bindings and
-immutable runtime assets. Privileged host facilities such as Podman and optional
+immutable runtime assets. Host facilities required by the selected sandbox provider and optional
 integration runtimes remain explicit prerequisites rather than being silently
 installed by the executable.
 

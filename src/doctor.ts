@@ -7,7 +7,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { VaultStore, VAULT_MASTER_KEY_FILE_NAME, getVaultStateDir } from "@friday/vault";
 import { readSavedChannels } from "../plugins/channels/config.js";
 import { readRuntimeSettings, getFridayHome, getFridayWorkspace, type RuntimeSettings } from "../plugins/runtime-settings/runtime-env.js";
-import { DEFAULT_SANDBOX_IMAGE, probePodman } from "../plugins/sandbox/podman.js";
+import { selectSandboxProvider } from "../plugins/sandbox/providers/index.js";
 import { getStateBackupRoot, listStateBackups } from "./state-backup.js";
 import { runSetupCli } from "./setup-cli.js";
 import { FRIDAY_VERSION } from "./version.js";
@@ -551,15 +551,26 @@ function executionPythonCheck(environment: NodeJS.ProcessEnv): DoctorCheck {
 }
 
 function sandboxCheck(): DoctorCheck {
-  const image = process.env.FRIDAY_SANDBOX_IMAGE?.trim() || DEFAULT_SANDBOX_IMAGE;
-  const podman = probePodman(image);
-  if (podman.available) return check("sandbox", "Tooling", "ok", "Coding sandbox", "rootless Podman ready", { detail: image });
-  const detail = podman.reason ?? podman.status;
-  return check("sandbox", "Tooling", "info", "Coding sandbox", "not ready", {
-    ...(detail ? { detail } : {}),
-    fix: podman.status === "podman-unavailable" ? "Install rootless Podman, then run: friday setup sandbox" : "friday setup sandbox",
-    ...(podman.status === "image-missing" ? { repair: "sandbox" as const } : {}),
-  });
+  try {
+    const provider = selectSandboxProvider();
+    const service = provider.createService();
+    const status = provider.probe();
+    if (status.available) {
+      const detail = [provider.descriptor.id, provider.descriptor.isolationClass, service.image].filter(Boolean).join(" · ");
+      return check("sandbox", "Tooling", "ok", "Coding sandbox", `${provider.descriptor.displayName} ready`, { detail });
+    }
+    const detail = status.reason ?? status.status;
+    return check("sandbox", "Tooling", status.status === "unsupported-platform" ? "warn" : "info", "Coding sandbox", "not ready", {
+      ...(detail ? { detail } : {}),
+      fix: provider.repairHint(status),
+      ...(status.status === "image-missing" ? { repair: "sandbox" as const } : {}),
+    });
+  } catch (error) {
+    return check("sandbox", "Tooling", "warn", "Coding sandbox", "provider configuration is invalid", {
+      detail: error instanceof Error ? error.message : String(error),
+      fix: "Set FRIDAY_SANDBOX_PROVIDER to a registered provider, then rerun: friday doctor",
+    });
+  }
 }
 
 export async function collectDoctorChecks(environment: NodeJS.ProcessEnv = process.env): Promise<readonly DoctorCheck[]> {
@@ -691,7 +702,7 @@ async function runRepairs(checks: readonly DoctorCheck[], environment: NodeJS.Pr
       continue;
     }
     if (repair === "sandbox") {
-      if (await confirmRepair("Build/repair the rootless Podman sandbox image now?")) await runSetupCli(["sandbox"]);
+      if (await confirmRepair("Prepare/repair the configured sandbox provider now?")) await runSetupCli(["sandbox"]);
     }
   }
 }

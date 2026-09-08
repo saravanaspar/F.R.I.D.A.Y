@@ -6,6 +6,7 @@ import { runOnboarding } from "./onboarding.js";
 import { runOnboardingCli } from "./cli.js";
 import { getFridayHome, readRuntimeSettings, updateRuntimeSettings } from "../plugins/runtime-settings/runtime-env.js";
 import { runVoiceSetup } from "./voice-setup.js";
+import { selectSandboxProvider } from "../plugins/sandbox/providers/index.js";
 
 function bundledRoot(): string | undefined {
   const value = process.env.FRIDAY_BUNDLED_ROOT?.trim();
@@ -20,12 +21,6 @@ function whatsappAssetsRoot(): string {
   return bundledRoot()
     ? join(bundledRoot()!, "channels", "whatsapp")
     : resolve("plugins", "channels", "runtime", "bridge", "whatsapp");
-}
-
-function sandboxRoot(): string {
-  return bundledRoot()
-    ? join(bundledRoot()!, "sandbox")
-    : resolve("plugins", "sandbox");
 }
 
 async function run(command: string, args: readonly string[], cwd?: string): Promise<void> {
@@ -115,10 +110,10 @@ async function setupWhatsApp(): Promise<void> {
 }
 
 async function setupSandbox(): Promise<void> {
-  const root = sandboxRoot();
-  const containerfile = join(root, "Containerfile");
-  if (!existsSync(containerfile)) throw new Error(`Sandbox Containerfile is missing: ${containerfile}`);
-  await run("podman", ["build", "--tag", "localhost/friday-sandbox:gen0", "--file", containerfile, root]);
+  const provider = selectSandboxProvider();
+  const result = await provider.setup();
+  const artifact = result.image ? ` · ${result.image}` : "";
+  process.stdout.write(`[sandbox] ${provider.descriptor.displayName} ${result.status}${artifact}\n`);
 }
 
 function setupHelp(): void {
@@ -129,7 +124,7 @@ function setupHelp(): void {
     "  friday setup                    First run: model, timezone, credential, and mandatory channel setup",
     "  friday setup [model options]    Scriptable model/routing/permission configuration",
     "  friday setup execution-python   Provision the private IPython kernel environment",
-    "  friday setup sandbox            Build the approved rootless Podman sandbox image",
+    "  friday setup sandbox            Prepare the configured sandbox provider and its approved image",
     "  friday setup whatsapp           Install the optional WhatsApp bridge dependencies",
     "  friday setup voice              Configure and verify speech-to-text / text-to-speech providers",
     "  friday setup self-repository <path>  Save the canonical FRIDAY source checkout for self-improvement",

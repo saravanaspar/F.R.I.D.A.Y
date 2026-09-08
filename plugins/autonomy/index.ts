@@ -125,6 +125,7 @@ const autonomyPlugin: FridayPlugin = definePlugin({ id: "autonomy", requires: [A
             },
             ...(options.signal ? { signal: options.signal } : {}),
             ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs / 1000 }),
+            env: context.env,
           });
           options.signal?.throwIfAborted();
           return {
@@ -160,6 +161,7 @@ const autonomyPlugin: FridayPlugin = definePlugin({ id: "autonomy", requires: [A
       });
       const result = await execution.execCommand(context.command, context.args, context.cwd, {
         env: context.env,
+        replaceEnv: true,
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
       });

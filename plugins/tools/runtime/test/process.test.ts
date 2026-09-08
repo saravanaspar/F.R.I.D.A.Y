@@ -47,7 +47,7 @@ describe("process tool", () => {
     const startHook = vi.fn(async (context) => ({
       ...context,
       cwd: "/sandbox/workspace",
-      launch: { command: "podman", args: ["run", "--rm", "sandbox-image"] },
+      launch: { command: "sandbox-provider", args: ["run", "sandbox-image"] },
     }));
     const tool = createProcessTool(process.cwd(), { operations: ops, startHook });
 
@@ -57,7 +57,7 @@ describe("process tool", () => {
     expect(ops.start).toHaveBeenCalledWith(expect.objectContaining({
       command: "npm run dev",
       cwd: "/sandbox/workspace",
-      launch: { command: "podman", args: ["run", "--rm", "sandbox-image"] },
+      launch: { command: "sandbox-provider", args: ["run", "sandbox-image"] },
       maxLifetimeMs: 15_000,
     }));
     expect(result.content[0]).toMatchObject({ type: "text" });
