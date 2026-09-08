@@ -70,3 +70,15 @@ Doctor should prefer a precise existing F.R.I.D.A.Y command over prose, for exam
 ```
 
 When no safe universal command exists, Doctor gives one short operator action rather than trying to mutate the machine itself.
+
+## Trusted-channel Doctor and diagnostics
+
+After the mandatory local bootstrap has paired at least one trusted operator channel, v1.0.3 exposes the same canonical Doctor and failure review through typed System actions:
+
+- `diagnostics.doctor` receives the exact read-only check set used by local `friday doctor` through the narrow host-owned `doctor.host` port, including installation, configuration, security, tooling, Voice/channel/Vault/sandbox, backup/recovery, crash and disk checks;
+- CLI and trusted-channel Doctor format that one result differently, but neither surface has a reduced or misleading check set;
+- `diagnostics.review` starts with the same Doctor result and adds bounded redacted FRIDAY-owned evidence from Observability, failed spans, fatal crash records, setup/provisioning outcomes, onboarding/runtime state, and public plugin status;
+- follow-up repair requests route to the owning typed action (for example `execution.python.setup`, `sandbox.setup`, or `voice.setup`) rather than giving Diagnostics a generic shell;
+- an explicit “diagnose and fix/evolve FRIDAY” request may use `self-improvement.repair-from-diagnostics`, but only when a main reasoning model is configured and the trusted operator separately approves source mutation.
+
+The channel-facing Diagnostics plugin itself has no process-spawn, arbitrary terminal, repair, or sudo authority; it receives typed Doctor results from the host-owned read-only port. The channel surface does **not** expose an arbitrary terminal or sudo shell. Guided `friday doctor --fix` remains local/TTY-oriented, while remote repairs go through the same owning typed actions and permission/host-privilege boundaries. Channel diagnostics never read arbitrary `/var/log`, unrestricted `journalctl`, or Vault plaintext.

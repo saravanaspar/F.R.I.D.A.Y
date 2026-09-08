@@ -7,6 +7,7 @@ import {
   createSystemActionInputValidator,
   createSystemActionsAction,
   createSystemModelPlanner,
+  createSystemModelPresenter,
   createOperatorDashboardAction,
   createSystemStatusAction,
   createSystemTurnExecutor,
@@ -95,10 +96,70 @@ describe("system turn executor", () => {
       await createSystemModelPlanner(models)({ text: "create a conditional hook", actions: [] });
       expect(selected).toEqual([{ provider: "routing-provider", id: "cheap-router" }]);
 
+      delete process.env.FRIDAY_MODEL_PROVIDER;
+      delete process.env.FRIDAY_MODEL_ID;
+      await createSystemModelPlanner(models)({ text: "continue setup", actions: [] });
+      expect(selected.at(-1)).toEqual({ provider: "routing-provider", id: "cheap-router" });
+
       process.env.FRIDAY_SYSTEM_PROVIDER = "system-provider";
       process.env.FRIDAY_SYSTEM_MODEL_ID = "dedicated-system-model";
       await createSystemModelPlanner(models)({ text: "show status", actions: [] });
       expect(selected.at(-1)).toEqual({ provider: "system-provider", id: "dedicated-system-model" });
+    } finally {
+      for (const name of names) {
+        const value = previous[name];
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
+  it("uses the control model only for bounded presentation and the main model for substantive analysis", async () => {
+    const names = [
+      "FRIDAY_MODEL_PROVIDER",
+      "FRIDAY_MODEL_ID",
+      "FRIDAY_ROUTING_PROVIDER",
+      "FRIDAY_ROUTING_MODEL_ID",
+      "FRIDAY_SYSTEM_PROVIDER",
+      "FRIDAY_SYSTEM_MODEL_ID",
+    ] as const;
+    const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    const selected: Array<{ provider: string; id: string }> = [];
+    const prompts: string[] = [];
+    const models = {
+      getModel(provider: string, id: string) {
+        selected.push({ provider, id });
+        return { provider, id };
+      },
+      async completeSimple(_model: unknown, request: { systemPrompt: string }) {
+        prompts.push(request.systemPrompt);
+        return { content: [{ type: "text", text: "Formatted result" }], stopReason: "stop" };
+      },
+      parseJsonWithRepair(value: string) { return JSON.parse(value) as unknown; },
+    } as unknown as ModelService;
+
+    try {
+      process.env.FRIDAY_MODEL_PROVIDER = "main-provider";
+      process.env.FRIDAY_MODEL_ID = "reasoning-model";
+      process.env.FRIDAY_ROUTING_PROVIDER = "routing-provider";
+      process.env.FRIDAY_ROUTING_MODEL_ID = "router-model";
+      delete process.env.FRIDAY_SYSTEM_PROVIDER;
+      delete process.env.FRIDAY_SYSTEM_MODEL_ID;
+
+      const presenter = createSystemModelPresenter(models);
+      const action = { id: "diagnostics.doctor", label: "Doctor", description: "Run Doctor", parameters: {} };
+      await expect(presenter({ mode: "present", userText: "run doctor", action, output: { status: "ready" } })).resolves.toBe("Formatted result");
+      expect(selected.at(-1)).toEqual({ provider: "routing-provider", id: "router-model" });
+      expect(prompts.at(-1)).toContain("bounded control-plane response presenter");
+      expect(prompts.at(-1)).toContain("Do not perform root-cause analysis");
+
+      await expect(presenter({ mode: "analyze", userText: "why is voice broken?", action, output: { status: "needs-attention" } })).resolves.toBe("Formatted result");
+      expect(selected.at(-1)).toEqual({ provider: "main-provider", id: "reasoning-model" });
+      expect(prompts.at(-1)).toContain("main reasoning model analyzing bounded, sanitized system evidence");
+
+      delete process.env.FRIDAY_MODEL_PROVIDER;
+      delete process.env.FRIDAY_MODEL_ID;
+      await expect(presenter({ mode: "analyze", userText: "explain this", action, output: {} })).rejects.toThrow("Main reasoning model is required");
     } finally {
       for (const name of names) {
         const value = previous[name];

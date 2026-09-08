@@ -9,6 +9,7 @@ const RUNTIME_ENV_KEYS = Object.freeze([
   "FRIDAY_ROUTING_PROVIDER",
   "FRIDAY_ROUTING_MODEL_ID",
   "FRIDAY_PERMISSION_MODE",
+  "FRIDAY_HOST_PRIVILEGE_MODE",
   "FRIDAY_TIMEZONE",
   "FRIDAY_WORKSPACE",
   "FRIDAY_SELF_REPOSITORY",
@@ -106,13 +107,13 @@ function parseRuntimeEnvironment(text: string): Partial<Record<SupportedKey, str
 function validateRuntimeEnvironment(parsed: Partial<Record<SupportedKey, string>>): void {
   const provider = parsed.FRIDAY_MODEL_PROVIDER?.trim();
   const modelId = parsed.FRIDAY_MODEL_ID?.trim();
-  const anyMain = Boolean(provider || modelId);
-  if (!anyMain) return;
-  if (!provider || !modelId) {
-    throw new Error("FRIDAY runtime environment must define both main model provider and model id");
+  if (Boolean(provider) !== Boolean(modelId)) {
+    throw new Error("FRIDAY runtime environment must define both main model provider and model id, or neither");
   }
-  nonEmpty(provider, "model provider");
-  nonEmpty(modelId, "model id");
+  if (provider && modelId) {
+    nonEmpty(provider, "model provider");
+    nonEmpty(modelId, "model id");
+  }
 
   const routingProvider = parsed.FRIDAY_ROUTING_PROVIDER?.trim();
   const routingModelId = parsed.FRIDAY_ROUTING_MODEL_ID?.trim();
@@ -123,9 +124,15 @@ function validateRuntimeEnvironment(parsed: Partial<Record<SupportedKey, string>
     nonEmpty(routingProvider, "routing model provider");
     nonEmpty(routingModelId, "routing model id");
   }
+  if (!routingProvider && !provider) return;
+
   const permissionMode = parsed.FRIDAY_PERMISSION_MODE?.trim().toLowerCase() || "ask";
   if (permissionMode !== "ask" && permissionMode !== "auto" && permissionMode !== "full") {
     throw new Error("permission mode must be ask, auto, or full");
+  }
+  const hostPrivilegeMode = parsed.FRIDAY_HOST_PRIVILEGE_MODE?.trim().toLowerCase() || "none";
+  if (hostPrivilegeMode !== "broker" && hostPrivilegeMode !== "none") {
+    throw new Error("host privilege mode must be broker or none");
   }
 
   const timezone = parsed.FRIDAY_TIMEZONE?.trim();

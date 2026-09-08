@@ -27,7 +27,7 @@ export interface SystemPlannerRequest {
   readonly signal?: AbortSignal | undefined;
 }
 
-export type SystemPresentationMode = "raw" | "analyze";
+export type SystemPresentationMode = "raw" | "present" | "analyze";
 
 export interface SystemTurnPlan {
   readonly actionId: string;
@@ -39,6 +39,7 @@ export interface SystemPresenterRequest {
   readonly userText: string;
   readonly action: SystemPlannerAction;
   readonly output: SystemJsonValue;
+  readonly mode: Exclude<SystemPresentationMode, "raw">;
   readonly signal?: AbortSignal | undefined;
 }
 
@@ -112,11 +113,11 @@ function normalizePlan(value: unknown): SystemTurnPlan {
   return Object.freeze({
     actionId: nonEmptyString(candidate.actionId, "system plan actionId"),
     input: Object.freeze(jsonObject(candidate.input ?? {}, "system plan input")),
-    presentation: candidate.presentation === "analyze" ? "analyze" : "raw",
+    presentation: candidate.presentation === "present" || candidate.presentation === "analyze" ? candidate.presentation : "raw",
   });
 }
 
-function selectedModel(environment: NodeJS.ProcessEnv = process.env): { provider: string; modelId: string } {
+function selectedControlModel(environment: NodeJS.ProcessEnv = process.env): { provider: string; modelId: string } {
   const systemProvider = environment.FRIDAY_SYSTEM_PROVIDER?.trim();
   const systemModelId = environment.FRIDAY_SYSTEM_MODEL_ID?.trim();
   if (Boolean(systemProvider) !== Boolean(systemModelId)) {
@@ -142,6 +143,18 @@ function selectedModel(environment: NodeJS.ProcessEnv = process.env): { provider
   return { provider, modelId };
 }
 
+function selectedMainModel(environment: NodeJS.ProcessEnv = process.env): { provider: string; modelId: string } {
+  const provider = environment.FRIDAY_MODEL_PROVIDER?.trim();
+  const modelId = environment.FRIDAY_MODEL_ID?.trim();
+  if (Boolean(provider) !== Boolean(modelId)) {
+    throw new Error("Main model selection requires both FRIDAY_MODEL_PROVIDER and FRIDAY_MODEL_ID");
+  }
+  if (!provider || !modelId) {
+    throw new Error("Main reasoning model is required for analytical system-result interpretation; configure the main model first");
+  }
+  return { provider, modelId };
+}
+
 function plannerSystemPrompt(): string {
   return [
     "You are FRIDAY's explicit system-action selector.",
@@ -150,6 +163,11 @@ function plannerSystemPrompt(): string {
     "Use only input fields declared by the selected action.",
     "For an operator dashboard or a combined view of jobs, approvals, schedules, delivery failures, and usage choose operator.dashboard.",
     "For general FRIDAY health/status requests choose system.status.",
+    "For onboarding status or 'continue setup' choose onboarding.status or onboarding.continue when available.",
+    "For configuring the main reasoning model during onboarding choose onboarding.main-model.setup when available; it can request missing provider/model fields and protected API credentials from the trusted channel.",
+    "For Doctor/health diagnostics choose diagnostics.doctor; for requests to inspect why a FRIDAY operation failed choose diagnostics.review.",
+    "If the user explicitly asks FRIDAY to diagnose a failure and fix/evolve its own source, choose self-improvement.repair-from-diagnostics when available. Do not choose it for read-only review.",
+    "For local voice setup, CPU/GPU selection, STT language changes, voice changes, or Chatterbox cloning-reference changes choose voice.setup. When the user explicitly asks to use the audio attached to the current turn as the cloning reference, set useAttachedReference=true. For private execution Python setup choose execution.python.setup.",
     "For questions specifically asking what work/tasks/jobs are currently running, choose session.jobs.list when that action is available.",
     "For requests to stop/cancel background project work, choose session.jobs.cancel; the action itself performs deterministic disambiguation and confirmation.",
     "For requests to show a session/job transcript or recent prompts/answers/progress, choose session.transcript when available.",
@@ -157,14 +175,17 @@ function plannerSystemPrompt(): string {
     "For requests to inspect or remove those rules, choose conditional-hooks.list or conditional-hooks.remove when available.",
     "If the user explicitly asks FRIDAY to add/build a software capability that no installed action can currently perform, and self-improvement.ensure-capability is available, choose that action with a concise feature name and implementation objective. That action performs feasibility analysis before messaging, authorization, or code changes.",
     "For other requests that do not match an installed action choose system.actions so the user can see the supported control surface.",
-    "Also return presentation=raw unless the user explicitly asks to analyze, explain, diagnose, interpret, or summarize the action result; then return presentation=analyze.",
+    "Presentation is separate from action selection. Use presentation=raw when the typed action result is already an appropriate user response.",
+    "Use presentation=present for bounded control-plane formatting or summarization that must not add new reasoning. In particular, diagnostics.doctor should normally use present so the full canonical Doctor result is readable in a channel.",
+    "Use presentation=analyze only when the user explicitly asks for substantive causal/root-cause interpretation, non-obvious diagnosis, comparison, or reasoning over the returned system evidence. Analyze is reserved for the main reasoning model, never the routing/system model.",
+    "Do not use system actions or presentation modes as a substitute for ordinary user work. Coding, research, open-ended planning, document/project work, and other general objectives belong to the Agent/main-model path even when they look easy.",
     "When the user explicitly asks for a count such as the last 50 records, put that count into the action input and do not silently reduce it.",
   ].join("\n");
 }
 
 export function createSystemModelPlanner(models: ModelService, credentials: () => ModelCredentialService | undefined = () => undefined): SystemTurnPlanner {
   return async (request) => {
-    const selected = selectedModel();
+    const selected = selectedControlModel();
     const model = models.getModel(selected.provider as never, selected.modelId as never);
     if (!model) throw new Error(`Unknown system model: ${selected.provider}/${selected.modelId}`);
     const apiKey = await credentials()?.getApiKey(selected.provider);
@@ -177,7 +198,7 @@ export function createSystemModelPlanner(models: ModelService, credentials: () =
           content: JSON.stringify({
             request: request.text,
             actions: request.actions,
-            outputShape: { actionId: "host-action-id", input: {}, presentation: "raw|analyze" },
+            outputShape: { actionId: "host-action-id", input: {}, presentation: "raw|present|analyze" },
           }),
           timestamp: Date.now(),
         }],
@@ -205,27 +226,48 @@ export function createSystemModelPlanner(models: ModelService, credentials: () =
 
 export function createSystemModelPresenter(models: ModelService, credentials: () => ModelCredentialService | undefined = () => undefined): SystemPresenter {
   return async (request) => {
-    const selected = selectedModel();
+    const selected = request.mode === "analyze" ? selectedMainModel() : selectedControlModel();
     const model = models.getModel(selected.provider as never, selected.modelId as never);
-    if (!model) throw new Error(`Unknown system model: ${selected.provider}/${selected.modelId}`);
+    if (!model) {
+      throw new Error(request.mode === "analyze"
+        ? `Unknown main reasoning model: ${selected.provider}/${selected.modelId}`
+        : `Unknown system presentation model: ${selected.provider}/${selected.modelId}`);
+    }
     const apiKey = await credentials()?.getApiKey(selected.provider);
     const serialized = outputText(request.output);
+    const systemPrompt = request.mode === "analyze"
+      ? [
+          "You are FRIDAY's main reasoning model analyzing bounded, sanitized system evidence.",
+          "Answer the user's analytical question using only the supplied action output.",
+          "You may infer causes or recommendations only when the evidence supports them; clearly distinguish observations from inference.",
+          "Do not claim tool access or records that are not present. Do not execute or propose a hidden system action from this presentation step.",
+        ].join("\n")
+      : [
+          "You are FRIDAY's bounded control-plane response presenter.",
+          "Format and summarize only the sanitized host-provided action output for the user.",
+          "Do not perform root-cause analysis, open-ended reasoning, planning, coding, or research.",
+          "Preserve every blocking error, warning, and explicit repair/fix instruction that is material to the request.",
+          "Do not invent records or claim access to data not present in the output.",
+        ].join("\n");
     const response = await models.completeSimple(
       model,
       {
-        systemPrompt: [
-          "You are FRIDAY's system-result analyst.",
-          "Analyze only the sanitized host-provided action output.",
-          "Answer the user's explicit analytical question concisely and accurately.",
-          "Do not invent records or claim access to data not present in the output.",
-        ].join("\n"),
+        systemPrompt,
         messages: [{ role: "user", content: JSON.stringify({ request: request.userText, action: request.action, output: serialized }), timestamp: Date.now() }],
       },
-      { temperature: 0, maxTokens: MAX_PRESENTATION_TOKENS, ...(apiKey === undefined ? {} : { apiKey }), ...(request.signal === undefined ? {} : { signal: request.signal }) },
+      {
+        temperature: 0,
+        maxTokens: request.mode === "analyze" ? 2_400 : MAX_PRESENTATION_TOKENS,
+        ...(apiKey === undefined ? {} : { apiKey }),
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
+      },
     );
-    if (response.stopReason === "error" || response.stopReason === "aborted") throw new Error(`System presentation model failed: ${response.errorMessage || response.stopReason}`);
+    if (response.stopReason === "error" || response.stopReason === "aborted") {
+      throw new Error(`System ${request.mode} model failed: ${response.errorMessage || response.stopReason}`);
+    }
+    if (response.stopReason === "length") throw new Error(`System ${request.mode} model output was truncated`);
     const text = response.content.filter((part): part is { type: "text"; text: string } => part.type === "text").map((part) => part.text).join("\n").trim();
-    if (!text) throw new Error("System presentation model returned no text");
+    if (!text) throw new Error(`System ${request.mode} model returned no text`);
     return text.length <= MAX_OUTPUT_CHARS ? text : `${text.slice(0, MAX_OUTPUT_CHARS - 1)}…`;
   };
 }
@@ -350,11 +392,12 @@ export function createSystemTurnExecutor(options: SystemTurnExecutorOptions): Tu
         });
         assertJsonValue(output, `system action ${action.id} output`);
         const presentation = plan.presentation ?? "raw";
-        const text = presentation === "analyze" && options.presenter
+        const text = presentation !== "raw" && options.presenter
           ? await options.presenter({
               userText: context.turn.text,
               action: { id: action.id, label: action.label, description: action.description, parameters: action.parameters },
               output,
+              mode: presentation,
               ...(context.signal === undefined ? {} : { signal: context.signal }),
             })
           : outputText(output);

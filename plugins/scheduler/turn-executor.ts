@@ -181,11 +181,15 @@ function normalizePlan(value: unknown): SchedulerTurnPlan {
 }
 
 function selectedModel(environment: NodeJS.ProcessEnv = process.env): { provider: string; modelId: string } {
-  const provider = environment.FRIDAY_SCHEDULER_PROVIDER?.trim() || environment.FRIDAY_MODEL_PROVIDER?.trim();
-  const modelId = environment.FRIDAY_SCHEDULER_MODEL_ID?.trim() || environment.FRIDAY_MODEL_ID?.trim();
+  const provider = environment.FRIDAY_SCHEDULER_PROVIDER?.trim()
+    || environment.FRIDAY_ROUTING_PROVIDER?.trim()
+    || environment.FRIDAY_MODEL_PROVIDER?.trim();
+  const modelId = environment.FRIDAY_SCHEDULER_MODEL_ID?.trim()
+    || environment.FRIDAY_ROUTING_MODEL_ID?.trim()
+    || environment.FRIDAY_MODEL_ID?.trim();
   if (!provider || !modelId) {
     throw new Error(
-      "Scheduler model selection is required: set FRIDAY_SCHEDULER_PROVIDER/FRIDAY_SCHEDULER_MODEL_ID or FRIDAY_MODEL_PROVIDER/FRIDAY_MODEL_ID",
+      "Scheduler model selection is required: configure a Scheduler, Routing, or main model provider/model pair",
     );
   }
   return { provider, modelId };

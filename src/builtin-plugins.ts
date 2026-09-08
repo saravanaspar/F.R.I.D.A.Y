@@ -11,9 +11,12 @@ import channels from "../plugins/channels/index.js";
 import compaction from "../plugins/compaction/index.js";
 import conditionalHooks from "../plugins/conditional-hooks/index.js";
 import evaluation from "../plugins/evaluation/index.js";
+import diagnostics from "../plugins/diagnostics/index.js";
 import events from "../plugins/events/index.js";
 import execution from "../plugins/execution/index.js";
 import generations from "../plugins/generations/index.js";
+import hostDoctor from "../plugins/host-doctor/index.js";
+import hostPrivileges from "../plugins/host-privileges/index.js";
 import integrations from "../plugins/integrations/index.js";
 import lifecycle from "../plugins/lifecycle/index.js";
 import mcp from "../plugins/mcp/index.js";
@@ -56,9 +59,12 @@ export const BUILTIN_PLUGINS: ReadonlyMap<string, FridayPlugin> = new Map([
   ["./plugins/compaction/index.ts", compaction],
   ["./plugins/conditional-hooks/index.ts", conditionalHooks],
   ["./plugins/evaluation/index.ts", evaluation],
+  ["./plugins/diagnostics/index.ts", diagnostics],
   ["./plugins/events/index.ts", events],
   ["./plugins/execution/index.ts", execution],
   ["./plugins/generations/index.ts", generations],
+  ["./plugins/host-doctor/index.ts", hostDoctor],
+  ["./plugins/host-privileges/index.ts", hostPrivileges],
   ["./plugins/integrations/index.ts", integrations],
   ["./plugins/lifecycle/index.ts", lifecycle],
   ["./plugins/mcp/index.ts", mcp],

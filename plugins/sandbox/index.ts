@@ -5,6 +5,7 @@ import {
   SYSTEM_STATUS_CONTRIBUTION,
 } from "../system/contract.js";
 import { OBSERVABILITY_CAPABILITY } from "../observability/contract.js";
+import { RUNTIME_SETTINGS_CAPABILITY } from "../runtime-settings/contract.js";
 import {
   SANDBOX_CAPABILITY,
   assertSandboxProviderSatisfiesContract,
@@ -26,7 +27,7 @@ export interface SandboxPluginOptions {
 }
 
 export function createSandboxPlugin(options: SandboxPluginOptions = {}): FridayPlugin {
-  return definePlugin({ id: "sandbox", optional: [OBSERVABILITY_CAPABILITY], provides: [SANDBOX_CAPABILITY] }, (ctx) => {
+  return definePlugin({ id: "sandbox", optional: [OBSERVABILITY_CAPABILITY, RUNTIME_SETTINGS_CAPABILITY], provides: [SANDBOX_CAPABILITY] }, (ctx) => {
     const observability = ctx.services.optional(OBSERVABILITY_CAPABILITY);
     const provider = selectSandboxProvider(options.providerId, options.providers ?? []);
     assertSandboxProviderSatisfiesContract(provider);
@@ -80,8 +81,10 @@ export function createSandboxPlugin(options: SandboxPluginOptions = {}): FridayP
           network: true,
         };
       },
-      execute() {
-        return provider.setup();
+      async execute() {
+        const result = await provider.setup();
+        await ctx.services.optional(RUNTIME_SETTINGS_CAPABILITY)?.markOnboardingStep("sandbox", "complete");
+        return result;
       },
     });
   });

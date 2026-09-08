@@ -83,18 +83,20 @@ describe("workspace and binary packaging discovery", () => {
   });
 
   it("keeps bundled-runtime consumers on the stable logical asset targets", async () => {
-    const [sandbox, email, whatsapp, rlm, setup] = await Promise.all([
+    const [sandbox, email, whatsapp, whatsappTooling, rlm, setup] = await Promise.all([
       readFile("plugins/sandbox/providers/kern/index.ts", "utf8"),
       readFile("plugins/channels/runtime/src/transports/email.ts", "utf8"),
       readFile("plugins/channels/runtime/src/transports/whatsapp.ts", "utf8"),
+      readFile("plugins/channels/tooling.ts", "utf8"),
       readFile("plugins/rlm/runtime/src/python-runtime.ts", "utf8"),
       readFile("src/setup-cli.ts", "utf8"),
     ]);
     expect(sandbox).toContain('join(bundled, "sandbox", "providers", "kern", "Containerfile")');
     expect(email).toContain('join(bundled, "channels", "email", "email_bridge.py")');
     expect(whatsapp).toContain('join(bundled, "channels", "whatsapp")');
+    expect(whatsappTooling).toContain('join(bundled, "channels", "whatsapp")');
     expect(rlm).toContain('resolve(bundled, "rlm", "python")');
-    expect(setup).toContain('join(bundledRoot()!, "channels", "whatsapp")');
+    expect(setup).toContain('setupWhatsApp');
   });
 
   it("keeps CI and the SEA builder independent from plugin-internal asset paths", async () => {

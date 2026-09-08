@@ -19,6 +19,13 @@ import {
   type RuntimeSettings,
   type RuntimeSettingsPatch,
 } from "./runtime-env.js";
+import {
+  onboardingNextSteps,
+  readOnboardingState,
+  updateOnboardingStep,
+  type OnboardingStepId,
+  type OnboardingStepStatus,
+} from "./onboarding-state.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { MODEL_CREDENTIALS_CAPABILITY } from "../auth/contract.js";
 import { CHANNELS_TRUSTED_CAPABILITY } from "../channels/trusted-contract.js";
@@ -50,6 +57,7 @@ const SETTINGS_ENV_KEYS = [
   "FRIDAY_ROUTING_PROVIDER",
   "FRIDAY_ROUTING_MODEL_ID",
   "FRIDAY_PERMISSION_MODE",
+  "FRIDAY_HOST_PRIVILEGE_MODE",
   "FRIDAY_TIMEZONE",
   "FRIDAY_WORKSPACE",
   "FRIDAY_SELF_REPOSITORY",
@@ -103,22 +111,33 @@ function assertKnownModel(model: ModelService, provider: string, modelId: string
 }
 
 function validateSettings(model: ModelService, settings: RuntimeSettings): void {
-  assertKnownModel(model, settings.modelProvider, settings.modelId, "main");
-  if (settings.routingProvider && settings.routingModelId) {
-    assertKnownModel(model, settings.routingProvider, settings.routingModelId, "routing");
+  if (settings.modelProvider && settings.modelId) {
+    assertKnownModel(model, settings.modelProvider, settings.modelId, "main");
   }
+  if (!settings.routingProvider || !settings.routingModelId) {
+    throw new Error("A routing model is required even when the main reasoning model is not configured");
+  }
+  assertKnownModel(model, settings.routingProvider, settings.routingModelId, "routing");
 }
 
 function patchFromInput(input: Readonly<SystemJsonObject>): RuntimeSettingsPatch {
   const useMain = optionalBoolean(input, "useMainForRouting");
+  const clearMain = optionalBoolean(input, "clearMainModel") === true;
+  const modelProvider = optionalString(input, "modelProvider");
+  const modelId = optionalString(input, "modelId");
   const routingProvider = optionalString(input, "routingProvider");
   const routingModelId = optionalString(input, "routingModelId");
+  if (clearMain && (modelProvider !== undefined || modelId !== undefined)) {
+    throw new Error("clearMainModel cannot be combined with modelProvider/modelId");
+  }
   if (useMain === true && (routingProvider !== undefined || routingModelId !== undefined)) {
     throw new Error("useMainForRouting cannot be combined with explicit routingProvider/routingModelId");
   }
   return Object.freeze({
-    ...(optionalString(input, "modelProvider") === undefined ? {} : { modelProvider: optionalString(input, "modelProvider") }),
-    ...(optionalString(input, "modelId") === undefined ? {} : { modelId: optionalString(input, "modelId") }),
+    ...(clearMain ? { modelProvider: null, modelId: null } : {
+      ...(modelProvider === undefined ? {} : { modelProvider }),
+      ...(modelId === undefined ? {} : { modelId }),
+    }),
     ...(useMain === true
       ? { routingProvider: null, routingModelId: null }
       : {
@@ -133,13 +152,20 @@ function patchFromInput(input: Readonly<SystemJsonObject>): RuntimeSettingsPatch
 
 function publicSettings(settings: RuntimeSettings | undefined): Record<string, unknown> {
   if (!settings) return { configured: false };
+  const mainConfigured = Boolean(settings.modelProvider && settings.modelId);
   return {
     configured: true,
-    mainModel: { provider: settings.modelProvider, modelId: settings.modelId },
+    routerOnly: !mainConfigured,
+    mainModel: mainConfigured ? { provider: settings.modelProvider, modelId: settings.modelId } : null,
     routingModel: settings.routingProvider && settings.routingModelId
-      ? { provider: settings.routingProvider, modelId: settings.routingModelId, dedicated: true }
-      : { provider: settings.modelProvider, modelId: settings.modelId, dedicated: false },
+      ? {
+          provider: settings.routingProvider,
+          modelId: settings.routingModelId,
+          dedicated: !mainConfigured || settings.routingProvider !== settings.modelProvider || settings.routingModelId !== settings.modelId,
+        }
+      : null,
     permissionMode: settings.permissionMode,
+    hostPrivilegeMode: settings.hostPrivilegeMode ?? "none",
     timezone: settings.timezone,
     workspaceRoot: settings.workspaceRoot ?? null,
     selfRepository: settings.selfRepository ?? null,
@@ -227,6 +253,8 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
 
     const service: RuntimeSettingsService = Object.freeze({
       read: () => readRuntimeSettings(home),
+      onboarding: () => readOnboardingState(home),
+      markOnboardingStep: (step: OnboardingStepId, status: OnboardingStepStatus) => updateOnboardingStep(step, status, home),
       async update(patch: RuntimeSettingsPatch, updateOptions: Parameters<RuntimeSettingsService["update"]>[1] = {}) {
         const release = await acquireUpdateLock();
         let previous: RuntimeSettings | undefined;
@@ -412,21 +440,110 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
     ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
       id: "runtime-settings",
       label: "Runtime settings",
-      snapshot: async () => ({
+      snapshot: async () => {
+        const onboarding = await service.onboarding();
+        return ({
         ...publicSettings(await service.read()),
+        onboarding: onboarding ? { ...onboarding, nextSteps: onboardingNextSteps(onboarding) } : null,
         customModels: (await readCustomModels(home)).map((entry) => ({
           provider: entry.provider,
           modelId: entry.modelId,
           name: entry.name,
           baseUrl: entry.baseUrl,
         })),
+      });
+      },
+    });
+
+    ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+      id: "onboarding.status",
+      label: "Onboarding status",
+      description: "Show persistent Quick/Custom onboarding progress, including mandatory local bootstrap completion and optional steps that can be continued from a trusted channel.",
+      parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+      permission() {
+        return { id: "onboarding.status", effect: "global-operational-read", resource: "onboarding:status", network: false };
+      },
+      async execute() {
+        const state = await service.onboarding();
+        const settings = await service.read();
+        return {
+          state: state ? { ...state, nextSteps: onboardingNextSteps(state) } : null,
+          settings: publicSettings(settings),
+          message: !state
+            ? "Onboarding state is not initialized; run `friday setup` locally."
+            : state.phase === "operational"
+              ? "All onboarding steps are complete or intentionally skipped."
+              : "Continue any pending optional step from this trusted channel, or mark an optional step skipped.",
+        };
+      },
+    });
+
+    ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+      id: "onboarding.continue",
+      label: "Continue onboarding",
+      description: "Resume persistent onboarding from a trusted channel. Returns pending steps and the typed FRIDAY actions that configure them; mandatory router/channel/privilege bootstrap remains local-only.",
+      parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+      permission() {
+        return { id: "onboarding.continue", effect: "global-operational-read", resource: "onboarding:continue", network: false };
+      },
+      async execute() {
+        const state = await service.onboarding();
+        if (!state) return { ready: false, message: "Run `friday setup` locally first." };
+        const pending = onboardingNextSteps(state);
+        return {
+          ready: state.phase !== "local-bootstrap",
+          mode: state.mode,
+          phase: state.phase,
+          pending,
+          actions: {
+            mainModel: ["onboarding.main-model.setup", "runtime.custom-model.configure", "runtime.settings.update", "auth.model-credential", "auth.oauth-login"],
+            permissions: ["runtime.settings.update"],
+            timezone: ["runtime.settings.update"],
+            voice: ["voice.setup"],
+            sandbox: ["sandbox.setup"],
+            executionPython: ["execution.python.setup"],
+            mcp: ["mcp.servers", "mcp.add-server", "mcp.install"],
+            skills: ["skills.install"],
+            selfRepository: ["runtime.settings.update"],
+          },
+          message: pending.length === 0
+            ? "Onboarding is complete."
+            : `Pending optional steps: ${pending.join(", ")}. You can configure or skip them from this trusted channel.`,
+        };
+      },
+    });
+
+    ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+      id: "onboarding.step",
+      label: "Mark onboarding step",
+      description: "Skip an optional onboarding step or reset it to pending. Successful owning setup actions mark their own steps complete; remote callers cannot claim completion without running them. Mandatory router/operator-channel/privilege steps cannot be changed remotely.",
+      parameters: Object.freeze({
+        type: "object",
+        properties: {
+          step: { type: "string", enum: ["mainModel", "permissions", "timezone", "voice", "sandbox", "executionPython", "mcp", "skills", "selfRepository"] },
+          status: { type: "string", enum: ["skipped", "pending"] },
+        },
+        required: ["step", "status"],
+        additionalProperties: false,
       }),
+      permission() {
+        return { id: "onboarding.step", effect: "system-write", resource: "onboarding:state", network: false };
+      },
+      async execute(input) {
+        const step = optionalString(input, "step", 64) as OnboardingStepId | undefined;
+        const status = optionalString(input, "status", 16) as OnboardingStepStatus | undefined;
+        if (!step || !status) throw new Error("step and status are required");
+        if (status === "complete") throw new Error("Onboarding completion is recorded only by the owning successful setup action; use skipped or pending here");
+        if (status !== "skipped" && status !== "pending") throw new Error("status must be skipped or pending");
+        const state = await service.markOnboardingStep(step, status);
+        return { updated: true, state: { ...state, nextSteps: onboardingNextSteps(state) } };
+      },
     });
 
     ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
       id: "runtime.settings",
       label: "Runtime settings",
-      description: "Show the current non-secret main model, routing model, and permission defaults.",
+      description: "Show the current non-secret main/routing models, router-only state, agent permission defaults, and local-only host privilege policy.",
       parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
       permission() {
         return { id: "runtime.settings", effect: "global-operational-read", resource: "runtime:settings", network: false };
@@ -435,14 +552,145 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
     });
 
     ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+      id: "onboarding.main-model.setup",
+      label: "Configure main reasoning model",
+      description: "Interactively configure the optional main reasoning model from the originating trusted channel. Missing provider/model fields use protected prompts; API-key and supported OAuth providers persist credentials directly into Vault before settings are published.",
+      parameters: Object.freeze({
+        type: "object",
+        properties: {
+          provider: { type: "string" },
+          modelId: { type: "string" },
+          persistCredential: { type: "boolean", description: "Capture a durable Vault credential when one is not already stored. Defaults to true." },
+          credentialMethod: { type: "string", enum: ["api-key", "oauth"], description: "Optional credential method when the provider supports more than one. If omitted, FRIDAY asks on the trusted channel when needed." },
+          restart: { type: "boolean" },
+        },
+        additionalProperties: false,
+      }),
+      permission() {
+        return { id: "onboarding.main-model.setup", effect: "system-write", resource: "runtime:main-model", network: true };
+      },
+      async execute(input, context) {
+        if (context.turn.principal.authority !== "channel") {
+          throw new Error("Main-model onboarding requires an originating trusted channel");
+        }
+        const channels = ctx.services.optional(CHANNELS_TRUSTED_CAPABILITY);
+        if (!channels) throw new Error("Trusted Channels support is unavailable");
+        const credentials = ctx.services.optional(MODEL_CREDENTIALS_CAPABILITY);
+        const principal = channelPrincipal(context.turn);
+
+        let provider = optionalString(input, "provider", 128);
+        if (!provider) {
+          const providers = model.getProviders().map(String).sort((left, right) => left.localeCompare(right));
+          provider = (await channels.requestPrompt({
+            principal,
+            title: "Main model provider",
+            message: "Choose the provider for FRIDAY's main reasoning model.",
+            notes: `Available provider ids: ${providers.join(", ").slice(0, 1_800)}`,
+            options: providers.slice(0, 5).map((value) => ({ label: value, value })),
+            allowCustom: true,
+            placeholder: "provider id",
+            maxLength: 128,
+            ...(context.jobId === undefined ? {} : { jobId: context.jobId }),
+          })).trim();
+        }
+        const knownProvider = model.getProviders().find((candidate) => candidate === provider);
+        if (!knownProvider) throw new Error(`Unknown main model provider: ${provider}`);
+
+        let modelId = optionalString(input, "modelId", 160);
+        if (!modelId) {
+          const available = model.getModels(knownProvider)
+            .slice()
+            .sort((left, right) => Number(Boolean(right.featured)) - Number(Boolean(left.featured)) || String(left.id).localeCompare(String(right.id)));
+          if (available.length === 0) throw new Error(`No models are registered for provider ${provider}`);
+          modelId = (await channels.requestPrompt({
+            principal,
+            title: "Main reasoning model",
+            message: `Choose a model from ${provider}.`,
+            notes: `Known model ids: ${available.slice(0, 20).map((entry) => String(entry.id)).join(", ").slice(0, 1_800)}`,
+            options: available.slice(0, 5).map((entry) => ({
+              label: String(entry.name || entry.id),
+              value: String(entry.id),
+              ...(entry.featured ? { description: "featured" } : {}),
+            })),
+            allowCustom: true,
+            placeholder: "model id",
+            maxLength: 160,
+            ...(context.jobId === undefined ? {} : { jobId: context.jobId }),
+          })).trim();
+        }
+        assertKnownModel(model, provider, modelId, "main");
+
+        const persistCredential = optionalBoolean(input, "persistCredential") ?? true;
+        if (!credentials) throw new Error("Model credential service is unavailable");
+        if (persistCredential && !credentials.has(provider)) {
+          const supportsApiKey = credentials.typicallyNeedsApiKey(provider);
+          const supportsOAuth = credentials.supportsOAuth(provider);
+          let credentialMethod = optionalString(input, "credentialMethod", 16);
+          if (credentialMethod !== undefined && credentialMethod !== "api-key" && credentialMethod !== "oauth") {
+            throw new Error("credentialMethod must be api-key or oauth");
+          }
+          if (credentialMethod === "api-key" && !supportsApiKey) {
+            throw new Error(`${provider} does not use FRIDAY's API-key credential flow`);
+          }
+          if (credentialMethod === "oauth" && !supportsOAuth) {
+            throw new Error(`${provider} does not expose a supported OAuth flow`);
+          }
+          if (!credentialMethod && supportsApiKey && supportsOAuth) {
+            credentialMethod = (await channels.requestPrompt({
+              principal,
+              title: "Credential method",
+              message: `${provider} supports more than one credential flow. Choose how FRIDAY should authenticate.`,
+              options: [
+                { label: "API key", value: "api-key", description: "Capture the secret directly into Vault; the model never sees it." },
+                { label: "OAuth", value: "oauth", description: "Complete the provider authorization flow from this trusted channel." },
+              ],
+              allowCustom: false,
+              maxLength: 16,
+              ...(context.jobId === undefined ? {} : { jobId: context.jobId }),
+            })).trim().toLowerCase();
+          }
+          if (!credentialMethod) credentialMethod = supportsApiKey ? "api-key" : supportsOAuth ? "oauth" : undefined;
+          if (credentialMethod === "api-key") {
+            await credentials.captureApiKey({ principal, provider });
+          } else if (credentialMethod === "oauth") {
+            await credentials.captureOAuth({ principal, provider, ...(context.signal === undefined ? {} : { signal: context.signal }) });
+          }
+        }
+
+        const restart = optionalBoolean(input, "restart") ?? true;
+        const previousOnboarding = await service.onboarding();
+        const updated = await service.update({ modelProvider: provider, modelId }, {
+          restart,
+          ...(context.signal === undefined ? {} : { signal: context.signal }),
+          ...(restart ? { beforeRestart: () => confirmRestartWithActiveWork(context, "Main model onboarding") } : {}),
+          afterReply: context.deferAfterReply,
+          onFailure: context.deferOnFailure,
+        });
+        await service.markOnboardingStep("mainModel", "complete");
+        if (previousOnboarding && context.deferOnFailure) {
+          context.deferOnFailure(() => service.markOnboardingStep("mainModel", previousOnboarding.steps.mainModel).then(() => undefined));
+        }
+        return {
+          configured: true,
+          restart,
+          mainModel: { provider: updated.modelProvider, modelId: updated.modelId },
+          message: restart
+            ? "Main reasoning model configured. FRIDAY will perform the verified runtime handoff after this reply."
+            : "Main reasoning model configured. Restart FRIDAY to use it for new reasoning turns.",
+        };
+      },
+    });
+
+    ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
       id: "runtime.settings.update",
       label: "Update runtime settings",
-      description: "Change typed non-secret main/routing model, permission defaults, wall-clock timezone, or the canonical self-improvement source checkout, then safely restart FRIDAY. Use useMainForRouting=true to remove a dedicated routing model.",
+      description: "Change typed non-secret main/routing model, permission defaults, wall-clock timezone, or the canonical self-improvement source checkout, then safely restart FRIDAY. The main model is optional; routing remains required. Host privilege mode is deliberately local-only.",
       parameters: Object.freeze({
         type: "object",
         properties: {
           modelProvider: { type: "string" },
           modelId: { type: "string" },
+          clearMainModel: { type: "boolean" },
           routingProvider: { type: "string" },
           routingModelId: { type: "string" },
           useMainForRouting: { type: "boolean" },
@@ -458,13 +706,28 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
       },
       async execute(input, context) {
         const restart = optionalBoolean(input, "restart") ?? true;
-        const updated = await service.update(patchFromInput(input), {
+        const patch = patchFromInput(input);
+        const previousOnboarding = await service.onboarding();
+        const updated = await service.update(patch, {
           restart,
           ...(context.signal === undefined ? {} : { signal: context.signal }),
           ...(restart ? { beforeRestart: () => confirmRestartWithActiveWork(context, "Runtime settings update") } : {}),
           afterReply: context.deferAfterReply,
           onFailure: context.deferOnFailure,
         });
+        const touched: OnboardingStepId[] = [];
+        if (patch.modelProvider !== undefined || patch.modelId !== undefined) touched.push("mainModel");
+        if (patch.permissionMode !== undefined) touched.push("permissions");
+        if (patch.timezone !== undefined) touched.push("timezone");
+        if (patch.selfRepository !== undefined) touched.push("selfRepository");
+        for (const step of touched) {
+          await service.markOnboardingStep(step, step === "mainModel" && !updated.modelProvider ? "pending" : "complete");
+        }
+        if (previousOnboarding && touched.length > 0 && context.deferOnFailure) {
+          context.deferOnFailure(async () => {
+            for (const step of touched) await service.markOnboardingStep(step, previousOnboarding.steps[step]);
+          });
+        }
         return {
           updated: true,
           restart,
@@ -584,6 +847,7 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
               afterReply: context.deferAfterReply,
               onFailure: context.deferOnFailure,
             });
+            if (useFor === "main") await service.markOnboardingStep("mainModel", "complete");
           }
           return {
             configured: true,

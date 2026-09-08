@@ -7,6 +7,7 @@ import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { collectContributions, definePlugin, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import { createVaultPlugin } from "../plugins/vault/index.js";
 import { createChannelsPlugin } from "../plugins/channels/index.js";
+import { readSavedChannels } from "../plugins/channels/config.js";
 import { CHANNELS_CAPABILITY } from "../plugins/channels/contract.js";
 import { CHANNELS_TRUSTED_CAPABILITY } from "../plugins/channels/trusted-contract.js";
 import { EVENTS_CAPABILITY } from "../plugins/events/contract.js";
@@ -14,6 +15,8 @@ import { createEventsService } from "../plugins/events/events.js";
 import { SCHEDULED_ACTION_CONTRIBUTION } from "../plugins/scheduler/contract.js";
 import type { InboundTurn } from "../plugins/turn-loop/contract.js";
 import { TURN_INGRESS_HOOK } from "../plugins/turn-loop/contract.js";
+import { SYSTEM_ACTION_CONTRIBUTION } from "../plugins/system/contract.js";
+import { getPermissionsStateDir, loadTrustedIdentities } from "../plugins/permissions/identity-store.js";
 
 const dirs: string[] = [];
 const originalFridayHome = process.env.FRIDAY_HOME;
@@ -49,6 +52,22 @@ async function activate(turns?: InboundTurn[]) {
   await friday.activatePlugin(createVaultPlugin({ stateDir: join(home, "vault"), workspaceRoot: process.cwd() }));
   await friday.activatePlugin(createChannelsPlugin({ autoStart: false }));
   return friday;
+}
+
+function channelTurnForSystem(): InboundTurn {
+  return {
+    id: "system-channel-1",
+    principal: {
+      authority: "channel",
+      channel: "telegram",
+      accountId: "main",
+      conversationId: "chat-1",
+      senderId: "operator-1",
+    },
+    text: "configure telegram",
+    timestamp: Date.now(),
+    async reply() {},
+  };
 }
 
 describe("channels plugin", () => {
@@ -109,4 +128,32 @@ describe("channels plugin", () => {
       network: true,
     });
   });
+  it("keeps remote channel configuration non-secret and does not auto-trust configured senders", async () => {
+    await activate();
+    const configure = collectContributions(SYSTEM_ACTION_CONTRIBUTION).find((action) => action.id === "channels.configure");
+    expect(configure).toBeDefined();
+    await expect(configure!.execute({
+      channelId: "telegram",
+      allowedSenderIds: ["operator-1"],
+      settings: { botToken: "must-not-be-stored-here" },
+    }, { turn: channelTurnForSystem() } as never)).rejects.toThrow(/credential.*channels\.capture-credential/i);
+
+    await expect(configure!.execute({
+      channelId: "telegram",
+      accountId: "main",
+      allowedSenderIds: ["operator-1"],
+      requireMention: true,
+      settings: { pollingTimeoutMs: 30000 },
+    }, { turn: channelTurnForSystem() } as never)).resolves.toMatchObject({ channelId: "telegram", enabled: true });
+    const saved = await readSavedChannels();
+    expect(saved.channels.telegram).toMatchObject({
+      accountId: "main",
+      allowedSenderIds: ["operator-1"],
+      requireMention: true,
+      settings: { pollingTimeoutMs: 30000 },
+    });
+    expect(JSON.stringify(saved.channels.telegram)).not.toContain("must-not-be-stored-here");
+    expect(loadTrustedIdentities(getPermissionsStateDir(process.env))).toEqual([]);
+  });
+
 });

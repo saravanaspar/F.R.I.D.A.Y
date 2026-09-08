@@ -4,14 +4,18 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export type RuntimePermissionMode = "ask" | "auto" | "full";
+export type HostPrivilegeMode = "broker" | "none";
 
 export interface RuntimeSettings {
-  readonly modelProvider: string;
-  readonly modelId: string;
-  /** Optional cheap classifier model. Omit both fields to reuse the main model. */
+  /** Main reasoning model. Optional during router-only bootstrap mode. */
+  readonly modelProvider?: string | undefined;
+  readonly modelId?: string | undefined;
+  /** Routing/system classifier model. Always resolved in normalized settings. */
   readonly routingProvider?: string | undefined;
   readonly routingModelId?: string | undefined;
   readonly permissionMode: RuntimePermissionMode;
+  /** Host privilege boundary is independent from agent permission mode. */
+  readonly hostPrivilegeMode?: HostPrivilegeMode | undefined;
   /** IANA timezone used for all user-facing wall-clock scheduling. */
   readonly timezone: string;
   /** Dedicated writable workspace used by model/tool execution; must not overlap FRIDAY_HOME. */
@@ -21,11 +25,12 @@ export interface RuntimeSettings {
 }
 
 export interface RuntimeSettingsPatch {
-  readonly modelProvider?: string | undefined;
-  readonly modelId?: string | undefined;
+  readonly modelProvider?: string | null | undefined;
+  readonly modelId?: string | null | undefined;
   readonly routingProvider?: string | null | undefined;
   readonly routingModelId?: string | null | undefined;
   readonly permissionMode?: RuntimePermissionMode | string | undefined;
+  readonly hostPrivilegeMode?: HostPrivilegeMode | string | undefined;
   readonly timezone?: string | undefined;
   readonly workspaceRoot?: string | undefined;
   readonly selfRepository?: string | null | undefined;
@@ -38,6 +43,7 @@ export const RUNTIME_ENV_KEYS = Object.freeze([
   "FRIDAY_ROUTING_PROVIDER",
   "FRIDAY_ROUTING_MODEL_ID",
   "FRIDAY_PERMISSION_MODE",
+  "FRIDAY_HOST_PRIVILEGE_MODE",
   "FRIDAY_TIMEZONE",
   "FRIDAY_WORKSPACE",
   "FRIDAY_SELF_REPOSITORY",
@@ -59,6 +65,12 @@ export function normalizeRuntimePermissionMode(value: string | undefined): Runti
   const normalized = value?.trim().toLowerCase() || "ask";
   if (normalized === "ask" || normalized === "auto" || normalized === "full") return normalized;
   throw new Error("permission mode must be ask, auto, or full");
+}
+
+export function normalizeHostPrivilegeMode(value: string | undefined): HostPrivilegeMode {
+  const normalized = value?.trim().toLowerCase() || "none";
+  if (normalized === "broker" || normalized === "none") return normalized;
+  throw new Error("host privilege mode must be broker or none");
 }
 
 export function systemTimezone(): string {
@@ -217,25 +229,27 @@ async function readParsedRuntimeEnvironment(home: string): Promise<Partial<Recor
 function settingsFromParsed(parsed: Partial<Record<SupportedKey, string>>, home: string): RuntimeSettings | undefined {
   const provider = parsed.FRIDAY_MODEL_PROVIDER?.trim();
   const modelId = parsed.FRIDAY_MODEL_ID?.trim();
-  const anyMain = Boolean(provider || modelId);
-  if (!anyMain) return undefined;
-  if (!provider || !modelId) throw new Error("FRIDAY runtime environment must define both main model provider and model id");
+  if (Boolean(provider) !== Boolean(modelId)) {
+    throw new Error("FRIDAY runtime environment must define both main model provider and model id, or neither");
+  }
 
-  const routingProvider = parsed.FRIDAY_ROUTING_PROVIDER?.trim();
-  const routingModelId = parsed.FRIDAY_ROUTING_MODEL_ID?.trim();
-  if (Boolean(routingProvider) !== Boolean(routingModelId)) {
+  const explicitRoutingProvider = parsed.FRIDAY_ROUTING_PROVIDER?.trim();
+  const explicitRoutingModelId = parsed.FRIDAY_ROUTING_MODEL_ID?.trim();
+  if (Boolean(explicitRoutingProvider) !== Boolean(explicitRoutingModelId)) {
     throw new Error("FRIDAY runtime environment must define both routing provider and routing model id, or neither");
   }
+  const routingProvider = explicitRoutingProvider || provider;
+  const routingModelId = explicitRoutingModelId || modelId;
+  if (!routingProvider || !routingModelId) return undefined;
+
   return Object.freeze({
-    modelProvider: nonEmpty(provider, "model provider"),
-    modelId: nonEmpty(modelId, "model id"),
-    ...(routingProvider && routingModelId
-      ? {
-          routingProvider: nonEmpty(routingProvider, "routing model provider"),
-          routingModelId: nonEmpty(routingModelId, "routing model id"),
-        }
+    ...(provider && modelId
+      ? { modelProvider: nonEmpty(provider, "model provider"), modelId: nonEmpty(modelId, "model id") }
       : {}),
+    routingProvider: nonEmpty(routingProvider, "routing model provider"),
+    routingModelId: nonEmpty(routingModelId, "routing model id"),
     permissionMode: normalizeRuntimePermissionMode(parsed.FRIDAY_PERMISSION_MODE),
+    hostPrivilegeMode: normalizeHostPrivilegeMode(parsed.FRIDAY_HOST_PRIVILEGE_MODE),
     timezone: normalizeRuntimeTimezone(parsed.FRIDAY_TIMEZONE),
     workspaceRoot: normalizeRuntimeWorkspace(parsed.FRIDAY_WORKSPACE, home),
     ...(normalizeSelfRepository(parsed.FRIDAY_SELF_REPOSITORY) === undefined
@@ -265,21 +279,29 @@ export async function loadRuntimeEnvironment(
 }
 
 function normalizeSettings(settings: RuntimeSettings, home = getFridayHome()): RuntimeSettings {
-  const routingProvider = settings.routingProvider?.trim();
-  const routingModelId = settings.routingModelId?.trim();
-  if (Boolean(routingProvider) !== Boolean(routingModelId)) {
+  const mainProvider = settings.modelProvider?.trim();
+  const mainModelId = settings.modelId?.trim();
+  if (Boolean(mainProvider) !== Boolean(mainModelId)) {
+    throw new Error("main model requires both provider and model id, or neither");
+  }
+  const explicitRoutingProvider = settings.routingProvider?.trim();
+  const explicitRoutingModelId = settings.routingModelId?.trim();
+  if (Boolean(explicitRoutingProvider) !== Boolean(explicitRoutingModelId)) {
     throw new Error("routing model requires both provider and model id, or neither");
   }
+  const routingProvider = explicitRoutingProvider || mainProvider;
+  const routingModelId = explicitRoutingModelId || mainModelId;
+  if (!routingProvider || !routingModelId) {
+    throw new Error("FRIDAY requires a routing model; configure routingProvider/routingModelId or a main model");
+  }
   return Object.freeze({
-    modelProvider: nonEmpty(settings.modelProvider, "model provider"),
-    modelId: nonEmpty(settings.modelId, "model id"),
-    ...(routingProvider && routingModelId
-      ? {
-          routingProvider: nonEmpty(routingProvider, "routing model provider"),
-          routingModelId: nonEmpty(routingModelId, "routing model id"),
-        }
+    ...(mainProvider && mainModelId
+      ? { modelProvider: nonEmpty(mainProvider, "model provider"), modelId: nonEmpty(mainModelId, "model id") }
       : {}),
+    routingProvider: nonEmpty(routingProvider, "routing model provider"),
+    routingModelId: nonEmpty(routingModelId, "routing model id"),
     permissionMode: normalizeRuntimePermissionMode(settings.permissionMode),
+    hostPrivilegeMode: normalizeHostPrivilegeMode(settings.hostPrivilegeMode),
     timezone: normalizeRuntimeTimezone(settings.timezone),
     workspaceRoot: normalizeRuntimeWorkspace(settings.workspaceRoot, home),
     ...(normalizeSelfRepository(settings.selfRepository) === undefined
@@ -292,15 +314,16 @@ export function serializeRuntimeSettings(settings: RuntimeSettings, home = getFr
   const normalized = normalizeSettings(settings, home);
   return [
     "# FRIDAY non-secret runtime defaults. Secrets belong in Vault.",
-    `FRIDAY_MODEL_PROVIDER=${encodeValue(normalized.modelProvider)}`,
-    `FRIDAY_MODEL_ID=${encodeValue(normalized.modelId)}`,
-    ...(normalized.routingProvider && normalized.routingModelId
+    ...(normalized.modelProvider && normalized.modelId
       ? [
-          `FRIDAY_ROUTING_PROVIDER=${encodeValue(normalized.routingProvider)}`,
-          `FRIDAY_ROUTING_MODEL_ID=${encodeValue(normalized.routingModelId)}`,
+          `FRIDAY_MODEL_PROVIDER=${encodeValue(normalized.modelProvider)}`,
+          `FRIDAY_MODEL_ID=${encodeValue(normalized.modelId)}`,
         ]
       : []),
+    `FRIDAY_ROUTING_PROVIDER=${encodeValue(normalized.routingProvider!)}`,
+    `FRIDAY_ROUTING_MODEL_ID=${encodeValue(normalized.routingModelId!)}`,
     `FRIDAY_PERMISSION_MODE=${encodeValue(normalized.permissionMode)}`,
+    `FRIDAY_HOST_PRIVILEGE_MODE=${encodeValue(normalized.hostPrivilegeMode!)}`,
     `FRIDAY_TIMEZONE=${encodeValue(normalized.timezone)}`,
     `FRIDAY_WORKSPACE=${encodeValue(normalized.workspaceRoot!)}`,
     ...(normalized.selfRepository ? [`FRIDAY_SELF_REPOSITORY=${encodeValue(normalized.selfRepository)}`] : []),
@@ -341,15 +364,23 @@ export async function updateRuntimeSettings(
 ): Promise<RuntimeSettings> {
   const current = await readRuntimeSettings(home);
   if (!current) throw new Error("FRIDAY runtime settings do not exist; run `friday setup` first");
-  const routingProvider = patch.routingProvider === null ? undefined : (patch.routingProvider ?? current.routingProvider);
-  const routingModelId = patch.routingModelId === null ? undefined : (patch.routingModelId ?? current.routingModelId);
+
+  const clearMain = patch.modelProvider === null || patch.modelId === null;
+  const modelProvider = clearMain ? undefined : (patch.modelProvider ?? current.modelProvider);
+  const modelId = clearMain ? undefined : (patch.modelId ?? current.modelId);
+  if (Boolean(modelProvider) !== Boolean(modelId)) {
+    throw new Error("main model update requires both modelProvider and modelId, or clearing both");
+  }
+
   const clearRouting = patch.routingProvider === null || patch.routingModelId === null;
+  const routingProvider = clearRouting ? undefined : (patch.routingProvider ?? current.routingProvider);
+  const routingModelId = clearRouting ? undefined : (patch.routingModelId ?? current.routingModelId);
   const selfRepository = patch.selfRepository === null ? undefined : (patch.selfRepository ?? current.selfRepository);
   const next = normalizeSettings({
-    modelProvider: patch.modelProvider ?? current.modelProvider,
-    modelId: patch.modelId ?? current.modelId,
-    ...(clearRouting ? {} : routingProvider && routingModelId ? { routingProvider, routingModelId } : {}),
+    ...(modelProvider && modelId ? { modelProvider, modelId } : {}),
+    ...(routingProvider && routingModelId ? { routingProvider, routingModelId } : {}),
     permissionMode: normalizeRuntimePermissionMode(patch.permissionMode ?? current.permissionMode),
+    hostPrivilegeMode: normalizeHostPrivilegeMode(patch.hostPrivilegeMode ?? current.hostPrivilegeMode),
     timezone: normalizeRuntimeTimezone(patch.timezone ?? current.timezone),
     workspaceRoot: normalizeRuntimeWorkspace(patch.workspaceRoot ?? current.workspaceRoot, home),
     ...(selfRepository === undefined ? {} : { selfRepository }),

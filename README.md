@@ -161,14 +161,17 @@ friday setup
 friday
 ```
 
-On the first setup, F.R.I.D.A.Y requires:
+On the first setup, F.R.I.D.A.Y asks for **Quick setup** or **Custom setup**. Existing/local onboarding is not removed. Both modes begin with the same mandatory local security block:
 
-1. a main model;
-2. provider credentials when the selected provider requires them;
-3. your IANA wall-clock timezone, for example `Asia/Kolkata`;
-4. at least **one enabled ingress channel** with one explicitly confirmed exact operator identity.
+1. a routing/system model and its credential when required;
+2. at least **one enabled ingress channel** with one explicitly confirmed exact operator identity;
+3. an explicit host privilege policy: **restricted approved-operation broker** or **no privileged operations**.
 
-Runtime defaults are not published until first-run channel setup and exact operator pairing are complete. `allowAll` may widen transport admission, but it never creates an operator implicitly. Secrets are never written to `runtime.env`. Setup normally validates and stores required provider credentials in Vault; if you explicitly keep an already-present environment credential environment-managed, Doctor reports that it is not durable for unattended/service restarts.
+A main reasoning model is no longer mandatory during bootstrap. In router-only mode, typed setup/admin actions continue to work while general reasoning requests explain that a main model still needs to be configured. **Quick setup** stops after the mandatory block so you can start F.R.I.D.A.Y and send `continue setup` from the paired trusted channel. **Custom setup** keeps the mandatory block first, then offers the existing terminal model/runtime/Voice/sandbox/Python/self-improvement setup areas as optional/skippable steps. Anything skipped can still be configured later locally or from the trusted channel.
+
+Runtime defaults are not published until the routing model and first exact operator pairing are complete. `allowAll` may widen transport admission, but it never creates an operator implicitly. The host privilege policy is independent from Agent permission mode: `full` Agent permission still cannot sudo when host privilege mode is `none`. Broker mode never grants an arbitrary root shell; sudo authentication/installation happens only in the local terminal, and remote operations use only the fixed root-owned helper with `sudo -n`. Secrets are never written to `runtime.env`.
+
+After bootstrap, a trusted channel can continue onboarding and administration with typed actions for the main/routing models, permissions/timezone, additional channels, Voice, sandbox, execution Python, MCP, Skills, self-improvement source, Doctor and diagnostics. Channel `diagnostics.doctor` runs the same canonical check set as local `friday doctor`; only the presentation differs. `onboarding.main-model.setup` is conversational: it can ask for provider/model choices and, when needed, choose API-key or supported OAuth authentication. API-key input and OAuth code/redirect prompts use protected channel interactions, and resulting credentials go directly to Vault instead of through ordinary router/main-model text. Successful Voice, execution-Python, sandbox, MCP and Skills operations advance the resumable onboarding state automatically.
 
 Useful setup commands:
 
@@ -180,7 +183,8 @@ friday setup execution-python
 friday setup self-repository /path/to/F.R.I.D.A.Y
 friday setup whatsapp
 friday setup voice
-friday setup privileges
+friday setup privileges broker
+friday setup privileges none
 friday setup --help
 ```
 
@@ -222,7 +226,7 @@ Email identity is derived from the parsed `From` address; F.R.I.D.A.Y does not c
 
 The `friday` runtime does not read terminal conversation input and registers no CLI channel. The command line is reserved for setup/onboarding compatibility, doctor, and bounded stopped-runtime maintenance.
 
-Voice is an optional plugin, not a second conversational runtime. `friday setup voice` now offers hosted providers or automatically provisioned local models. Local STT choices are Whisper `tiny/base/small` Q5_1 builds for `whisper.cpp` with RAM/accuracy guidance; local TTS choices are Chatterbox Nano (voice cloning + paralinguistic expression), KittenTTS Nano int8, and Piper with RAM/cloning/expression guidance. Chatterbox defaults to CPU-only PyTorch; if a working NVIDIA GPU is detected, setup explicitly asks the operator to choose CPU or NVIDIA CUDA before installing Python dependencies, and CUDA is never selected just because a GPU exists. Selected local assets are installed under private FRIDAY tooling and runtime inference is forced offline. On Debian/Ubuntu, local voice setup automatically detects and installs its fixed approved host dependencies and can bootstrap the narrowly scoped privilege broker itself; any sudo password prompt stays in the local OS terminal, and neither FRIDAY nor the model receives sudo/root capability. `friday setup privileges` remains available for manual pre-provisioning/repair. Audio attachments are persisted by Artifacts once, then Voice enriches them with a bounded STT transcript marked as untrusted user content. Hosted provider keys remain host-side in Vault.
+Voice is an optional plugin, not a second conversational runtime. `friday setup voice` now offers hosted providers or automatically provisioned local models. Local STT choices are Whisper `tiny/base/small` Q5_1 builds for `whisper.cpp` with RAM/accuracy guidance; local TTS choices are Chatterbox Nano (voice cloning + paralinguistic expression), KittenTTS Nano int8, and Piper with RAM/cloning/expression guidance. Chatterbox defaults to CPU-only PyTorch; if a working NVIDIA GPU is detected, setup explicitly asks the operator to choose CPU or NVIDIA CUDA before installing Python dependencies, and CUDA is never selected just because a GPU exists. Selected local assets are installed under private FRIDAY tooling and runtime inference is forced offline. On Debian/Ubuntu, local voice setup automatically detects and installs its fixed approved host dependencies and can bootstrap the narrowly scoped privilege broker itself; any sudo password prompt stays in the local OS terminal, and neither FRIDAY nor the model receives sudo/root capability. `friday setup privileges` remains available for manual pre-provisioning/repair. Audio attachments are persisted by Artifacts once, then Voice enriches them with a bounded STT transcript marked as untrusted user content. A trusted channel can also set/replace Chatterbox cloning reference audio from one attached audio artifact or a validated host path, or clear it later; FRIDAY stages the reference privately without resetting unrelated Voice settings. Hosted provider keys remain host-side in Vault.
 
 ## How it fits together
 
@@ -314,7 +318,7 @@ Catchable fatal failures are secret-redacted and synchronously recorded under:
 ~/.friday/logs/crashes.ndjson
 ```
 
-A hard `SIGKILL`, some OOM kills, or total host failure can still prevent application-level logging, so supervisor/system logs remain important.
+A hard `SIGKILL`, some OOM kills, or total host failure can still prevent application-level logging, so supervisor/system logs remain important. Setup commands also append bounded redacted outcome records to `~/.friday/logs/setup.ndjson`. From a trusted channel, `run doctor` / diagnostic review can inspect FRIDAY-owned status, operational failures, failed spans, crashes and setup outcomes. It deliberately does not read arbitrary host logs or Vault secret values. With a configured main reasoning model, an operator may explicitly approve diagnostic self-repair; the existing isolated candidate/evaluation/promotion/handoff gates remain mandatory.
 
 For always-on Linux installations, an example systemd user unit is included:
 

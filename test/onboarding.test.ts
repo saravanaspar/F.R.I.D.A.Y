@@ -2,7 +2,7 @@ import { chmod, mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { runOnboarding as runOnboardingRaw, type OnboardingOptions } from "../src/onboarding.js";
+import { runOnboarding as runOnboardingRaw, runRouterBootstrap, type OnboardingOptions } from "../src/onboarding.js";
 import { maybeManageChannels } from "../src/onboarding-channels.js";
 import { readSavedChannels, updateSavedChannel } from "../plugins/channels/config.js";
 import { getPermissionsStateDir, loadTrustedIdentities, upsertTrustedIdentity } from "../plugins/permissions/identity-store.js";
@@ -82,7 +82,10 @@ describe("FRIDAY onboarding", () => {
     expect(parseRuntimeEnvironment(text)).toEqual({
       FRIDAY_MODEL_PROVIDER: "openai",
       FRIDAY_MODEL_ID: "gpt-test",
+      FRIDAY_ROUTING_PROVIDER: "openai",
+      FRIDAY_ROUTING_MODEL_ID: "gpt-test",
       FRIDAY_PERMISSION_MODE: "ask",
+      FRIDAY_HOST_PRIVILEGE_MODE: "none",
       FRIDAY_TIMEZONE: expect.any(String),
       FRIDAY_WORKSPACE: join(dirname(home), "FRIDAY-workspace"),
     });
@@ -201,7 +204,10 @@ describe("FRIDAY onboarding", () => {
     await expect(runOnboarding({ home, setupSandbox: false, io, probeSandbox })).resolves.toEqual({
       modelProvider: "stored-provider",
       modelId: "stored-model",
+      routingProvider: "stored-provider",
+      routingModelId: "stored-model",
       permissionMode: "auto",
+      hostPrivilegeMode: "none",
       timezone: expect.any(String),
       workspaceRoot: join(dirname(home), "FRIDAY-workspace"),
       selfRepository: "/srv/friday-source",
@@ -234,8 +240,8 @@ describe("FRIDAY onboarding", () => {
 
     await runOnboarding({ home, useMainForRouting: true, setupSandbox: false, io, probeSandbox });
     const parsed = parseRuntimeEnvironment(await readFile(getRuntimeEnvironmentPath(home), "utf8"));
-    expect(parsed.FRIDAY_ROUTING_PROVIDER).toBeUndefined();
-    expect(parsed.FRIDAY_ROUTING_MODEL_ID).toBeUndefined();
+    expect(parsed.FRIDAY_ROUTING_PROVIDER).toBe("main-provider");
+    expect(parsed.FRIDAY_ROUTING_MODEL_ID).toBe("main-model");
     expect(parsed.FRIDAY_MODEL_PROVIDER).toBe("main-provider");
   });
 
@@ -424,4 +430,35 @@ describe("FRIDAY onboarding", () => {
     expect((await readSavedChannels(home)).channels.whatsapp).toBeUndefined();
     expect(loadTrustedIdentities(getPermissionsStateDir({ ...process.env, FRIDAY_HOME: home }))).toEqual([]);
   });
+
+  it("supports mandatory router-only bootstrap while keeping the main reasoning model optional", async () => {
+    const home = await temporaryDirectory();
+    await updateSavedChannel("whatsapp", { enabled: true, accountId: "default", allowedSenderIds: ["operator-1"] }, home);
+    upsertTrustedIdentity(getPermissionsStateDir({ ...process.env, FRIDAY_HOME: home }), {
+      channel: "whatsapp", accountId: "default", senderId: "operator-1", role: "operator",
+    });
+    const saved = await runRouterBootstrap({
+      home,
+      routingProvider: "router-provider",
+      routingModel: "router-model",
+      permission: "ask",
+      hostPrivilegeMode: "none",
+      timezone: "UTC",
+      catalog: { providers: () => [], models: () => [] },
+      io: { isInteractive: false, question: async () => { throw new Error("unexpected prompt"); }, write: () => undefined },
+    });
+    expect(saved.modelProvider).toBeUndefined();
+    expect(saved).toMatchObject({
+      routingProvider: "router-provider",
+      routingModelId: "router-model",
+      permissionMode: "ask",
+      hostPrivilegeMode: "none",
+    });
+    expect(parseRuntimeEnvironment(await readFile(getRuntimeEnvironmentPath(home), "utf8"))).toMatchObject({
+      FRIDAY_ROUTING_PROVIDER: "router-provider",
+      FRIDAY_ROUTING_MODEL_ID: "router-model",
+      FRIDAY_HOST_PRIVILEGE_MODE: "none",
+    });
+  });
+
 });

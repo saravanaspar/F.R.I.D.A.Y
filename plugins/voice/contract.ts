@@ -27,3 +27,5 @@ export interface VoiceService {
 }
 
 export const VOICE_CAPABILITY: Capability<VoiceService> = defineCapability<VoiceService>("voice");
+
+export type { VoiceSettings } from "@friday/voice";

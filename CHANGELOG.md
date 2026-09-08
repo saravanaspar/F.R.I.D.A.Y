@@ -5,6 +5,30 @@ Notable user-facing changes to F.R.I.D.A.Y are tracked here.
 The project is in active development. GitHub Releases contain the authoritative
 published release artifacts and generated release notes.
 
+## [1.0.3] - Unreleased
+
+### Remote-first onboarding and administration
+
+- Added Quick and Custom first-run setup modes without removing the existing local onboarding surfaces. Both modes require the routing model, one exact trusted operator channel, and an explicit host privilege policy locally. Quick setup stops after that mandatory block and hands the remaining optional onboarding to the trusted channel; Custom setup offers the existing terminal configuration areas as optional/skippable steps.
+- Added router-only bootstrap runtime settings. A main reasoning model is optional during onboarding while typed system/admin operations remain available through the routing model. Legacy main-only v1.0.2 runtime settings are upgraded by deriving the router from the main model.
+- Added a private resumable onboarding state under `FRIDAY_HOME/onboarding/state.json`, with mandatory local steps that cannot be skipped and optional steps that can be completed or intentionally skipped locally or from a trusted channel.
+- Separated agent permission mode (`ask`/`auto`/`full`) from the fail-closed host privilege policy (`broker`/`none`). The policy can only be selected or changed locally (`friday setup privileges [broker|none]`); broker mode remains restricted to explicit root-owned helper operations and `none` never invokes sudo.
+- Added trusted-channel administration for runtime settings, conversational protected main-model setup, additional channels with protected Vault credential capture, Voice (hosted or local, including explicit Chatterbox CPU/GPU selection), execution Python, Doctor/diagnostics, and existing sandbox/MCP/Skills/self-repository actions. Successful optional setup actions advance the resumable onboarding state automatically.
+- Unified trusted-channel `diagnostics.doctor` and local `friday doctor` on one canonical host-owned Doctor collector. A narrow read-only `doctor.host` capability now carries only typed check results into the model/channel-facing Diagnostics plugin, so both surfaces run the same installation, configuration, security, tooling, Voice/channel/Vault/sandbox, backup/recovery, crash and disk checks without giving Diagnostics process-spawn, shell, repair, or sibling-implementation authority. `diagnostics.review` layers bounded FRIDAY-owned logs, failed spans and plugin/runtime evidence over that same Doctor result.
+- Extended trusted-channel Voice administration so Chatterbox cloning reference audio can be set or replaced from a validated host path, replaced from one attached audio artifact, or cleared after onboarding. Reference audio is copied into private content-addressed FRIDAY tooling with mode `0600`, and partial updates preserve unrelated STT/TTS/language/voice/compute settings.
+- Formalized the router/main-model execution boundary by ownership rather than difficulty: the routing/System model may select typed FRIDAY control-plane actions, parse bounded schedules, and optionally present already-validated system results under a no-new-reasoning prompt; substantive diagnostic interpretation and all ordinary user work continue through the configured main reasoning model. `transient:utility` remains a main-model Agent path rather than a router execution shortcut.
+- Hardened remote onboarding state and Voice partial updates: generic state edits can skip/reset optional steps but cannot falsely mark them complete; untouched STT/TTS settings are preserved, `language=auto` clears a fixed language, and a new Chatterbox setup requires an explicit CPU/CUDA choice whenever a usable NVIDIA GPU is detected.
+- Updated Doctor credential health to recognize canonical OAuth Vault bundles as well as API-key records, preventing OAuth-only Anthropic/OpenAI-Codex/GitHub-Copilot setups from being reported as missing credentials.
+- Added bounded channel diagnostics that combine plugin status, onboarding/runtime state, recent redacted operational logs, failed spans, crashes, and private setup/provisioning outcome records without reading arbitrary host logs or Vault secrets.
+- Added permission-gated diagnostic self-repair. Router-only mode may review evidence; source-code repair requires a configured main reasoning model, an originating trusted operator channel, a second explicit code-change approval, the existing isolated worktree/evaluation gates, verified promotion, and durable request resume after handoff.
+
+### Security
+
+- Remote channel setup never accepts sudo passwords. When host privilege policy is `none`, root-required operations return exact manual host commands instead of invoking sudo. Broker mode can only call the pre-installed fixed helper with `sudo -n`.
+- Remote channel credentials use protected capture directly into canonical Vault references and are not forwarded to the router/main model. Configuring a channel never implicitly trusts a new sender; operator trust remains a separate explicit Permissions action.
+- Setup/diagnostic logs are private, bounded and secret-redacted. Diagnostics deliberately limits itself to FRIDAY-owned evidence instead of scraping `/var/log`, unrestricted `journalctl`, arbitrary files, or Vault secret values.
+- Remote-triggered execution-Python and WhatsApp tooling subprocesses use an allowlisted host environment so model/channel/Vault credentials are not inherited by `uv`, Python/pip, or npm package-manager processes.
+
 ## [1.0.2] - 2026-09-08
 
 F.R.I.D.A.Y v1.0.2 hardens OAuth and sandbox execution, makes sandbox backends

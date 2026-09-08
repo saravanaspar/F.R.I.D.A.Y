@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { AGENT_TOOL_CONTRIBUTION } from "../plugins/turn-loop/contract.js";
+import { SYSTEM_ACTION_CONTRIBUTION } from "../plugins/system/contract.js";
+import { DIAGNOSTICS_CAPABILITY } from "../plugins/diagnostics/contract.js";
+import { CHANNELS_TRUSTED_CAPABILITY } from "../plugins/channels/trusted-contract.js";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { collectContributions, definePlugin, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import { AUTONOMY_CAPABILITY } from "../plugins/autonomy/contract.js";
@@ -17,9 +20,21 @@ import { SELF_IMPROVEMENT_CAPABILITY } from "../plugins/self-improvement/contrac
 import { WORKTREES_CAPABILITY } from "../plugins/worktrees/contract.js";
 import { PluginTestHost } from "./helpers/plugin-host.js";
 
-afterEach(() => uninstallCapabilityRegistry());
+const previousMainProvider = process.env.FRIDAY_MODEL_PROVIDER;
+const previousMainModel = process.env.FRIDAY_MODEL_ID;
+const previousSelfRepository = process.env.FRIDAY_SELF_REPOSITORY;
 
-async function assemble(options: { clean: boolean; feasible?: boolean; placement?: "reuse-existing" | "extend-plugin" | "mcp" | "new-plugin" | "host"; mcpMatch?: boolean }) {
+afterEach(() => {
+  uninstallCapabilityRegistry();
+  if (previousMainProvider === undefined) delete process.env.FRIDAY_MODEL_PROVIDER;
+  else process.env.FRIDAY_MODEL_PROVIDER = previousMainProvider;
+  if (previousMainModel === undefined) delete process.env.FRIDAY_MODEL_ID;
+  else process.env.FRIDAY_MODEL_ID = previousMainModel;
+  if (previousSelfRepository === undefined) delete process.env.FRIDAY_SELF_REPOSITORY;
+  else process.env.FRIDAY_SELF_REPOSITORY = previousSelfRepository;
+});
+
+async function assemble(options: { clean: boolean; feasible?: boolean; placement?: "reuse-existing" | "extend-plugin" | "mcp" | "new-plugin" | "host"; mcpMatch?: boolean; diagnostics?: boolean; approval?: boolean }) {
   const order: string[] = [];
   const feasibilityMessages: string[] = [];
   const friday = new PluginTestHost();
@@ -63,6 +78,29 @@ async function assemble(options: { clean: boolean; feasible?: boolean; placement
       async createWorktree() { order.push("BUILD-STARTED"); throw new Error("build should not start in this test"); },
       async removeWorktree() { return undefined; },
   } as never)), { defer: true });
+  if (options.diagnostics) {
+    await friday.activatePlugin(definePlugin({ id: "test-si-diagnostics", provides: [DIAGNOSTICS_CAPABILITY] }, (ctx) => ctx.services.provide(DIAGNOSTICS_CAPABILITY, {
+      async doctor() { return []; },
+      async review() {
+        order.push("diagnostics-review");
+        return {
+          generatedAt: "2026-09-08T00:00:00.000Z",
+          doctor: [],
+          runtime: { routerOnly: false },
+          statuses: {},
+          logs: [],
+          spans: [],
+          crashes: [],
+          setup: [{ component: "voice", operation: "setup voice", outcome: "failure", message: "verification failed" }],
+          suggestedActions: [],
+        };
+      },
+    } as never)), { defer: true });
+    await friday.activatePlugin(definePlugin({ id: "test-si-channels", provides: [CHANNELS_TRUSTED_CAPABILITY] }, (ctx) => ctx.services.provide(CHANNELS_TRUSTED_CAPABILITY, {
+      async requestApproval() { order.push("diagnostic-approval"); return options.approval === true; },
+      async watchCancellation() { throw new Error("build should not start when diagnostic approval is denied"); },
+    } as never)), { defer: true });
+  }
   if (options.mcpMatch !== undefined) {
     await friday.activatePlugin(definePlugin({ id: "test-si-mcp", provides: [MCP_CAPABILITY] }, (ctx) => ctx.services.provide(MCP_CAPABILITY, {
       servers: () => [{ id: "computer", label: "Computer MCP", url: "https://example.com/mcp", authKind: "none", builtIn: false, credentialConfigured: true, connected: true }],
@@ -171,6 +209,49 @@ describe("self-improvement feasibility gate", () => {
     expect(result.result).toBeUndefined();
     expect(authorized).toBe(false);
     expect(order).toEqual(["feasibility-model", "mcp-list-tools", "mcp-verifier", "mcp-message"]);
+    expect(order).not.toContain("BUILD-STARTED");
+  });
+
+  it("allows diagnostic review in router-only deployments but refuses self-editing without a main reasoning model", async () => {
+    delete process.env.FRIDAY_MODEL_PROVIDER;
+    delete process.env.FRIDAY_MODEL_ID;
+    await assemble({ clean: true, diagnostics: true, approval: false });
+    const action = collectContributions(SYSTEM_ACTION_CONTRIBUTION).find((entry) => entry.id === "self-improvement.repair-from-diagnostics");
+    expect(action).toBeDefined();
+    await expect(action!.execute({}, {
+      turn: {
+        id: "repair-router-only",
+        principal: { authority: "channel", channel: "telegram", accountId: "main", conversationId: "chat", senderId: "operator" },
+        text: "review and fix the voice failure",
+        timestamp: Date.now(),
+        async reply() {},
+      },
+      deferAfterReply() {},
+    })).rejects.toThrow(/main reasoning model/i);
+  });
+
+  it("requires a second explicit trusted-channel approval before diagnostic self-repair can build", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "test";
+    process.env.FRIDAY_MODEL_ID = "model";
+    process.env.FRIDAY_SELF_REPOSITORY = process.cwd();
+    const { order } = await assemble({ clean: true, diagnostics: true, approval: false });
+    const action = collectContributions(SYSTEM_ACTION_CONTRIBUTION).find((entry) => entry.id === "self-improvement.repair-from-diagnostics");
+    expect(action).toBeDefined();
+    const replies: string[] = [];
+    const result = await action!.execute({ component: "voice" }, {
+      turn: {
+        id: "repair-denied",
+        principal: { authority: "channel", channel: "telegram", accountId: "main", conversationId: "chat", senderId: "operator" },
+        text: "review and fix the voice failure",
+        timestamp: Date.now(),
+        async reply(text: string) { replies.push(text); },
+      },
+      destinationId: "session:test",
+      deferAfterReply() { throw new Error("handoff must not be scheduled when approval is denied"); },
+    });
+    expect(result).toMatchObject({ approved: false, changed: false });
+    expect(replies[0]).toContain("No source code has been changed");
+    expect(order).toEqual(["diagnostics-review", "diagnostic-approval"]);
     expect(order).not.toContain("BUILD-STARTED");
   });
 
