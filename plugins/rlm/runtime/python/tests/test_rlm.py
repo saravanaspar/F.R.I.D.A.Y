@@ -28,6 +28,29 @@ class RlmShimTest(unittest.TestCase):
             {"prompt": "check API", "kwargs": {"name": "api-reviewer", "model": "test/child"}},
         )
 
+    def test_gather_fans_out_then_waits_for_terminal_children(self) -> None:
+        host_request = AsyncMock(
+            side_effect=[
+                {
+                    "subagents": [
+                        {"rlm_child_id": "sub-a", "name": "a", "session_dir": "/tmp/a", "model": "test/child"},
+                        {"rlm_child_id": "sub-b", "name": "b", "session_dir": "/tmp/b", "model": "test/child"},
+                    ]
+                },
+                {
+                    "subagents": [
+                        {"rlm_child_id": "sub-a", "active_session_id": None, "session_id": "sa", "session_name": "a", "session_dir": "/tmp/a", "status": "completed"},
+                        {"rlm_child_id": "sub-b", "active_session_id": None, "session_id": "sb", "session_name": "b", "session_dir": "/tmp/b", "status": "completed"},
+                    ]
+                },
+            ]
+        )
+        with patch.object(rlm_module, "host_request", host_request):
+            children = asyncio.run(rlm_module.rlm.gather(["one", {"prompt": "two", "name": "b"}], timeout=5))
+        self.assertEqual([child.status for child in children], ["completed", "completed"])
+        self.assertEqual(host_request.await_args_list[0].args[0], "rlm.spawn_many")
+        self.assertEqual(host_request.await_args_list[1].args[0], "rlm.wait_subagents")
+
     def test_finds_models(self) -> None:
         host_request = AsyncMock(
             return_value={

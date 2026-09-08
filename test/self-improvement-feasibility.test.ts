@@ -7,6 +7,8 @@ import { EVALUATION_CAPABILITY } from "../plugins/evaluation/contract.js";
 import { EXECUTION_CAPABILITY } from "../plugins/execution/contract.js";
 import { GENERATIONS_CAPABILITY } from "../plugins/generations/contract.js";
 import { LIFECYCLE_CAPABILITY } from "../plugins/lifecycle/contract.js";
+import { MCP_CAPABILITY } from "../plugins/mcp/contract.js";
+import { MCP_TRUSTED_CAPABILITY } from "../plugins/mcp/trusted-contract.js";
 import { MODEL_CAPABILITY } from "../plugins/model/contract.js";
 import { PERMISSIONS_CAPABILITY } from "../plugins/permissions/contract.js";
 import { SANDBOX_CAPABILITY } from "../plugins/sandbox/contract.js";
@@ -17,7 +19,7 @@ import { PluginTestHost } from "./helpers/plugin-host.js";
 
 afterEach(() => uninstallCapabilityRegistry());
 
-async function assemble(options: { clean: boolean; feasible?: boolean; placement?: "reuse-existing" | "extend-plugin" | "mcp" | "new-plugin" | "host" }) {
+async function assemble(options: { clean: boolean; feasible?: boolean; placement?: "reuse-existing" | "extend-plugin" | "mcp" | "new-plugin" | "host"; mcpMatch?: boolean }) {
   const order: string[] = [];
   const feasibilityMessages: string[] = [];
   const friday = new PluginTestHost();
@@ -32,7 +34,11 @@ async function assemble(options: { clean: boolean; feasible?: boolean; placement
   await friday.activatePlugin(definePlugin({ id: "test-si-lifecycle", provides: [LIFECYCLE_CAPABILITY] }, (ctx) => ctx.services.provide(LIFECYCLE_CAPABILITY, { acknowledgeRestartFromEnvironment: () => undefined } as never)), { defer: true });
   await friday.activatePlugin(definePlugin({ id: "test-si-model", provides: [MODEL_CAPABILITY] }, (ctx) => ctx.services.provide(MODEL_CAPABILITY, {
       getModel: () => ({ provider: "test", id: "model" }),
-      async completeSimple(_model: unknown, request: { readonly messages?: readonly { readonly content?: unknown }[] }) {
+      async completeSimple(_model: unknown, request: { readonly systemPrompt?: string; readonly messages?: readonly { readonly content?: unknown }[] }) {
+        if (request.systemPrompt?.includes("MCP exact-operation verifier")) {
+          order.push("mcp-verifier");
+          return { content: [{ type: "text", text: JSON.stringify({ match: options.mcpMatch === true, tool: "computer_use", reason: "live schema reviewed" }) }], stopReason: "stop" };
+        }
         order.push("feasibility-model");
         const content = request.messages?.[0]?.content;
         if (typeof content === "string") feasibilityMessages.push(content);
@@ -42,7 +48,10 @@ async function assemble(options: { clean: boolean; feasible?: boolean; placement
           objective: options.placement === "reuse-existing" ? "use installed action demo.read" : "implement the missing feature safely",
           placement: options.placement ?? "extend-plugin",
           target: options.placement === "reuse-existing" ? "demo.read" : "plugins/mcp",
-          requiresCode: options.placement !== "reuse-existing",
+          mcpRelevant: options.placement === "mcp",
+          mcpSearchTerms: options.placement === "mcp" ? ["computer control"] : [],
+          fallbackPlacement: "extend-plugin",
+          fallbackTarget: "plugins/tools",
         }) }], stopReason: "stop" };
       },
       parseJsonWithRepair: (text: string) => JSON.parse(text),
@@ -54,6 +63,25 @@ async function assemble(options: { clean: boolean; feasible?: boolean; placement
       async createWorktree() { order.push("BUILD-STARTED"); throw new Error("build should not start in this test"); },
       async removeWorktree() { return undefined; },
   } as never)), { defer: true });
+  if (options.mcpMatch !== undefined) {
+    await friday.activatePlugin(definePlugin({ id: "test-si-mcp", provides: [MCP_CAPABILITY] }, (ctx) => ctx.services.provide(MCP_CAPABILITY, {
+      servers: () => [{ id: "computer", label: "Computer MCP", url: "https://example.com/mcp", authKind: "none", builtIn: false, credentialConfigured: true, connected: true }],
+      status: () => ({ id: "computer", label: "Computer MCP", url: "https://example.com/mcp", authKind: "none", builtIn: false, credentialConfigured: true, connected: true }),
+      async listTools() {
+        order.push("mcp-list-tools");
+        return [{ server: "computer", name: "computer_use", description: "Control the computer by clicking or typing", inputSchema: { type: "object", properties: { action: { type: "string" } }, required: ["action"] } }];
+      },
+      async searchRegistry() { order.push("mcp-registry-search"); return []; },
+      async callTool() { throw new Error("not used"); },
+      async disconnect() { return undefined; },
+    } as never)), { defer: true });
+    await friday.activatePlugin(definePlugin({ id: "test-si-mcp-trusted", provides: [MCP_TRUSTED_CAPABILITY] }, (ctx) => ctx.services.provide(MCP_TRUSTED_CAPABILITY, {
+      registerServer() { throw new Error("not used"); },
+      async removeServer() { return false; },
+      async login() { throw new Error("not used"); },
+      credentialRef() { return undefined; },
+    } as never)), { defer: true });
+  }
   await friday.activatePlugin(selfImprovementPlugin, { defer: true });
   await friday.completePluginBootstrap();
   return { service: requireCapability(SELF_IMPROVEMENT_CAPABILITY), order, feasibilityMessages };
@@ -128,5 +156,31 @@ describe("self-improvement feasibility gate", () => {
     expect(authorized).toBe(false);
     expect(order).toEqual(["feasibility-model", "reuse-message"]);
     expect(order).not.toContain("BUILD-STARTED");
+  });
+
+  it("accepts MCP only after a live exact-tool verification and skips code generation", async () => {
+    const { service, order } = await assemble({ clean: false, placement: "mcp", mcpMatch: true });
+    let authorized = false;
+    const result = await service.ensureCapability({ ...request, objective: "control the user's computer" }, {
+      onFeasible(feasibility) {
+        expect(feasibility).toMatchObject({ placement: "mcp", target: "computer:computer_use", requiresCode: false });
+        order.push("mcp-message");
+      },
+      authorize() { authorized = true; },
+    });
+    expect(result.result).toBeUndefined();
+    expect(authorized).toBe(false);
+    expect(order).toEqual(["feasibility-model", "mcp-list-tools", "mcp-verifier", "mcp-message"]);
+    expect(order).not.toContain("BUILD-STARTED");
+  });
+
+  it("falls back to code only after live MCP inspection finds no exact operation", async () => {
+    const { service, order } = await assemble({ clean: false, placement: "mcp", mcpMatch: false });
+    const result = await service.assessFeasibility({ ...request, objective: "control the user's computer" });
+    expect(result).toMatchObject({ feasible: false, placement: "extend-plugin", target: "plugins/tools", requiresCode: true });
+    expect(result.reason).toMatch(/working tree is not clean/i);
+    expect(order.slice(0, 3)).toEqual(["feasibility-model", "mcp-list-tools", "mcp-verifier"]);
+    expect(order.filter((entry) => entry === "mcp-registry-search").length).toBeGreaterThanOrEqual(1);
+    expect(order.slice(-2)).toEqual(["sandbox-check", "baseline-check"]);
   });
 });

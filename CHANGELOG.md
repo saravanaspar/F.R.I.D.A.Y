@@ -5,11 +5,12 @@ Notable user-facing changes to F.R.I.D.A.Y are tracked here.
 The project is in active development. GitHub Releases contain the authoritative
 published release artifacts and generated release notes.
 
-## [1.0.2] - Unreleased
+## [1.0.2] - 2026-09-08
 
-F.R.I.D.A.Y v1.0.2 is the current development release. This section remains
-unreleased and will continue to accumulate changes until release preparation is
-explicitly started.
+F.R.I.D.A.Y v1.0.2 hardens OAuth and sandbox execution, makes sandbox backends
+provider-neutral, adds MCP-first self-extension discovery, bounded concurrent
+multi-agent fan-out/fan-in, and automatically provisioned low-memory local
+speech backends.
 
 ### Security
 
@@ -30,7 +31,40 @@ explicitly started.
   promotion also verifies that the sandbox build OS/architecture matches the
   running F.R.I.D.A.Y host before staging a successor.
 
+- Added a narrowly scoped privileged setup broker for local voice host
+  dependencies. The installed sudoers rule permits only the root-owned
+  `friday-privileged voice-deps` operation; no model-facing sudo tool, password,
+  arbitrary command, or unrestricted `NOPASSWD` rule is introduced.
+
+- Scrubbed provider/Vault/API-key environment variables from local voice setup
+  and inference subprocesses. Local model caches live under private F.R.I.D.A.Y
+  tooling and runtime TTS inference is forced into offline Hugging Face /
+  Transformers mode after setup preloads the selected model.
+
+- Made Chatterbox acceleration operator-controlled. CPU is now the default and
+  installs Torch/Torchaudio from PyTorch's CPU-only wheel index; a detected
+  NVIDIA GPU causes setup to ask before any CUDA dependencies are installed.
+  CUDA mode is explicit opt-in, uses the matching CUDA wheel index, verifies the
+  selected backend, persists it for runtime, and never installs an OS GPU driver.
+
+- Fixed Chatterbox Nano provisioning by pinning the immutable upstream Nano
+  implementation revision rather than relying on the PyPI 0.1.7 wheel, which
+  does not expose the `nano=True` loader used by Nano. Setup now verifies that
+  API before preload and writes its ready marker only after preload succeeds.
+
+- Made Chatterbox dependency provisioning compatible with `uv` retries by
+  installing the upstream runtime dependency set explicitly and pinning the
+  official Perth watermarking source to an immutable revision. This avoids the
+  upstream moving `resemble-perth @ ...@master` transitive URL that `uv` refuses
+  to resolve, while preserving the operator-selected CPU/CUDA Torch build.
+
+- Fixed local Whisper verification for WAV probes by converting the source audio
+  to a distinct normalized WAV path before invoking FFmpeg. This avoids using the
+  same file as both FFmpeg input and output during `friday setup voice`.
+
 ### Sandbox providers
+
+- Reduced Chatterbox Nano model provisioning from the upstream ~3 GB snapshot to about ~1.94 GB by pinning the model revision and downloading only the exact files consumed by the Nano loader; the unused 1.06 GB legacy `s3gen.safetensors` checkpoint is no longer fetched.
 
 - Replaced the hard-coded sandbox runtime with a generic `SandboxProvider`
   contract and centralized provider registry. Execution, Tools, Evaluation,
@@ -76,6 +110,68 @@ explicitly started.
 - Added sandbox-provider contract tests and real-provider integration coverage
   for host secret/file isolation, workspace access, trusted mounts, process
   execution, and persistent IPython behavior.
+
+### MCP-first self-extension
+
+- Added official MCP Registry discovery to the MCP service and a bounded
+  `mcp_search_registry` tool. Registry metadata is treated as untrusted search
+  data and unsafe/non-HTTPS remote endpoints are discarded.
+
+- Changed self-improvement feasibility for external integrations to check
+  configured MCP servers first, search the Registry when needed, and inspect a
+  candidate server's live tool catalog before any code generation. A model must
+  verify that one concrete tool description and input schema supports the exact
+  requested operation; category/name similarity alone is not accepted.
+
+- Added fail-closed MCP probing and rollback: temporary remote registrations are
+  retained only after exact live capability verification, mismatches are
+  removed, package-only metadata is never treated as proof of capability, and
+  code generation remains the fallback only when no suitable MCP can be
+  verified.
+
+### Multi-agent orchestration
+
+- Added bounded direct-subagent concurrency with queued admission and the
+  `FRIDAY_SUBAGENT_MAX_CONCURRENT` operator limit. Independent child agents keep
+  isolated sessions while the parent can continue coordinating work.
+
+- Added live RAM-aware subagent admission using host `MemAvailable`/OS memory
+  plus cgroup-v2 headroom when present. FRIDAY keeps a conservative host reserve,
+  reserves memory for already-running children, queues/retries work under pressure,
+  and emits user-visible channel progress when concurrency is constrained or resumes.
+  Operators may tune `FRIDAY_SUBAGENT_HOST_RESERVE_MIB` and
+  `FRIDAY_SUBAGENT_MEMORY_RESERVE_MIB` without changing the requested team size.
+
+- Added batch `spawnMany` / `wait` primitives and RLM `spawn_many`,
+  `wait_subagents`, and `gather` helpers for true concurrent fan-out/fan-in of up
+  to 32 child tasks, including cancellation, timeout, persistence, and terminal
+  result aggregation.
+
+### Local voice
+
+- Added automated local STT provisioning with three quantized `whisper.cpp`
+  choices (`tiny-q5_1`, `base-q5_1`, and `small-q5_1`) and setup guidance for
+  approximate RAM, model size, speed, and accuracy. These are OpenAI Whisper
+  weights converted/quantized for the `whisper.cpp` runtime, not quantized
+  checkpoints published by OpenAI. Model downloads are pinned to a fixed model
+  repository revision and verified against per-model SHA-256 digests before use.
+
+- Added automated local TTS provisioning for Chatterbox Nano, KittenTTS Nano
+  int8, and Piper. Setup presents approximate runtime-memory guidance plus voice
+  cloning and expression capability before installation; Chatterbox Nano
+  supports a private staged cloning reference and provider-neutral FRIDAY
+  expression intents including laugh/chuckle/sigh, angry/annoyed cues,
+  tsundere, gasp/groan and tsk without creating separate emotion voice files.
+
+- Local model assets are downloaded only when selected during `friday setup
+  voice`, stored under private F.R.I.D.A.Y tooling, preflighted before settings
+  are committed, and require no hosted-provider credential.
+
+- Local voice setup now installs its fixed Debian/Ubuntu host dependency set
+  automatically after a local model is selected, bootstrapping the restricted
+  privilege broker in the local terminal when needed. Dependency detection now
+  uses command-specific probes such as `ffmpeg -version` and checks standard
+  system binary paths so an installed FFmpeg is not falsely reported missing.
 
 ## [1.0.1] - 2026-09-06
 

@@ -142,6 +142,27 @@ describe("RLM host bridge", () => {
     });
   });
 
+  it("supports bounded fan-out and fan-in host operations", async () => {
+    const subagents = createPort();
+    const handlers = createRlmHostHandlers({ subagents, models });
+    const context = hostContext();
+    const spawned = await handlers["rlm.spawn_many"]!({
+      type: "rlm.spawn_many",
+      tasks: [{ prompt: "one", name: "one" }, { prompt: "two", model: "test/child-fast" }],
+      cellSourceCode: "await rlm.gather([...])",
+    }, context);
+    expect((spawned.subagents as unknown[])).toHaveLength(2);
+    expect(subagents.spawnCalls).toHaveLength(2);
+    expect(subagents.spawnCalls.map((call) => call.prompt)).toEqual(["one", "two"]);
+
+    const waited = await handlers["rlm.wait_subagents"]!({
+      type: "rlm.wait_subagents",
+      targets: ["sub-b"],
+      timeoutMs: 1_000,
+    }, context);
+    expect(waited).toMatchObject({ subagents: [{ rlm_child_id: "sub-b", status: "completed" }] });
+  });
+
   it("rejects unsupported spawn kwargs", async () => {
     const handlers = createRlmHostHandlers({ subagents: createPort(), models });
     await expect(

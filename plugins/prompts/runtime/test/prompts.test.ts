@@ -86,6 +86,7 @@ describe("RLM prompt composition", () => {
     });
     expect(prompt).toContain("await rlm('sub-task')");
     expect(prompt).toContain("await rlm.list_subagents()");
+    expect(prompt).toContain("await rlm.gather([...])");
   });
 
   it("adds parent-reply doctrine only when the messaging skill is visible", () => {

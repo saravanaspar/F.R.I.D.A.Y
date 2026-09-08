@@ -6,6 +6,7 @@ import { runOnboarding } from "./onboarding.js";
 import { runOnboardingCli } from "./cli.js";
 import { getFridayHome, readRuntimeSettings, updateRuntimeSettings } from "../plugins/runtime-settings/runtime-env.js";
 import { runVoiceSetup } from "./voice-setup.js";
+import { installFridayPrivilegeBroker } from "./privileged-setup.js";
 import { selectSandboxProvider } from "../plugins/sandbox/providers/index.js";
 
 function bundledRoot(): string | undefined {
@@ -126,7 +127,8 @@ function setupHelp(): void {
     "  friday setup execution-python   Provision the private IPython kernel environment",
     "  friday setup sandbox            Prepare the configured sandbox provider and its approved image",
     "  friday setup whatsapp           Install the optional WhatsApp bridge dependencies",
-    "  friday setup voice              Configure and verify speech-to-text / text-to-speech providers",
+    "  friday setup voice              Configure hosted/local STT + TTS and automatically provision selected local models",
+    "  friday setup privileges         Install FRIDAY's narrowly-scoped host privilege broker (never an arbitrary model sudo shell)",
     "  friday setup self-repository <path>  Save the canonical FRIDAY source checkout for self-improvement",
     "  friday setup --help",
     "",
@@ -175,6 +177,11 @@ export async function runSetupCli(args: readonly string[]): Promise<void> {
   if (component === "execution-python") return setupExecutionPython();
   if (component === "whatsapp") return setupWhatsApp();
   if (component === "voice") return runVoiceSetup({ home: getFridayHome(process.env) }).then(() => undefined);
+  if (component === "privileges") {
+    await installFridayPrivilegeBroker();
+    process.stdout.write("[privileges] ready: FRIDAY may run only explicitly allowlisted privileged setup operations; the model has no sudo tool or password access.\n");
+    return;
+  }
   if (component === "sandbox") return setupSandbox();
   throw new Error(`Unknown setup component: ${component}. Run \`friday setup --help\`.`);
 }

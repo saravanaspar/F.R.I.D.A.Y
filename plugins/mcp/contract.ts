@@ -37,10 +37,33 @@ export interface McpToolCallResult {
   content: McpJsonValue;
 }
 
+export interface McpRegistryRemoteEndpoint {
+  readonly type: string;
+  readonly url: string;
+}
+
+export interface McpRegistryPackageDescriptor {
+  readonly registryType: string;
+  readonly identifier: string;
+  readonly version?: string | undefined;
+  readonly transportType?: string | undefined;
+}
+
+export interface McpDiscoveryCandidate {
+  readonly name: string;
+  readonly version: string;
+  readonly title?: string | undefined;
+  readonly description?: string | undefined;
+  readonly repositoryUrl?: string | undefined;
+  readonly remotes: readonly McpRegistryRemoteEndpoint[];
+  readonly packages: readonly McpRegistryPackageDescriptor[];
+}
+
 export interface McpService {
   servers(): readonly McpServerDescriptor[];
   status(server: string): McpServerDescriptor;
   listTools(server: string, signal?: AbortSignal): Promise<readonly McpToolDescriptor[]>;
+  searchRegistry(query: string, signal?: AbortSignal): Promise<readonly McpDiscoveryCandidate[]>;
   callTool(input: McpToolCallInput): Promise<McpToolCallResult>;
   disconnect(server?: string): Promise<void>;
 }
