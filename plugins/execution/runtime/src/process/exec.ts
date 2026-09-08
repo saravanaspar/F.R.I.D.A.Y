@@ -23,6 +23,8 @@ export interface ExecOptions {
 	 * A key with an undefined value is unset in the child.
 	 */
 	env?: Record<string, string | undefined>;
+	/** Use the supplied env as the complete child environment instead of inheriting process.env. */
+	replaceEnv?: boolean;
 	/** Hard combined stdout/stderr capture quota. */
 	maxOutputBytes?: number;
 	/** Optional stdin payload. */
@@ -41,11 +43,11 @@ export interface ExecResult {
 	totalOutputBytes: number;
 }
 
-function mergeExecEnv(env?: Record<string, string | undefined>): NodeJS.ProcessEnv | undefined {
+function mergeExecEnv(env?: Record<string, string | undefined>, replaceEnv = false): NodeJS.ProcessEnv | undefined {
 	if (!env) {
-		return undefined;
+		return replaceEnv ? {} : undefined;
 	}
-	const merged: NodeJS.ProcessEnv = { ...process.env };
+	const merged: NodeJS.ProcessEnv = replaceEnv ? {} : { ...process.env };
 	for (const [key, value] of Object.entries(env)) {
 		if (value === undefined) {
 			delete merged[key];
@@ -78,7 +80,7 @@ export async function execCommand(
 			stdio: [options?.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
 			// Merge per-call env over the parent env so callers can scope vars
 			// without mutating the shared process.env.
-			env: mergeExecEnv(options?.env),
+			env: mergeExecEnv(options?.env, options?.replaceEnv === true),
 		});
 
 		let stdout = "";

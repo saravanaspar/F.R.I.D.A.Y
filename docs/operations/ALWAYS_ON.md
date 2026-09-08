@@ -89,11 +89,11 @@ cgroup-aware service mode is the supported always-on Linux path.
 ## Containers
 
 A container image is not the default FRIDAY deployment boundary. FRIDAY already
-uses rootless Podman as the isolation boundary for model-generated shell work.
+uses its configured SandboxProvider as the isolation boundary for model-generated shell work.
 Putting the whole host inside another container introduces nested-container,
 mount, networking, credential, and lifecycle complexity and can weaken the clear
 ownership boundary between FRIDAY and its sandboxes.
 
 A container deployment can be added for a specific platform later, but it should
-be designed explicitly around either a host Podman socket or a different sandbox
-backend rather than casually running privileged Docker-in-Docker.
+be designed explicitly around the selected provider
+rather than assuming a nested container engine or privileged host access.

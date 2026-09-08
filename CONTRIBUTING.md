@@ -18,7 +18,7 @@ Requirements:
 - npm
 - Git
 - `uv` for the private execution-Python environment used by kernel tests
-- Podman only for sandbox integration tests or sandbox usage
+- the configured sandbox provider for sandbox integration tests or sandbox usage (kern is the built-in default)
 
 ```bash
 git clone https://github.com/saravanaspar/F.R.I.D.A.Y.git
@@ -49,6 +49,7 @@ Important expectations:
 6. New plugin dependencies should be explicit in the plugin manifest; config order must not become orchestration.
 7. Security-sensitive filesystem code should fail closed on malformed permissions, unsafe symlinks, or unexpected identities.
 8. Reusable sibling behavior should come from the owner's typed `contract.ts`; trusted companion contracts are authority boundaries, not convenience APIs.
+9. Sandbox backends belong behind `SandboxProvider`; add in-repo providers in `plugins/sandbox/providers/` and register them only in `plugins/sandbox/providers/index.ts`.
 
 ## Making a change
 
@@ -78,7 +79,7 @@ npm run check:silent-failures
 npm run check:models
 ```
 
-If sandbox integration tests are skipped because Podman is unavailable, say so in the PR.
+If sandbox integration tests are skipped because the selected provider is unavailable, say so in the PR.
 
 ## Pull requests
 

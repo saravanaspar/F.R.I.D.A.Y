@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { KernelManager } from "../plugins/execution/runtime/src/kernel/index.js";
-import { createPodmanSandboxService } from "../plugins/sandbox/podman.js";
+import { createKernSandboxService } from "../plugins/sandbox/providers/kern/index.js";
 import { VaultStore, VAULT_MASTER_KEY_FILE_NAME } from "../plugins/vault/runtime/src/index.js";
 
 const tempPaths: string[] = [];
@@ -22,8 +22,8 @@ afterEach(async () => {
   }
 });
 
-const podmanIt = process.env.FRIDAY_RUN_PODMAN_INTEGRATION === "1" ? it : it.skip;
-const PODMAN_INTEGRATION_TIMEOUT_MS = 30_000;
+const kernIt = process.env.FRIDAY_RUN_KERN_INTEGRATION === "1" ? it : it.skip;
+const KERN_INTEGRATION_TIMEOUT_MS = 30_000;
 
 async function runSandboxProcess(context: { command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv }) {
   return await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolvePromise, reject) => {
@@ -53,14 +53,14 @@ async function executeKernelWithWatchdog(manager: KernelManager, code: string) {
   }
 }
 
-podmanIt("runs internal host-owned processes without exposing host files or environment", async () => {
-  const workspace = await tempDir("friday-podman-process-workspace-");
-  const outside = await tempDir("friday-podman-process-host-secret-");
+kernIt("runs internal host-owned processes without exposing host files or environment", async () => {
+  const workspace = await tempDir("friday-kern-process-workspace-");
+  const outside = await tempDir("friday-kern-process-host-secret-");
   const vaultDir = join(outside, "vault");
   const vault = new VaultStore({ stateDir: vaultDir, workspaceRoot: workspace });
   vault.create({ ref: "vault://integration/process/token", kind: "token", secret: "host-secret" });
   const outsideSecret = join(vaultDir, VAULT_MASTER_KEY_FILE_NAME);
-  const dependencies = await tempDir("friday-podman-process-dependencies-");
+  const dependencies = await tempDir("friday-kern-process-dependencies-");
   await writeFile(join(dependencies, "sentinel.txt"), "trusted-dependency");
   const dependencyBin = join(dependencies, ".bin");
   await mkdir(dependencyBin);
@@ -70,7 +70,7 @@ podmanIt("runs internal host-owned processes without exposing host files or envi
   const dependencyTarget = join(workspace, "node_modules");
   await mkdir(dependencyTarget);
 
-  const sandbox = createPodmanSandboxService();
+  const sandbox = createKernSandboxService();
   sandbox.assertAvailable();
   const unregisterDependencies = sandbox.registerTrustedReadOnlyMount(workspace, dependencies, dependencyTarget);
   try {
@@ -110,21 +110,21 @@ podmanIt("runs internal host-owned processes without exposing host files or envi
   } finally {
     unregisterDependencies();
   }
-}, PODMAN_INTEGRATION_TIMEOUT_MS);
+}, KERN_INTEGRATION_TIMEOUT_MS);
 
-podmanIt("runs the persistent model kernel inside network-off Podman without host secrets", async () => {
-  const workspace = await tempDir("friday-podman-kernel-workspace-");
-  const outside = await tempDir("friday-podman-kernel-host-secret-");
+kernIt("runs the persistent model kernel inside network-off kern without host secrets", async () => {
+  const workspace = await tempDir("friday-kern-kernel-workspace-");
+  const outside = await tempDir("friday-kern-kernel-host-secret-");
   const vaultDir = join(outside, "vault");
   const vault = new VaultStore({ stateDir: vaultDir, workspaceRoot: workspace });
   vault.create({ ref: "vault://integration/kernel/token", kind: "token", secret: "host-secret" });
   const outsideSecret = join(vaultDir, VAULT_MASTER_KEY_FILE_NAME);
-  const dependencies = await tempDir("friday-podman-kernel-dependencies-");
+  const dependencies = await tempDir("friday-kern-kernel-dependencies-");
   await writeFile(join(dependencies, "sentinel.txt"), "trusted-dependency");
   const dependencyTarget = join(workspace, "node_modules");
   await mkdir(dependencyTarget);
 
-  const sandbox = createPodmanSandboxService();
+  const sandbox = createKernSandboxService();
   sandbox.assertAvailable();
   const unregisterDependencies = sandbox.registerTrustedReadOnlyMount(
     workspace,
@@ -170,4 +170,4 @@ podmanIt("runs the persistent model kernel inside network-off Podman without hos
     await manager.dispose();
     unregisterDependencies();
   }
-}, PODMAN_INTEGRATION_TIMEOUT_MS);
+}, KERN_INTEGRATION_TIMEOUT_MS);

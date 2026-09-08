@@ -130,7 +130,7 @@ describe("FRIDAY onboarding", () => {
       probeSandbox: () => ({ available: false, status: "image-missing" as const }),
       ensureSandbox: () => {
         builds += 1;
-        return { status: "built" as const, image: "localhost/friday-sandbox:gen0" };
+        return { status: "prepared" as const, providerId: "kern", image: "localhost/friday-sandbox:gen0" };
       },
     };
 

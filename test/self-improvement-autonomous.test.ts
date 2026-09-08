@@ -225,7 +225,6 @@ async function installSelfHostingHarness(
     assertWorkspacePath(_workspace: string, path: string) { return path; },
   });
   provideCapability(SANDBOX_CAPABILITY, {
-    sandboxKind: "podman",
     image: "test",
     assertAvailable() {},
     registerTrustedReadOnlyMount() {

@@ -54,7 +54,7 @@ jobs:
         shell: bash
         run: scripts/smoke-release-binary.sh build/release/friday-linux-x64
 
-  sandbox-image:
+  sandbox-provider-contract:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -64,7 +64,9 @@ jobs:
       - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
         with:
           node-version-file: .node-version
-      - run: npm run build:sandbox-image -- --tag friday-sandbox:ci
+          cache: npm
+      - run: npm ci
+      - run: npx vitest run --config vitest.config.ts test/sandbox-provider.test.ts test/security.test.ts
 
   darwin-binary-smoke:
     name: Darwin SEA smoke (${{ matrix.asset }})

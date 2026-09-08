@@ -42,6 +42,26 @@ describe.skipIf(process.platform === "win32")("execCommand", () => {
 		expect(result.outputLimitExceeded).toBe(false);
 	});
 
+	it("can replace rather than inherit the host environment", async () => {
+		const key = "FRIDAY_EXEC_PARENT_SECRET_TEST";
+		const previous = process.env[key];
+		process.env[key] = "host-secret";
+		try {
+			const result = await execCommand(
+				process.execPath,
+				["-e", `process.stdout.write(JSON.stringify({ inherited: process.env.${key}, explicit: process.env.FRIDAY_EXEC_EXPLICIT_TEST }))`],
+				process.cwd(),
+				{ env: { FRIDAY_EXEC_EXPLICIT_TEST: "present" }, replaceEnv: true },
+			);
+
+			expect(result.code).toBe(0);
+			expect(JSON.parse(result.stdout)).toEqual({ explicit: "present" });
+		} finally {
+			if (previous === undefined) delete process.env[key];
+			else process.env[key] = previous;
+		}
+	});
+
 	it("rejects an invalid output quota before spawning", async () => {
 		await expect(execCommand(process.execPath, ["-e", "process.exit(0)"], process.cwd(), { maxOutputBytes: 0 }))
 			.rejects.toThrow("maxOutputBytes");

@@ -92,13 +92,6 @@ function inferGates(
   return gates;
 }
 
-function repositoryScripts(repository: string): Record<string, unknown> {
-  const packagePath = join(repository, "package.json");
-  if (!existsSync(packagePath)) return {};
-  const parsed = JSON.parse(readFileSync(packagePath, "utf8")) as { scripts?: Record<string, unknown> };
-  return parsed.scripts ?? {};
-}
-
 async function runStrictEvaluationCommand(
   evaluation: EvaluationService,
   spec: { readonly id: string; readonly command: string; readonly cwd: string; readonly timeoutMs: number; readonly network?: boolean },
@@ -125,69 +118,90 @@ async function prepareCandidateEnvironment(evaluation: EvaluationService, reposi
     timeoutMs: 20 * 60_000,
     network: true,
   });
-  if (typeof repositoryScripts(repository)["setup:execution-python"] === "string") {
-    await runStrictEvaluationCommand(evaluation, {
-      id: "candidate-execution-python",
-      command: "npm run setup:execution-python",
-      cwd: repository,
-      timeoutMs: 10 * 60_000,
-      network: true,
-    });
-  }
 }
 
-async function runHostCommand(
+async function runSandboxedPromotionCommand(
   execution: ExecutionService,
+  sandbox: SandboxService,
   repository: string,
-  args: readonly string[],
-  options: { readonly timeoutMs: number; readonly env?: Record<string, string | undefined>; readonly signal?: AbortSignal },
-): Promise<void> {
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const result = await execution.execCommand(npm, [...args], repository, {
+  command: string,
+  options: { readonly timeoutMs: number; readonly network: boolean; readonly signal?: AbortSignal },
+): Promise<Awaited<ReturnType<ExecutionService["execCommand"]>>> {
+  const context = sandbox.sandboxProcess({
+    command: "/bin/bash",
+    args: ["-lc", command],
+    cwd: repository,
+    workspace: repository,
+    access: "write",
+    network: options.network,
+    env: process.env,
+  });
+  const result = await execution.execCommand(context.command, context.args, context.cwd, {
     timeout: options.timeoutMs,
     maxOutputBytes: 16 * 1024 * 1024,
-    ...(options.env === undefined ? {} : { env: options.env }),
+    env: context.env,
+    replaceEnv: true,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   });
   if (result.code !== 0 || result.killed || result.outputLimitExceeded) {
     const output = [result.stdout, result.stderr].filter(Boolean).join("\n").slice(-12_000);
-    throw new Error(`Host command ${npm} ${args.join(" ")} failed${output ? `:\n${output}` : ""}`);
+    throw new Error(`Sandboxed promotion command failed (${command})${output ? `:\n${output}` : ""}`);
   }
+  return result;
 }
 
-async function preparePromotedHostEnvironment(
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+async function preparePromotedEnvironment(
   execution: ExecutionService,
+  sandbox: SandboxService,
   repository: string,
   signal?: AbortSignal,
 ): Promise<void> {
-  await runHostCommand(execution, repository, ["ci", "--no-audit", "--no-fund"], {
+  await runSandboxedPromotionCommand(execution, sandbox, repository, "npm ci --no-audit --no-fund", {
     timeoutMs: 20 * 60_000,
+    network: true,
     ...(signal === undefined ? {} : { signal }),
   });
-  if (typeof repositoryScripts(repository)["setup:execution-python"] === "string") {
-    await runHostCommand(execution, repository, ["run", "setup:execution-python"], {
-      timeoutMs: 10 * 60_000,
-      ...(signal === undefined ? {} : { signal }),
-    });
-  }
 }
 
 async function buildPromotedExecutable(
   lifecycle: LifecycleService,
   execution: ExecutionService,
+  sandbox: SandboxService,
   repository: string,
   generationId: string,
   commit: string,
   signal?: AbortSignal,
 ) {
-  await preparePromotedHostEnvironment(execution, repository, signal);
+  const sandboxPlatform = await runSandboxedPromotionCommand(
+    execution,
+    sandbox,
+    repository,
+    `node -p 'process.platform + ":" + process.arch'`,
+    { timeoutMs: 60_000, network: false, ...(signal === undefined ? {} : { signal }) },
+  );
+  const expectedPlatform = `${process.platform}:${process.arch}`;
+  const actualPlatform = sandboxPlatform.stdout.trim();
+  if (actualPlatform !== expectedPlatform) {
+    throw new Error(
+      `Self-improvement binary promotion requires a sandbox build environment matching the F.R.I.D.A.Y host (${expectedPlatform}); got ${actualPlatform || "unknown"}`,
+    );
+  }
+
+  await preparePromotedEnvironment(execution, sandbox, repository, signal);
   const baseVersion = (process.env.FRIDAY_VERSION?.trim() || "1.0.0-dev").split("+")[0]!;
   const suffix = generationId.replace(/[^A-Za-z0-9.-]/g, "").slice(0, 24) || "generation";
-  await runHostCommand(execution, repository, ["run", "build:binary"], {
-    timeoutMs: 30 * 60_000,
-    env: { FRIDAY_BUILD_VERSION: `${baseVersion}+self.${suffix}` },
-    ...(signal === undefined ? {} : { signal }),
-  });
+  const buildVersion = `${baseVersion}+self.${suffix}`;
+  await runSandboxedPromotionCommand(
+    execution,
+    sandbox,
+    repository,
+    `FRIDAY_BUILD_VERSION=${shellQuote(buildVersion)} npm run build:binary`,
+    { timeoutMs: 30 * 60_000, network: false, ...(signal === undefined ? {} : { signal }) },
+  );
   const built = join(repository, "build", "binary", process.platform === "win32" ? "friday.exe" : "friday");
   if (!existsSync(built)) throw new Error(`Self-improvement binary build did not produce ${built}`);
   return lifecycle.stageFridayExecutable(built, { generationId, commit });
@@ -436,7 +450,7 @@ export function createSelfImprovementRunner(
           ? lifecycle.describeFridayExecutable(process.execPath)
           : undefined;
         const targetExecutable = singleBinary
-          ? await buildPromotedExecutable(lifecycle, execution, repository, generationId, commit, options.signal)
+          ? await buildPromotedExecutable(lifecycle, execution, sandbox, repository, generationId, commit, options.signal)
           : undefined;
 
         const now = new Date().toISOString();

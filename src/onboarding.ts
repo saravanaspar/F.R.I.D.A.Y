@@ -17,19 +17,12 @@ import {
   type RuntimePermissionMode,
   type RuntimeSettings,
 } from "../plugins/runtime-settings/runtime-env.js";
+import type { SandboxProbeResult, SandboxSetupResult } from "../plugins/sandbox/contract.js";
 import { modelCredentialVaultRef, modelProviderTypicallyNeedsApiKey } from "../plugins/auth/model-credential-ref.js";
 import { createTerminalOnboardingIO } from "./terminal-setup-ui.js";
 
-export interface OnboardingSandboxProbeResult {
-  readonly available: boolean;
-  readonly status?: "ready" | "podman-unavailable" | "rootless-required" | "image-missing" | undefined;
-  readonly reason?: string | undefined;
-}
-
-export interface OnboardingSandboxSetupResult {
-  readonly status: "already-ready" | "built";
-  readonly image: string;
-}
+export type OnboardingSandboxProbeResult = SandboxProbeResult;
+export type OnboardingSandboxSetupResult = SandboxSetupResult;
 
 export interface OnboardingModelDescriptor {
   readonly id: string;
@@ -93,8 +86,8 @@ export interface OnboardingOptions {
   readonly requireMainCredential?: boolean | undefined;
   readonly io?: OnboardingIO | undefined;
   readonly catalog?: OnboardingModelCatalog | undefined;
-  readonly probeSandbox?: ((image: string) => OnboardingSandboxProbeResult) | undefined;
-  readonly ensureSandbox?: (() => OnboardingSandboxSetupResult) | undefined;
+  readonly probeSandbox?: (() => OnboardingSandboxProbeResult) | undefined;
+  readonly ensureSandbox?: (() => OnboardingSandboxSetupResult | Promise<OnboardingSandboxSetupResult>) | undefined;
   /** Test/integration seam for probing a custom OpenAI-compatible descriptor before registration. */
   readonly verifyCustomModel?: ((descriptor: ReturnType<typeof toCustomModelDescriptor>, apiKey?: string) => Promise<void>) | undefined;
 }
@@ -579,29 +572,29 @@ async function maybeSetupSandbox(
     return undefined;
   }
 
-  const sandbox = await import("../plugins/sandbox/podman.js");
-  const image = sandbox.DEFAULT_SANDBOX_IMAGE;
-  const probe = options.probeSandbox ?? sandbox.probePodman;
-  const before = probe(image);
+  const sandbox = await import("../plugins/sandbox/providers/index.js");
+  const provider = sandbox.selectSandboxProvider();
+  const probe = options.probeSandbox ?? (() => provider.probe());
+  const before = probe();
   if (before.available) {
-    showSuccess(io, "Coding sandbox is ready");
+    showSuccess(io, `Coding sandbox is ready · ${provider.descriptor.displayName}`);
     return undefined;
   }
   if (before.status !== "image-missing") {
-    const reason = before.reason ?? before.status ?? "rootless Podman unavailable";
+    const reason = before.reason ?? before.status ?? `${provider.descriptor.displayName} unavailable`;
     showWarning(io, `Coding sandbox is not ready · ${reason}`);
     return undefined;
   }
 
   let approved = options.setupSandbox === true;
   if (options.setupSandbox === undefined && io.isInteractive) {
-    approved = await confirm(io, "Build the local coding sandbox now?", false);
+    approved = await confirm(io, `Prepare the ${provider.descriptor.displayName} coding sandbox now?`, false);
   }
   if (!approved) {
     showInfo(io, "Coding sandbox skipped · add it later with `friday setup sandbox`");
     return undefined;
   }
-  const result = await task(io, "Building the local coding sandbox", async () => options.ensureSandbox?.() ?? sandbox.ensurePodmanSandboxImage({ image, probe }));
+  const result = await task(io, "Preparing the local coding sandbox", async () => options.ensureSandbox?.() ?? provider.setup());
   showSuccess(io, `Coding sandbox ${result.status}`);
   return result;
 }

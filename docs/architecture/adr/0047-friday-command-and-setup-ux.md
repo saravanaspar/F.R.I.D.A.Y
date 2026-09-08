@@ -57,6 +57,6 @@ use the same typed runtime contracts through Telegram, Discord, or another
 configured network channel; no local conversational channel exists.
 
 A container image is not the default deployment because FRIDAY already uses
-rootless Podman as the sandbox boundary for model-generated processes. A future
-container deployment must explicitly define how that sandbox boundary is
-provided rather than relying on privileged nested containers.
+a pluggable SandboxProvider boundary for model-generated processes. A future
+container deployment must explicitly define how the configured provider is
+made available rather than relying on privileged nested containers.

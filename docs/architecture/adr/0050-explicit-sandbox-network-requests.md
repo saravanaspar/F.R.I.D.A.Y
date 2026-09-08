@@ -18,8 +18,8 @@ modes.
 ## Decision
 
 - `FRIDAY_SANDBOX_NETWORK_MODE` defaults to `requested`.
-- A sandbox request that does not explicitly request network runs with
-  `--http-proxy=false --network=none`.
+- A sandbox request that does not explicitly request network is translated by the
+  selected provider into that provider's network-isolated mode.
 - A request that needs network must declare that need. Permissions treats a
   network-bearing action as approval-requiring **before** considering the normal
   permission mode, so network access requires explicit approval even in `full`.
@@ -31,7 +31,8 @@ modes.
   still represented as network-bearing and remains subject to Permissions
   approval. Doctor warns when this non-default override is configured.
 - FRIDAY does not currently impose a destination allowlist. The security boundary
-  is explicit request + approval, rootless sandbox isolation, narrow mounts, and
+  is explicit request + approval, the selected provider's declared isolation class, narrow
+  mounts, and
   credential controls rather than silent destination inference.
 - Tool schemas and model-facing guidance must not silently use network. They must
   request it only when the operation needs it.

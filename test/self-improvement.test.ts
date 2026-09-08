@@ -51,7 +51,6 @@ describe("self-improvement plugin", () => {
     provideCapability(AUTONOMY_CAPABILITY, {} as never);
     provideCapability(MODEL_CAPABILITY, {} as never);
     provideCapability(SANDBOX_CAPABILITY, {
-      sandboxKind: "podman",
       image: "test",
       assertAvailable() {},
       registerTrustedReadOnlyMount() { return () => {}; },

@@ -182,7 +182,7 @@ export interface KernelManagerOptions {
 	hostHandlers?: HostRequestHandlers;
 	/** Use IPC sockets rather than TCP, required for network-isolated container kernels. */
 	transport?: "tcp" | "ipc";
-	/** Optional host-owned process launcher (for example, a rootless Podman sandbox). */
+	/** Optional host-owned process launcher (for example, a registered sandbox provider). */
 	launcher?: KernelLauncher;
 	/** Persist/revive the user namespace across kernel restarts and session resume. */
 	snapshot?: KernelSnapshotConfig;
