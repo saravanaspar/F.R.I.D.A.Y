@@ -2,19 +2,64 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 from pathlib import Path
 import sys
+
+
+CHATTERBOX_NANO_REPO = "ResembleAI/chatterbox-nano"
+CHATTERBOX_NANO_MODEL_REVISION = "71ccd1d0081b430592cea481f4307e764e07bc64"
+CHATTERBOX_NANO_REQUIRED_FILES = (
+    "added_tokens.json",
+    "conds.pt",
+    "merges.txt",
+    "s3gen_meanflow.safetensors",
+    "special_tokens_map.json",
+    "t3_nano_v1.safetensors",
+    "tokenizer_config.json",
+    "ve.safetensors",
+    "vocab.json",
+)
+
+
+def chatterbox_nano_snapshot() -> str:
+    from huggingface_hub import snapshot_download
+
+    download = dict(
+        repo_id=CHATTERBOX_NANO_REPO,
+        revision=CHATTERBOX_NANO_MODEL_REVISION,
+        allow_patterns=list(CHATTERBOX_NANO_REQUIRED_FILES),
+    )
+    try:
+        return snapshot_download(**download)
+    except Exception as exc:
+        if "xet" not in str(exc).lower() and "hex hash" not in str(exc).lower():
+            raise
+        import huggingface_hub.constants as hf_constants
+        hf_constants.HF_HUB_DISABLE_XET = True
+        return snapshot_download(**download)
+
+
+def load_chatterbox_nano(device: str):
+    from chatterbox.tts_turbo import ChatterboxTurboTTS
+
+    parameters = inspect.signature(ChatterboxTurboTTS.from_local).parameters
+    if "nano" not in parameters:
+        raise RuntimeError(
+            "Installed Chatterbox build does not support Nano. Re-run `friday setup voice` "
+            "so FRIDAY can install its pinned Nano-compatible source revision."
+        )
+    local_path = chatterbox_nano_snapshot()
+    return ChatterboxTurboTTS.from_local(local_path, device=device, nano=True)
 
 
 def chatterbox(model_name: str, text: str, output: Path, reference: str | None, device: str) -> None:
     import torch
     import torchaudio as ta
-    from chatterbox.tts_turbo import ChatterboxTurboTTS
-
     torch.set_grad_enabled(False)
     if device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was selected for Chatterbox but torch.cuda.is_available() is false")
-    model = ChatterboxTurboTTS.from_pretrained(device=device, nano=True)
+    model = load_chatterbox_nano(device)
     kwargs = {"audio_prompt_path": reference} if reference else {}
     wav = model.generate(text, **kwargs)
     ta.save(str(output), wav.cpu(), model.sr)
@@ -45,11 +90,10 @@ def piper(text: str, output: Path, voice: str, root: Path) -> None:
 def preload(model_name: str, voice: str, root: Path, device: str) -> None:
     if model_name == "chatterbox-nano":
         import torch
-        from chatterbox.tts_turbo import ChatterboxTurboTTS
         torch.set_grad_enabled(False)
         if device == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA was selected for Chatterbox but torch.cuda.is_available() is false")
-        ChatterboxTurboTTS.from_pretrained(device=device, nano=True)
+        load_chatterbox_nano(device)
         return
     if model_name == "kitten-nano-int8":
         from kittentts import KittenTTS

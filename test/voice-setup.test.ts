@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,7 +6,7 @@ import type { VoiceSettings } from "@friday/voice";
 import { modelCredentialVaultRef } from "../plugins/auth/model-credential-ref.js";
 import { readVoiceSettings } from "../plugins/voice/settings.js";
 import type { OnboardingIO, OnboardingSelectInput } from "../src/onboarding.js";
-import { chatterboxTorchInstallPlan, missingLocalVoiceHostDependencies } from "../src/voice-local-setup.js";
+import { chatterboxPackageInstallPlan, chatterboxTorchInstallPlan, missingLocalVoiceHostDependencies } from "../src/voice-local-setup.js";
 import { runVoiceSetup } from "../src/voice-setup.js";
 
 const roots: string[] = [];
@@ -101,6 +101,15 @@ function chatterboxFakeIo(compute: "cpu" | "cuda", seen: string[]): OnboardingIO
 }
 
 describe("voice setup", () => {
+  it("pins and selectively downloads only Chatterbox Nano files used by the loader", async () => {
+    const runner = await readFile("plugins/voice/runtime/python/friday_voice_local.py", "utf8");
+    expect(runner).toContain('CHATTERBOX_NANO_MODEL_REVISION = "71ccd1d0081b430592cea481f4307e764e07bc64"');
+    expect(runner).toContain('"s3gen_meanflow.safetensors"');
+    expect(runner).not.toMatch(/^\s*"s3gen\.safetensors",?$/m);
+    expect(runner).toContain("ChatterboxTurboTTS.from_local");
+    expect(runner).not.toContain("ChatterboxTurboTTS.from_pretrained");
+  });
+
   it("uses command-specific probes so installed ffmpeg is not reported missing", async () => {
     const bin = await mkdtemp(join(tmpdir(), "friday-voice-probes-"));
     roots.push(bin);
@@ -140,6 +149,20 @@ describe("voice setup", () => {
       indexUrl: "https://download.pytorch.org/whl/cu126",
       requirements: ["torch==2.6.0", "torchaudio==2.6.0"],
     });
+  });
+
+  it("pins Chatterbox Nano and Perth without relying on a transitive moving Git dependency", () => {
+    const plan = chatterboxPackageInstallPlan();
+    expect(plan).toMatchObject({
+      perthSourceRequirement: "resemble-perth @ git+https://github.com/resemble-ai/Perth.git@ff1c8ac55a976971245cdd53c18d6131ca00d993",
+      perthRevision: "ff1c8ac55a976971245cdd53c18d6131ca00d993",
+      nanoSourceRequirement: "git+https://github.com/resemble-ai/chatterbox.git@5de7a54aa4e5e2baadb0182dde554908b48b85c2",
+      nanoRevision: "5de7a54aa4e5e2baadb0182dde554908b48b85c2",
+    });
+    expect(plan.runtimeRequirements).toContain("librosa==0.11.0");
+    expect(plan.runtimeRequirements).toContain("transformers==5.2.0");
+    expect(plan.runtimeRequirements).toContain("PyYAML>=6.0");
+    expect(JSON.stringify(plan)).not.toContain("@master");
   });
 
   it("asks before using a detected NVIDIA GPU and keeps CPU as an explicit persisted choice", async () => {

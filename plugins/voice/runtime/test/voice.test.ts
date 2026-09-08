@@ -1,3 +1,6 @@
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   createVoiceProbeWav,
@@ -5,7 +8,7 @@ import {
   normalizeVoiceSettings,
   type VoiceSettings,
 } from "../src/index.js";
-import { renderChatterboxExpression } from "../src/local.js";
+import { renderChatterboxExpression, transcribeLocal } from "../src/local.js";
 
 function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
@@ -43,6 +46,66 @@ describe("voice runtime", () => {
     expect(() => normalizeVoiceSettings({ schema: 1, tts: { provider: "openai", model: "gpt-4o-mini-tts", voice: "alloy", format: "mp3", referenceAudio: "/tmp/ref.wav" } })).toThrow(/referenceAudio/);
     expect(() => normalizeVoiceSettings({ schema: 1, tts: { provider: "local", model: "piper", voice: "lessac", format: "wav", compute: "cuda" } })).toThrow(/compute/);
     expect(() => normalizeVoiceSettings({ schema: 1, tts: { provider: "local", model: "chatterbox-nano", voice: "clone/default", format: "wav", compute: "metal" } })).toThrow(/compute/);
+  });
+
+  it("normalizes local WAV input through a distinct ffmpeg output path before Whisper", async () => {
+    if (process.platform === "win32") return;
+    const sandbox = await mkdtemp(join(tmpdir(), "friday-local-stt-test-"));
+    const previousPath = process.env.PATH;
+    try {
+      const bin = join(sandbox, "bin");
+      const localRoot = join(sandbox, "voice");
+      const whisperDir = join(localRoot, "whisper.cpp", "source", "build", "bin");
+      const modelDir = join(localRoot, "whisper.cpp", "models");
+      await mkdir(bin, { recursive: true });
+      await mkdir(whisperDir, { recursive: true });
+      await mkdir(modelDir, { recursive: true });
+      await writeFile(join(modelDir, "ggml-base-q5_1.bin"), "model", { mode: 0o600 });
+
+      const ffmpeg = join(bin, "ffmpeg");
+      await writeFile(ffmpeg, [
+        "#!/bin/sh",
+        "in=",
+        "prev=",
+        "out=",
+        "for arg in \"$@\"; do",
+        "  if [ \"$prev\" = \"-i\" ]; then in=\"$arg\"; fi",
+        "  prev=\"$arg\"",
+        "  out=\"$arg\"",
+        "done",
+        "[ -n \"$in\" ] || exit 90",
+        "[ \"$in\" != \"$out\" ] || exit 91",
+        "cp \"$in\" \"$out\"",
+        "",
+      ].join("\n"), { mode: 0o755 });
+      await chmod(ffmpeg, 0o755);
+
+      const whisper = join(whisperDir, "whisper-cli");
+      await writeFile(whisper, [
+        "#!/bin/sh",
+        "out=",
+        "prev=",
+        "for arg in \"$@\"; do",
+        "  if [ \"$prev\" = \"-of\" ]; then out=\"$arg\"; fi",
+        "  prev=\"$arg\"",
+        "done",
+        "[ -n \"$out\" ] || exit 92",
+        "printf '%s\n' 'local probe ok' > \"${out}.txt\"",
+        "",
+      ].join("\n"), { mode: 0o755 });
+      await chmod(whisper, 0o755);
+
+      process.env.PATH = `${bin}:${previousPath ?? ""}`;
+      await expect(transcribeLocal(
+        { localRoot },
+        { provider: "local", model: "base-q5_1", language: "auto" },
+        { audio: createVoiceProbeWav(), mimeType: "audio/wav", fileName: "probe.wav" },
+      )).resolves.toBe("local probe ok");
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      await rm(sandbox, { recursive: true, force: true });
+    }
   });
 
   it("transcribes OpenAI audio with multipart form data and the configured credential", async () => {

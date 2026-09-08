@@ -47,7 +47,24 @@ speech backends.
   CUDA mode is explicit opt-in, uses the matching CUDA wheel index, verifies the
   selected backend, persists it for runtime, and never installs an OS GPU driver.
 
+- Fixed Chatterbox Nano provisioning by pinning the immutable upstream Nano
+  implementation revision rather than relying on the PyPI 0.1.7 wheel, which
+  does not expose the `nano=True` loader used by Nano. Setup now verifies that
+  API before preload and writes its ready marker only after preload succeeds.
+
+- Made Chatterbox dependency provisioning compatible with `uv` retries by
+  installing the upstream runtime dependency set explicitly and pinning the
+  official Perth watermarking source to an immutable revision. This avoids the
+  upstream moving `resemble-perth @ ...@master` transitive URL that `uv` refuses
+  to resolve, while preserving the operator-selected CPU/CUDA Torch build.
+
+- Fixed local Whisper verification for WAV probes by converting the source audio
+  to a distinct normalized WAV path before invoking FFmpeg. This avoids using the
+  same file as both FFmpeg input and output during `friday setup voice`.
+
 ### Sandbox providers
+
+- Reduced Chatterbox Nano model provisioning from the upstream ~3 GB snapshot to about ~1.94 GB by pinning the model revision and downloading only the exact files consumed by the Nano loader; the unused 1.06 GB legacy `s3gen.safetensors` checkpoint is no longer fetched.
 
 - Replaced the hard-coded sandbox runtime with a generic `SandboxProvider`
   contract and centralized provider registry. Execution, Tools, Evaluation,

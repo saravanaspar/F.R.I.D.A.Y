@@ -114,7 +114,7 @@ export async function transcribeLocal(
   const scratch = await mkdtemp(join(tmpdir(), "friday-stt-"));
   try {
     const inputPath = join(scratch, `input.${inputExtension(input)}`);
-    const wavPath = join(scratch, "input.wav");
+    const wavPath = join(scratch, "normalized.wav");
     const outputBase = join(scratch, "transcript");
     await writeFile(inputPath, input.audio, { mode: 0o600 });
     await runProcess("ffmpeg", ["-nostdin", "-loglevel", "error", "-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavPath], input.signal);

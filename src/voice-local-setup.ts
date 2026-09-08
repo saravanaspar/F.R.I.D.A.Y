@@ -15,7 +15,30 @@ const WHISPER_MODEL_SHA256 = Object.freeze({
   "small-q5_1": "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb",
 } as const);
 const CHATTERBOX_VERSION = "0.1.7";
+const CHATTERBOX_NANO_REVISION = "5de7a54aa4e5e2baadb0182dde554908b48b85c2";
+const CHATTERBOX_NANO_SOURCE = `git+https://github.com/resemble-ai/chatterbox.git@${CHATTERBOX_NANO_REVISION}`;
+const RESEMBLE_PERTH_REVISION = "ff1c8ac55a976971245cdd53c18d6131ca00d993";
+const RESEMBLE_PERTH_SOURCE = `resemble-perth @ git+https://github.com/resemble-ai/Perth.git@${RESEMBLE_PERTH_REVISION}`;
 const CHATTERBOX_TORCH_VERSION = "2.6.0";
+const CHATTERBOX_RUNTIME_REQUIREMENTS = Object.freeze([
+  "numpy>=1.24.0,<2.0.0",
+  "librosa==0.11.0",
+  "s3tokenizer",
+  "transformers==5.2.0",
+  "diffusers==0.29.0",
+  "conformer==0.3.2",
+  "safetensors==0.5.3",
+  "spacy-pkuseg",
+  "pykakasi==2.3.0",
+  "gradio==6.8.0",
+  "pyloudnorm",
+  "omegaconf",
+  // Perth 1.1 runtime dependencies. Torch/Torchaudio are installed separately
+  // from the operator-selected CPU/CUDA index before this dependency set.
+  "PyYAML>=6.0",
+  "pydub>=0.25.1",
+  "soundfile>=0.12.0",
+] as const);
 const PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu";
 const PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu126";
 const PYPI_INDEX = "https://pypi.org/simple";
@@ -153,9 +176,27 @@ export function chatterboxTorchInstallPlan(compute: VoiceLocalCompute): Chatterb
   });
 }
 
+export interface ChatterboxPackageInstallPlan {
+  readonly runtimeRequirements: readonly string[];
+  readonly perthSourceRequirement: string;
+  readonly perthRevision: string;
+  readonly nanoSourceRequirement: string;
+  readonly nanoRevision: string;
+}
+
+export function chatterboxPackageInstallPlan(): ChatterboxPackageInstallPlan {
+  return Object.freeze({
+    runtimeRequirements: CHATTERBOX_RUNTIME_REQUIREMENTS,
+    perthSourceRequirement: RESEMBLE_PERTH_SOURCE,
+    perthRevision: RESEMBLE_PERTH_REVISION,
+    nanoSourceRequirement: CHATTERBOX_NANO_SOURCE,
+    nanoRevision: CHATTERBOX_NANO_REVISION,
+  });
+}
+
 function chatterboxProfile(compute: VoiceLocalCompute): string {
   const plan = chatterboxTorchInstallPlan(compute);
-  return `chatterbox-tts=${CHATTERBOX_VERSION};torch=${CHATTERBOX_TORCH_VERSION};compute=${compute};index=${plan.indexUrl}`;
+  return `chatterbox-tts=${CHATTERBOX_VERSION};nano-revision=${CHATTERBOX_NANO_REVISION};torch=${CHATTERBOX_TORCH_VERSION};compute=${compute};index=${plan.indexUrl}`;
 }
 
 async function resetChatterboxVenvIfProfileChanged(ttsRoot: string, compute: VoiceLocalCompute): Promise<void> {
@@ -176,12 +217,28 @@ async function installChatterbox(python: string, compute: VoiceLocalCompute): Pr
     throw new Error("Chatterbox CUDA was selected but no working NVIDIA GPU/driver was detected by nvidia-smi");
   }
   const plan = chatterboxTorchInstallPlan(compute);
+  const packages = chatterboxPackageInstallPlan();
   await pipInstallArgs(python, [...plan.requirements, "--index-url", plan.indexUrl]);
-  await pipInstallArgs(python, [`chatterbox-tts==${CHATTERBOX_VERSION}`, "--index-url", PYPI_INDEX, "--extra-index-url", plan.indexUrl]);
+  // Chatterbox's upstream metadata carries Perth as a transitive Git URL. uv rejects
+  // transitive URL requirements, so install the declared runtime dependency set
+  // explicitly, then install immutable Perth and Nano sources without dependency
+  // resolution. This also prevents either source package from replacing the
+  // operator-selected CPU/CUDA Torch build.
+  await pipInstallArgs(python, [...packages.runtimeRequirements, "--index-url", PYPI_INDEX, "--extra-index-url", plan.indexUrl]);
+  await pipInstallArgs(python, [packages.perthSourceRequirement, "--no-deps"]);
+  await pipInstallArgs(python, [packages.nanoSourceRequirement, "--no-deps"]);
   const check = compute === "cuda"
     ? "import torch; raise SystemExit(0 if torch.version.cuda and torch.cuda.is_available() else 1)"
     : "import torch; raise SystemExit(0 if torch.version.cuda is None else 1)";
   await run(python, ["-c", check]);
+  await run(python, [
+    "-c",
+    "import perth; assert getattr(perth, 'PerthImplicitWatermarker', None) is not None, 'installed Perth build does not expose PerthImplicitWatermarker'",
+  ]);
+  await run(python, [
+    "-c",
+    "import inspect; from chatterbox.tts_turbo import ChatterboxTurboTTS; params = inspect.signature(ChatterboxTurboTTS.from_pretrained).parameters; assert 'nano' in params, 'installed Chatterbox build does not support Nano'",
+  ]);
 }
 
 async function sha256(path: string): Promise<string> {
@@ -246,7 +303,6 @@ async function provisionTts(root: string, model: string, voice: string, compute:
     else await pipInstall(python, `piper-tts==${PIPER_VERSION}`);
     await mkdir(ttsRoot, { recursive: true, mode: 0o700 });
     if (model === "chatterbox-nano") await writeFile(profilePath, `${chatterboxProfile(compute)}\n`, { mode: 0o600 });
-    await writeFile(marker, `${new Date().toISOString()}\n`, { mode: 0o600 });
   }
   if (model === "piper") {
     const dataDir = join(ttsRoot, "voices");
@@ -263,6 +319,9 @@ async function provisionTts(root: string, model: string, voice: string, compute:
     XDG_CACHE_HOME: cacheRoot,
     TORCH_HOME: join(cacheRoot, "torch"),
   }));
+  // A dependency install is not a ready model. Persist readiness only after the
+  // selected model has actually loaded successfully during the setup preload.
+  if (!existsSync(marker)) await writeFile(marker, `${new Date().toISOString()}\n`, { mode: 0o600 });
 }
 
 export function localVoiceToolingRoot(home = getFridayHome(process.env)): string {
@@ -291,8 +350,11 @@ export function missingLocalVoiceHostDependencies(settings: VoiceSettings): read
     for (const command of WHISPER_HOST_COMMANDS) required.add(command);
     required.add("curl");
   }
-  if (settings.tts?.provider === "local" && !commandAvailable("uv")) {
-    try { pythonCommand(); } catch { required.add("python>=3.10"); }
+  if (settings.tts?.provider === "local") {
+    if (settings.tts.model === "chatterbox-nano") required.add("git");
+    if (!commandAvailable("uv")) {
+      try { pythonCommand(); } catch { required.add("python>=3.10"); }
+    }
   }
   return Object.freeze([...required].filter((command) => command === "python>=3.10" || !commandAvailable(command)));
 }
