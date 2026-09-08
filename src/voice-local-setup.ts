@@ -1,10 +1,10 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { chmod, copyFile, mkdir, rm } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import type { VoiceSettings } from "@friday/voice";
+import type { VoiceLocalCompute, VoiceSettings } from "@friday/voice";
 import { getFridayHome } from "../plugins/runtime-settings/runtime-env.js";
 
 const WHISPER_CPP_VERSION = "v1.9.2";
@@ -15,6 +15,10 @@ const WHISPER_MODEL_SHA256 = Object.freeze({
   "small-q5_1": "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb",
 } as const);
 const CHATTERBOX_VERSION = "0.1.7";
+const CHATTERBOX_TORCH_VERSION = "2.6.0";
+const PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu";
+const PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu126";
+const PYPI_INDEX = "https://pypi.org/simple";
 const PIPER_VERSION = "1.8.0";
 const KITTEN_WHEEL = "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl";
 const LOCAL_STT = new Set(Object.keys(WHISPER_MODEL_SHA256));
@@ -110,9 +114,74 @@ async function ensureVenv(root: string): Promise<string> {
   return python;
 }
 
+async function pipInstallArgs(python: string, args: readonly string[]): Promise<void> {
+  if (commandAvailable("uv")) await run("uv", ["pip", "install", "--python", python, ...args]);
+  else await run(python, ["-m", "pip", "install", "--disable-pip-version-check", ...args]);
+}
+
 async function pipInstall(python: string, requirement: string): Promise<void> {
-  if (commandAvailable("uv")) await run("uv", ["pip", "install", "--python", python, requirement]);
-  else await run(python, ["-m", "pip", "install", "--disable-pip-version-check", requirement]);
+  await pipInstallArgs(python, [requirement]);
+}
+
+export interface LocalVoiceGpuInfo {
+  readonly backend: "cuda";
+  readonly name: string;
+}
+
+export function detectLocalVoiceGpu(): LocalVoiceGpuInfo | undefined {
+  const result = spawnSync("nvidia-smi", ["--query-gpu=name", "--format=csv,noheader"], {
+    encoding: "utf8",
+    windowsHide: true,
+    env: setupProcessEnv(),
+  });
+  if (result.status !== 0 || result.error) return undefined;
+  const name = String(result.stdout ?? "").split(/\r?\n/, 1)[0]?.trim();
+  return Object.freeze({ backend: "cuda", name: name || "NVIDIA GPU" });
+}
+
+export interface ChatterboxTorchInstallPlan {
+  readonly compute: VoiceLocalCompute;
+  readonly indexUrl: string;
+  readonly requirements: readonly string[];
+}
+
+export function chatterboxTorchInstallPlan(compute: VoiceLocalCompute): ChatterboxTorchInstallPlan {
+  return Object.freeze({
+    compute,
+    indexUrl: compute === "cuda" ? PYTORCH_CUDA_INDEX : PYTORCH_CPU_INDEX,
+    requirements: Object.freeze([`torch==${CHATTERBOX_TORCH_VERSION}`, `torchaudio==${CHATTERBOX_TORCH_VERSION}`]),
+  });
+}
+
+function chatterboxProfile(compute: VoiceLocalCompute): string {
+  const plan = chatterboxTorchInstallPlan(compute);
+  return `chatterbox-tts=${CHATTERBOX_VERSION};torch=${CHATTERBOX_TORCH_VERSION};compute=${compute};index=${plan.indexUrl}`;
+}
+
+async function resetChatterboxVenvIfProfileChanged(ttsRoot: string, compute: VoiceLocalCompute): Promise<void> {
+  const profilePath = join(ttsRoot, ".friday-runtime-profile");
+  let current: string | undefined;
+  try { current = (await readFile(profilePath, "utf8")).trim(); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const desired = chatterboxProfile(compute);
+  if (current === desired) return;
+  await rm(join(ttsRoot, "venv"), { recursive: true, force: true });
+  await rm(join(ttsRoot, ".friday-ready"), { force: true });
+  await rm(profilePath, { force: true });
+}
+
+async function installChatterbox(python: string, compute: VoiceLocalCompute): Promise<void> {
+  if (compute === "cuda" && !detectLocalVoiceGpu()) {
+    throw new Error("Chatterbox CUDA was selected but no working NVIDIA GPU/driver was detected by nvidia-smi");
+  }
+  const plan = chatterboxTorchInstallPlan(compute);
+  await pipInstallArgs(python, [...plan.requirements, "--index-url", plan.indexUrl]);
+  await pipInstallArgs(python, [`chatterbox-tts==${CHATTERBOX_VERSION}`, "--index-url", PYPI_INDEX, "--extra-index-url", plan.indexUrl]);
+  const check = compute === "cuda"
+    ? "import torch; raise SystemExit(0 if torch.version.cuda and torch.cuda.is_available() else 1)"
+    : "import torch; raise SystemExit(0 if torch.version.cuda is None else 1)";
+  await run(python, ["-c", check]);
 }
 
 async function sha256(path: string): Promise<string> {
@@ -161,20 +230,23 @@ async function provisionWhisper(root: string, model: string): Promise<void> {
   await chmod(modelPath, 0o600);
 }
 
-async function provisionTts(root: string, model: string, voice: string): Promise<void> {
+async function provisionTts(root: string, model: string, voice: string, compute: VoiceLocalCompute = "cpu"): Promise<void> {
   if (!LOCAL_TTS.has(model)) throw new Error(`Unsupported local TTS model: ${model}`);
   const ttsRoot = join(root, "tts", model);
+  if (model === "chatterbox-nano") await resetChatterboxVenvIfProfileChanged(ttsRoot, compute);
   const python = await ensureVenv(ttsRoot);
   const marker = join(ttsRoot, ".friday-ready");
+  const profilePath = join(ttsRoot, ".friday-runtime-profile");
   const cacheRoot = join(ttsRoot, "cache");
   const hfHome = join(cacheRoot, "huggingface");
   await mkdir(cacheRoot, { recursive: true, mode: 0o700 });
   if (!existsSync(marker)) {
-    if (model === "chatterbox-nano") await pipInstall(python, `chatterbox-tts==${CHATTERBOX_VERSION}`);
+    if (model === "chatterbox-nano") await installChatterbox(python, compute);
     else if (model === "kitten-nano-int8") await pipInstall(python, KITTEN_WHEEL);
     else await pipInstall(python, `piper-tts==${PIPER_VERSION}`);
     await mkdir(ttsRoot, { recursive: true, mode: 0o700 });
-    await import("node:fs/promises").then(({ writeFile }) => writeFile(marker, `${new Date().toISOString()}\n`, { mode: 0o600 }));
+    if (model === "chatterbox-nano") await writeFile(profilePath, `${chatterboxProfile(compute)}\n`, { mode: 0o600 });
+    await writeFile(marker, `${new Date().toISOString()}\n`, { mode: 0o600 });
   }
   if (model === "piper") {
     const dataDir = join(ttsRoot, "voices");
@@ -185,7 +257,7 @@ async function provisionTts(root: string, model: string, voice: string): Promise
   }
   // Force model download/initialization during setup so first runtime use remains offline-capable.
   const runner = bundledVoiceRunner();
-  await run(python, [runner, "preload", "--model", model, "--voice", voice, "--root", ttsRoot], undefined, setupProcessEnv({
+  await run(python, [runner, "preload", "--model", model, "--voice", voice, "--root", ttsRoot, "--device", model === "chatterbox-nano" ? compute : "cpu"], undefined, setupProcessEnv({
     HF_HOME: hfHome,
     HF_HUB_CACHE: join(hfHome, "hub"),
     XDG_CACHE_HOME: cacheRoot,
@@ -201,7 +273,7 @@ export async function provisionLocalVoice(settings: VoiceSettings, home = getFri
   const root = localVoiceToolingRoot(home);
   await mkdir(root, { recursive: true, mode: 0o700 });
   if (settings.stt?.provider === "local") await provisionWhisper(root, settings.stt.model);
-  if (settings.tts?.provider === "local") await provisionTts(root, settings.tts.model, settings.tts.voice);
+  if (settings.tts?.provider === "local") await provisionTts(root, settings.tts.model, settings.tts.voice, settings.tts.compute ?? "cpu");
 }
 
 export function localVoiceRunnerPath(): string {

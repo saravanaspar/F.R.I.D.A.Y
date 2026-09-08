@@ -33,7 +33,16 @@ describe("voice runtime", () => {
     expect(() => normalizeVoiceSettings({ schema: 1, stt: { provider: "other", model: "x" } })).toThrow(/STT provider/);
     expect(() => normalizeVoiceSettings({ schema: 1, tts: { provider: "openai", model: "x", voice: "alloy", format: "wav" } })).toThrow(/format/);
     expect(() => normalizeVoiceSettings({ schema: 1, tts: { provider: "local", model: "piper", voice: "lessac", format: "mp3" } })).toThrow(/format/);
+    expect(normalizeVoiceSettings({
+      schema: 1,
+      tts: { provider: "local", model: "chatterbox-nano", voice: "clone/default", format: "wav", compute: "cpu" },
+    })).toEqual({
+      schema: 1,
+      tts: { provider: "local", model: "chatterbox-nano", voice: "clone/default", format: "wav", compute: "cpu" },
+    });
     expect(() => normalizeVoiceSettings({ schema: 1, tts: { provider: "openai", model: "gpt-4o-mini-tts", voice: "alloy", format: "mp3", referenceAudio: "/tmp/ref.wav" } })).toThrow(/referenceAudio/);
+    expect(() => normalizeVoiceSettings({ schema: 1, tts: { provider: "local", model: "piper", voice: "lessac", format: "wav", compute: "cuda" } })).toThrow(/compute/);
+    expect(() => normalizeVoiceSettings({ schema: 1, tts: { provider: "local", model: "chatterbox-nano", voice: "clone/default", format: "wav", compute: "metal" } })).toThrow(/compute/);
   });
 
   it("transcribes OpenAI audio with multipart form data and the configured credential", async () => {

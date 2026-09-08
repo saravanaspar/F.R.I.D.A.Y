@@ -213,6 +213,7 @@ export async function synthesizeLocal(
       "--model", settings.model,
       "--voice", settings.voice,
       "--root", ttsRoot,
+      "--device", settings.model === "chatterbox-nano" ? (settings.compute ?? "cpu") : "cpu",
       "--text", expressiveText,
       "--output", output,
       ...(reference ? ["--reference", reference] : []),

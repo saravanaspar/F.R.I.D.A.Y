@@ -41,6 +41,12 @@ speech backends.
   tooling and runtime TTS inference is forced into offline Hugging Face /
   Transformers mode after setup preloads the selected model.
 
+- Made Chatterbox acceleration operator-controlled. CPU is now the default and
+  installs Torch/Torchaudio from PyTorch's CPU-only wheel index; a detected
+  NVIDIA GPU causes setup to ask before any CUDA dependencies are installed.
+  CUDA mode is explicit opt-in, uses the matching CUDA wheel index, verifies the
+  selected backend, persists it for runtime, and never installs an OS GPU driver.
+
 ### Sandbox providers
 
 - Replaced the hard-coded sandbox runtime with a generic `SandboxProvider`

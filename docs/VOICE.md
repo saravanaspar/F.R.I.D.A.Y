@@ -36,6 +36,8 @@ Selecting **Local / offline** for TTS offers:
 
 Chatterbox Nano is the cloning/expressive option. Setup can copy an optional reference clip into FRIDAY's private voice-reference directory with mode `0600`; the runtime refuses reference paths outside that directory. Voice identity is separate from expression: callers can request provider-neutral styles such as `happy`, `sad`, `angry`, `sarcastic`, `annoyed`, `embarrassed`, `tsundere`, `playful`, `excited`, `nervous`, and `sleepy`, plus events such as `laugh`, `chuckle`, `sigh`, `gasp`, `groan`, `cough`, `clear-throat`, `shush`, `sniff`, and `tsk`. Chatterbox maps these to its supported paralinguistic cues where possible; high-level character phrasing still belongs to the Agent rather than to a separate `.voice` identity. Chatterbox's Python/PyTorch dependency overhead makes its peak RSS more host-dependent than its parameter count alone suggests.
 
+For Chatterbox, CPU is the safe default. If setup detects a working NVIDIA GPU through `nvidia-smi`, it still asks **Chatterbox compute backend** before installing PyTorch. Choosing **CPU** pins Torch/Torchaudio to PyTorch's CPU wheel index and verifies that the resulting Torch build has no CUDA runtime. Choosing **NVIDIA GPU** is explicit opt-in, pins the compatible CUDA 12.6 wheel index, verifies `torch.cuda.is_available()`, and persists `compute: "cuda"` so runtime synthesis uses the same backend. The CUDA choice can download multiple gigabytes of NVIDIA runtime wheels, but FRIDAY does not install or replace the operating-system NVIDIA driver. If a Chatterbox environment is incomplete or was provisioned for a different backend, setup rebuilds only that model's private venv before retrying; model caches remain separate.
+
 KittenTTS and Chatterbox Hugging Face caches are redirected into the selected model's private FRIDAY tooling directory. Setup preloads the selected model so downloads happen during setup; local runtime forces Hugging Face/Transformers offline mode and does not silently fetch model assets during a voice request. Piper voices are downloaded into the same private tooling tree.
 
 ### Hosted providers
@@ -55,7 +57,7 @@ On Debian/Ubuntu, `friday setup voice` detects the host commands required by the
 
 This does **not** give the model an arbitrary sudo shell. Setup installs a root-owned `/usr/local/libexec/friday-privileged` helper and a sudoers rule that permits only the exact `voice-deps` operation. The helper accepts exactly one operation and uses a fixed package allowlist; there is no `NOPASSWD: ALL`, no arbitrary command argument, and no model-facing sudo tool. Local model subprocesses also receive a scrubbed environment rather than FRIDAY's API-key/Vault-related process environment. Dependency probes use command-specific version flags (including `ffmpeg -version`) and include standard system binary directories when validating an installation.
 
-The current automatic dependency operation is intentionally limited to Debian/Ubuntu. Other hosts must already provide the required commands.
+The current automatic host dependency operation is intentionally limited to Debian/Ubuntu. GPU selection is separate from this privileged operation: FRIDAY never auto-installs an NVIDIA driver. GPU mode is offered only when a working NVIDIA driver is already visible through `nvidia-smi`; otherwise Chatterbox remains CPU-only. Other hosts must already provide the required commands.
 
 ## Inbound audio
 

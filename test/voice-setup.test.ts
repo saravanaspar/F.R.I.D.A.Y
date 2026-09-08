@@ -2,10 +2,11 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { VoiceSettings } from "@friday/voice";
 import { modelCredentialVaultRef } from "../plugins/auth/model-credential-ref.js";
 import { readVoiceSettings } from "../plugins/voice/settings.js";
 import type { OnboardingIO, OnboardingSelectInput } from "../src/onboarding.js";
-import { missingLocalVoiceHostDependencies } from "../src/voice-local-setup.js";
+import { chatterboxTorchInstallPlan, missingLocalVoiceHostDependencies } from "../src/voice-local-setup.js";
 import { runVoiceSetup } from "../src/voice-setup.js";
 
 const roots: string[] = [];
@@ -73,6 +74,32 @@ function localFakeIo(): OnboardingIO {
   };
 }
 
+function chatterboxFakeIo(compute: "cpu" | "cuda", seen: string[]): OnboardingIO {
+  return {
+    isInteractive: true,
+    question: async () => "",
+    text: async (_prompt, initialValue) => initialValue ?? "",
+    secretQuestion: async () => { throw new Error("local voice setup must not request a secret"); },
+    write: () => undefined,
+    select: async (input: OnboardingSelectInput) => {
+      seen.push(input.message);
+      if (input.message === "Speech-to-text provider") return "disabled";
+      if (input.message === "Text-to-speech provider") return "local";
+      if (input.message === "Local text-to-speech model") return "chatterbox-nano";
+      if (input.message === "Chatterbox compute backend") return compute;
+      return input.initialValue ?? input.choices[0]!.value;
+    },
+    confirm: async () => false,
+    runTask: async (_message, operation) => operation(),
+    intro: () => undefined,
+    outro: () => undefined,
+    info: () => undefined,
+    success: () => undefined,
+    warning: () => undefined,
+    close: () => undefined,
+  };
+}
+
 describe("voice setup", () => {
   it("uses command-specific probes so installed ffmpeg is not reported missing", async () => {
     const bin = await mkdtemp(join(tmpdir(), "friday-voice-probes-"));
@@ -100,6 +127,53 @@ describe("voice setup", () => {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
     }
+  });
+
+  it("pins Chatterbox PyTorch to the operator-selected CPU or CUDA wheel index", () => {
+    expect(chatterboxTorchInstallPlan("cpu")).toMatchObject({
+      compute: "cpu",
+      indexUrl: "https://download.pytorch.org/whl/cpu",
+      requirements: ["torch==2.6.0", "torchaudio==2.6.0"],
+    });
+    expect(chatterboxTorchInstallPlan("cuda")).toMatchObject({
+      compute: "cuda",
+      indexUrl: "https://download.pytorch.org/whl/cu126",
+      requirements: ["torch==2.6.0", "torchaudio==2.6.0"],
+    });
+  });
+
+  it("asks before using a detected NVIDIA GPU and keeps CPU as an explicit persisted choice", async () => {
+    const home = await tempHome();
+    const seen: string[] = [];
+    let provisioned: VoiceSettings | undefined;
+    const saved = await runVoiceSetup({
+      home,
+      io: chatterboxFakeIo("cpu", seen),
+      detectLocalGpu: () => ({ backend: "cuda", name: "Test RTX" }),
+      ensureLocalHostDependencies: async () => undefined,
+      provisionLocal: async (settings) => { provisioned = settings; },
+      verify: async () => undefined,
+    });
+
+    expect(seen).toContain("Chatterbox compute backend");
+    expect(provisioned?.tts).toMatchObject({ provider: "local", model: "chatterbox-nano", compute: "cpu" });
+    expect(saved.tts).toMatchObject({ provider: "local", model: "chatterbox-nano", compute: "cpu" });
+  });
+
+  it("persists CUDA only after the operator explicitly selects the detected GPU option", async () => {
+    const home = await tempHome();
+    const seen: string[] = [];
+    const saved = await runVoiceSetup({
+      home,
+      io: chatterboxFakeIo("cuda", seen),
+      detectLocalGpu: () => ({ backend: "cuda", name: "Test RTX" }),
+      ensureLocalHostDependencies: async () => undefined,
+      provisionLocal: async () => undefined,
+      verify: async () => undefined,
+    });
+
+    expect(seen).toContain("Chatterbox compute backend");
+    expect(saved.tts).toMatchObject({ provider: "local", model: "chatterbox-nano", compute: "cuda" });
   });
 
   it("verifies once, stores OpenAI voice credential in the canonical model Vault ref, and saves only non-secret settings", async () => {

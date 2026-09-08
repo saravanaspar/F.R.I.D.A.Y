@@ -2,6 +2,7 @@ import { synthesizeLocal, transcribeLocal } from "./local.js";
 export type VoiceSttProvider = "openai" | "deepgram" | "local";
 export type VoiceTtsProvider = "openai" | "elevenlabs" | "local";
 export type VoiceCredentialProvider = "openai" | "deepgram" | "elevenlabs";
+export type VoiceLocalCompute = "cpu" | "cuda";
 
 export const VOICE_EXPRESSION_STYLES = Object.freeze([
   "neutral", "happy", "sad", "angry", "sarcastic", "annoyed", "embarrassed", "tsundere", "playful", "excited", "nervous", "sleepy",
@@ -38,6 +39,8 @@ export interface VoiceTtsSettings {
   readonly format: "mp3" | "wav";
   /** Private local copy of a reference clip used only by cloning-capable local models. */
   readonly referenceAudio?: string | undefined;
+  /** Explicit local accelerator choice. Omitted legacy settings default to CPU. */
+  readonly compute?: VoiceLocalCompute | undefined;
 }
 
 export interface VoiceSettings {
@@ -207,7 +210,7 @@ export function normalizeVoiceSettings(value: unknown): VoiceSettings {
   if (raw.tts !== undefined) {
     if (!raw.tts || typeof raw.tts !== "object" || Array.isArray(raw.tts)) throw new Error("voice TTS settings must be an object");
     const entry = raw.tts as Record<string, unknown>;
-    for (const key of Object.keys(entry)) if (!["provider", "model", "voice", "format", "referenceAudio"].includes(key)) throw new Error(`unsupported voice TTS field: ${key}`);
+    for (const key of Object.keys(entry)) if (!["provider", "model", "voice", "format", "referenceAudio", "compute"].includes(key)) throw new Error(`unsupported voice TTS field: ${key}`);
     const provider = ttsProvider(entry.provider);
     const expectedFormat = provider === "local" ? "wav" : "mp3";
     if (entry.format !== expectedFormat) throw new Error(`voice TTS format must be ${expectedFormat} for ${provider}`);
@@ -215,12 +218,19 @@ export function normalizeVoiceSettings(value: unknown): VoiceSettings {
     if (referenceAudio !== undefined && (provider !== "local" || entry.model !== "chatterbox-nano")) {
       throw new Error("TTS referenceAudio is supported only by local chatterbox-nano");
     }
+    let compute: VoiceLocalCompute | undefined;
+    if (entry.compute !== undefined) {
+      if (entry.compute !== "cpu" && entry.compute !== "cuda") throw new Error("voice TTS compute must be cpu or cuda");
+      if (provider !== "local" || entry.model !== "chatterbox-nano") throw new Error("voice TTS compute is currently supported only by local chatterbox-nano");
+      compute = entry.compute;
+    }
     tts = Object.freeze({
       provider,
       model: safeText(entry.model, "TTS model"),
       voice: safeText(entry.voice, "TTS voice", 256),
       format: expectedFormat,
       ...(referenceAudio === undefined ? {} : { referenceAudio }),
+      ...(compute === undefined ? {} : { compute }),
     });
   }
 

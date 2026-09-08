@@ -13,6 +13,7 @@ import {
   OPENAI_TTS_MODELS,
   OPENAI_TTS_VOICES,
   type VoiceCredentialProvider,
+  type VoiceLocalCompute,
   type VoiceSettings,
   type VoiceSttProvider,
   type VoiceTtsProvider,
@@ -23,10 +24,12 @@ import { voiceCredentialVaultRef } from "../plugins/voice/credential-ref.js";
 import { readVoiceSettings, saveVoiceSettings } from "../plugins/voice/settings.js";
 import { hasFridayPrivilegedHelper, installFridayPrivilegeBroker, installVoiceHostDependencies } from "./privileged-setup.js";
 import {
+  detectLocalVoiceGpu,
   localVoiceToolingRoot,
   missingLocalVoiceHostDependencies,
   provisionLocalVoice,
   stageLocalVoiceReference,
+  type LocalVoiceGpuInfo,
 } from "./voice-local-setup.js";
 import type { OnboardingIO } from "./onboarding.js";
 import { createTerminalOnboardingIO } from "./terminal-setup-ui.js";
@@ -37,6 +40,7 @@ export interface VoiceSetupOptions {
   readonly verify?: ((settings: VoiceSettings, credential: (provider: VoiceCredentialProvider) => Promise<string | undefined>) => Promise<void>) | undefined;
   readonly provisionLocal?: ((settings: VoiceSettings, home: string) => Promise<void>) | undefined;
   readonly ensureLocalHostDependencies?: ((settings: VoiceSettings, home: string, io: OnboardingIO) => Promise<void>) | undefined;
+  readonly detectLocalGpu?: (() => LocalVoiceGpuInfo | undefined) | undefined;
 }
 
 function showInfo(io: OnboardingIO, message: string): void { io.info ? io.info(message) : io.write(`${message}\n`); }
@@ -107,7 +111,7 @@ async function chooseStt(io: OnboardingIO, existing: VoiceSettings | undefined):
   return Object.freeze({ provider, model, ...(language === undefined ? {} : { language }) });
 }
 
-async function chooseTts(io: OnboardingIO, existing: VoiceSettings | undefined, home: string): Promise<VoiceSettings["tts"]> {
+async function chooseTts(io: OnboardingIO, existing: VoiceSettings | undefined, home: string, detectGpu: () => LocalVoiceGpuInfo | undefined): Promise<VoiceSettings["tts"]> {
   const providerValue = await select(io, "Text-to-speech provider", [
     { value: "local", label: "Local / offline", hint: "3 low-memory choices; no API key" },
     { value: "openai", label: "OpenAI", hint: "hosted gpt-4o-mini-tts" },
@@ -145,15 +149,27 @@ async function chooseTts(io: OnboardingIO, existing: VoiceSettings | undefined, 
   const voice = voices.length === 1 ? voices[0]! : await select(io, "Local voice", voices.map((value) => ({ value, label: value })), currentVoice);
   if (model !== "chatterbox-nano") return Object.freeze({ provider, model, voice, format: "wav" as const });
 
+  const gpu = detectGpu();
+  const existingCompute = existing?.tts?.provider === "local" && existing.tts.model === model ? existing.tts.compute : undefined;
+  let compute: VoiceLocalCompute = "cpu";
+  if (gpu) {
+    compute = await select(io, "Chatterbox compute backend", [
+      { value: "cpu", label: "CPU", hint: "default; installs CPU-only PyTorch and never downloads NVIDIA/CUDA wheels" },
+      { value: "cuda", label: `NVIDIA GPU · ${gpu.name}`, hint: "opt-in; installs CUDA 12.6 PyTorch runtime wheels (large download); does not install an OS GPU driver" },
+    ], existingCompute ?? "cpu") as VoiceLocalCompute;
+  } else {
+    showInfo(io, "No usable NVIDIA CUDA GPU was detected; Chatterbox will use CPU-only PyTorch.");
+  }
+
   showInfo(io, "Chatterbox Nano supports zero-shot voice cloning plus FRIDAY expression intents such as laugh, chuckle, sigh, angry/annoyed cues, tsundere, gasp, groan, and tsk. Voice identity stays separate from expression. Use a clean reference clip longer than 5 seconds for cloning. Its 110M model targets the 0.8–1.0 GB class, but Python/PyTorch overhead can make peak RSS host-dependent.");
   const existingReference = existing?.tts?.provider === "local" && existing.tts.model === model ? existing.tts.referenceAudio : undefined;
   const referenceInput = (await text(io, "Optional reference voice clip path (leave blank for default voice)", existingReference)).trim();
-  if (!referenceInput) return Object.freeze({ provider, model, voice, format: "wav" as const });
+  if (!referenceInput) return Object.freeze({ provider, model, voice, format: "wav" as const, compute });
   const info = await stat(referenceInput);
   if (!info.isFile()) throw new Error("Voice reference must be a regular file");
   if (info.size <= 0 || info.size > 20 * 1024 * 1024) throw new Error("Voice reference must be between 1 byte and 20 MiB");
   const referenceAudio = await stageLocalVoiceReference(referenceInput, home);
-  return Object.freeze({ provider, model, voice, format: "wav" as const, referenceAudio });
+  return Object.freeze({ provider, model, voice, format: "wav" as const, compute, referenceAudio });
 }
 
 async function defaultEnsureLocalHostDependencies(settings: VoiceSettings, _home: string, io: OnboardingIO): Promise<void> {
@@ -195,7 +211,7 @@ export async function runVoiceSetup(options: VoiceSetupOptions = {}): Promise<Vo
   io.intro?.("FRIDAY · Voice", "Configure hosted or private local speech. Local choices are provisioned automatically; remote keys are masked, verified, and stored only in Vault.");
 
   const stt = await chooseStt(io, existing);
-  const tts = await chooseTts(io, existing, home);
+  const tts = await chooseTts(io, existing, home, options.detectLocalGpu ?? detectLocalVoiceGpu);
   if (!stt && !tts) showWarning(io, "Both STT and TTS are disabled; voice settings will remain installed but inactive.");
   const candidate: VoiceSettings = Object.freeze({ schema: 1, ...(stt === undefined ? {} : { stt }), ...(tts === undefined ? {} : { tts }) });
 
@@ -256,7 +272,7 @@ export async function runVoiceSetup(options: VoiceSetupOptions = {}): Promise<Vo
     showSuccess(io, "Voice configuration verified and saved");
     io.outro?.("Voice ready", [
       saved.stt ? `STT · ${saved.stt.provider}/${saved.stt.model}` : "STT · disabled",
-      saved.tts ? `TTS · ${saved.tts.provider}/${saved.tts.model} · ${saved.tts.voice}` : "TTS · disabled",
+      saved.tts ? `TTS · ${saved.tts.provider}/${saved.tts.model} · ${saved.tts.voice}${saved.tts.provider === "local" && saved.tts.model === "chatterbox-nano" ? ` · ${saved.tts.compute ?? "cpu"}` : ""}` : "TTS · disabled",
       "Restart FRIDAY if it is currently running so the Voice plugin reloads these settings.",
     ]);
     return saved;
