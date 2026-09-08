@@ -51,13 +51,9 @@ OpenAI Voice reuses the canonical `vault://models/openai/api-key` credential so 
 
 ## Privileged host dependencies
 
-On Debian/Ubuntu, local model setup can install its fixed host dependencies through:
+On Debian/Ubuntu, `friday setup voice` detects the host commands required by the selected local STT/TTS models and installs the fixed approved dependency set automatically when anything is missing. On the first local setup it can bootstrap the restricted privilege broker itself; the operating system may show a normal local `sudo` password prompt. The password is handled by `sudo` in the terminal and is never exposed to FRIDAY or to the model. The standalone `friday setup privileges` command remains available for administrators who want to pre-provision or repair the broker manually.
 
-```bash
-friday setup privileges
-```
-
-This does **not** give the model an arbitrary sudo shell. Setup installs a root-owned `/usr/local/libexec/friday-privileged` helper and a sudoers rule that permits only the exact `voice-deps` operation. The helper accepts exactly one operation and uses a fixed package allowlist; there is no `NOPASSWD: ALL`, no arbitrary command argument, and no model-facing sudo tool. Local model subprocesses also receive a scrubbed environment rather than FRIDAY's API-key/Vault-related process environment.
+This does **not** give the model an arbitrary sudo shell. Setup installs a root-owned `/usr/local/libexec/friday-privileged` helper and a sudoers rule that permits only the exact `voice-deps` operation. The helper accepts exactly one operation and uses a fixed package allowlist; there is no `NOPASSWD: ALL`, no arbitrary command argument, and no model-facing sudo tool. Local model subprocesses also receive a scrubbed environment rather than FRIDAY's API-key/Vault-related process environment. Dependency probes use command-specific version flags (including `ffmpeg -version`) and include standard system binary directories when validating an installation.
 
 The current automatic dependency operation is intentionally limited to Debian/Ubuntu. Other hosts must already provide the required commands.
 

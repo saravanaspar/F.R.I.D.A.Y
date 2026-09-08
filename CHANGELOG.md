@@ -144,6 +144,12 @@ speech backends.
   voice`, stored under private F.R.I.D.A.Y tooling, preflighted before settings
   are committed, and require no hosted-provider credential.
 
+- Local voice setup now installs its fixed Debian/Ubuntu host dependency set
+  automatically after a local model is selected, bootstrapping the restricted
+  privilege broker in the local terminal when needed. Dependency detection now
+  uses command-specific probes such as `ffmpeg -version` and checks standard
+  system binary paths so an installed FFmpeg is not falsely reported missing.
+
 ## [1.0.1] - 2026-09-06
 
 - Added durable operator controls, including correlated approval/question

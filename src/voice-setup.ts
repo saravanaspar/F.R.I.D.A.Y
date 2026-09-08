@@ -160,16 +160,19 @@ async function defaultEnsureLocalHostDependencies(settings: VoiceSettings, _home
   const missing = missingLocalVoiceHostDependencies(settings);
   if (missing.length === 0) return;
   if (process.platform !== "linux") {
-    throw new Error(`Local voice is missing host dependencies: ${missing.join(", ")}. Automatic installation is currently available on Debian/Ubuntu via \`friday setup privileges\`.`);
+    throw new Error(`Local voice is missing host dependencies: ${missing.join(", ")}. Automatic installation is currently supported on Debian/Ubuntu hosts only.`);
   }
-  if (!io.isInteractive) throw new Error(`Local voice is missing host dependencies: ${missing.join(", ")}. Run \`friday setup privileges\` and retry.`);
-  showWarning(io, `Local voice needs host dependencies: ${missing.join(", ")}.`);
-  const approved = await confirm(io, "Install FRIDAY's narrowly-scoped sudo broker and approved voice dependencies?", true);
-  if (!approved) throw new Error("Local voice host dependency installation was declined");
+
+  showWarning(io, `Local voice needs host dependencies: ${missing.join(", ")}. FRIDAY will install its fixed approved dependency set automatically.`);
   if (!(await hasFridayPrivilegedHelper())) {
+    if (!io.isInteractive) {
+      throw new Error(`Local voice is missing host dependencies: ${missing.join(", ")}. Run \`friday setup voice\` once in an interactive local terminal so FRIDAY can bootstrap its restricted privilege broker.`);
+    }
+    showInfo(io, "A local sudo prompt may appear while FRIDAY installs its restricted voice-dependency broker. The password is handled by sudo, not by FRIDAY or the model.");
     await task(io, "Installing FRIDAY privilege broker", () => installFridayPrivilegeBroker());
   }
-  await task(io, "Installing approved voice host dependencies", () => installVoiceHostDependencies());
+
+  await task(io, "Installing required local voice host dependencies", () => installVoiceHostDependencies());
   const after = missingLocalVoiceHostDependencies(settings);
   if (after.length > 0) throw new Error(`Voice host dependency installation completed but these commands are still unavailable: ${after.join(", ")}`);
 }

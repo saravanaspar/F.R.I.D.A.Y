@@ -20,6 +20,14 @@ const KITTEN_WHEEL = "https://github.com/KittenML/KittenTTS/releases/download/0.
 const LOCAL_STT = new Set(Object.keys(WHISPER_MODEL_SHA256));
 const LOCAL_TTS = new Set(["chatterbox-nano", "kitten-nano-int8", "piper"]);
 const WHISPER_HOST_COMMANDS = ["git", "cmake", "ffmpeg"] as const;
+const POSIX_SYSTEM_PATHS = ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"] as const;
+const HOST_COMMAND_PROBES = Object.freeze({
+  git: ["--version"],
+  cmake: ["--version"],
+  ffmpeg: ["-version"],
+  curl: ["--version"],
+  uv: ["--version"],
+} satisfies Readonly<Record<string, readonly string[]>>);
 const SETUP_ENV_ALLOWLIST = Object.freeze([
   "PATH",
   "HOME",
@@ -42,17 +50,27 @@ const SETUP_ENV_ALLOWLIST = Object.freeze([
   "WINDIR",
 ] as const);
 
+function setupPath(): string | undefined {
+  const current = process.env.PATH?.trim();
+  if (process.platform === "win32") return current || undefined;
+  const entries = [...(current ? current.split(":") : []), ...POSIX_SYSTEM_PATHS];
+  return [...new Set(entries.filter(Boolean))].join(":");
+}
+
 function setupProcessEnv(overrides: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const name of SETUP_ENV_ALLOWLIST) {
     const value = process.env[name];
     if (value !== undefined) env[name] = value;
   }
+  const path = setupPath();
+  if (path !== undefined) env.PATH = path;
   return { ...env, ...overrides };
 }
 
-function commandAvailable(command: string, args: readonly string[] = ["--version"]): boolean {
-  const result = spawnSync(command, [...args], { stdio: "ignore", windowsHide: true });
+function commandAvailable(command: string, args?: readonly string[]): boolean {
+  const probeArgs = args ?? HOST_COMMAND_PROBES[command as keyof typeof HOST_COMMAND_PROBES] ?? ["--version"];
+  const result = spawnSync(command, [...probeArgs], { stdio: "ignore", windowsHide: true, env: setupProcessEnv() });
   return result.status === 0 && result.error === undefined;
 }
 

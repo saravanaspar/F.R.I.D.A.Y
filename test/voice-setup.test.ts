@@ -1,10 +1,11 @@
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { modelCredentialVaultRef } from "../plugins/auth/model-credential-ref.js";
 import { readVoiceSettings } from "../plugins/voice/settings.js";
 import type { OnboardingIO, OnboardingSelectInput } from "../src/onboarding.js";
+import { missingLocalVoiceHostDependencies } from "../src/voice-local-setup.js";
 import { runVoiceSetup } from "../src/voice-setup.js";
 
 const roots: string[] = [];
@@ -73,6 +74,34 @@ function localFakeIo(): OnboardingIO {
 }
 
 describe("voice setup", () => {
+  it("uses command-specific probes so installed ffmpeg is not reported missing", async () => {
+    const bin = await mkdtemp(join(tmpdir(), "friday-voice-probes-"));
+    roots.push(bin);
+    const scripts = new Map<string, string>([
+      ["git", "--version"],
+      ["cmake", "--version"],
+      ["curl", "--version"],
+      ["ffmpeg", "-version"],
+    ]);
+    for (const [command, expectedArg] of scripts) {
+      const path = join(bin, command);
+      await writeFile(path, `#!/bin/sh\n[ "\${1:-}" = "${expectedArg}" ]\n`, { mode: 0o755 });
+    }
+
+    const previousPath = process.env.PATH;
+    process.env.PATH = bin;
+    try {
+      const missing = missingLocalVoiceHostDependencies({
+        schema: 1,
+        stt: { provider: "local", model: "base-q5_1" },
+      });
+      expect(missing).toEqual([]);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
+
   it("verifies once, stores OpenAI voice credential in the canonical model Vault ref, and saves only non-secret settings", async () => {
     const home = await tempHome();
     let verifiedKey: string | undefined;
