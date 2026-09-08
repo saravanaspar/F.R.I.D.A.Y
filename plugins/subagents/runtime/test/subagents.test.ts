@@ -98,6 +98,19 @@ function createHost(autoComplete = false): HostControl {
   };
 }
 
+
+function memorySnapshot(safeAdditionalAgents = 32) {
+  const mib = 1024 * 1024;
+  return {
+    totalBytes: 8 * 1024 * mib,
+    availableBytes: 6 * 1024 * mib,
+    safetyReserveBytes: 1024 * mib,
+    perAgentReserveBytes: 384 * mib,
+    safeAdditionalAgents,
+    source: "os" as const,
+  };
+}
+
 async function waitFor(predicate: () => boolean): Promise<void> {
   const deadline = Date.now() + 1000;
   while (!predicate()) {
@@ -156,6 +169,7 @@ describe("SubagentManager", () => {
       parentModel,
       models: [parentModel, otherModel, thirdModel],
       runtimeHost: host.host,
+      memorySnapshot: () => memorySnapshot(),
       ...options,
     });
     return { manager, host };
@@ -197,6 +211,81 @@ describe("SubagentManager", () => {
     expect(["queued", "running"]).toContain(manager.get(handle.childId)?.status);
     await waitFor(() => manager.get(handle.childId)?.status === "running");
     expect(host.runtimes.get(handle.childId)).toBeDefined();
+  });
+
+  it("prevalidates a fan-out batch before admitting any child", async () => {
+    const { manager, host } = await createManager(createHost(), { maxConcurrent: 2 });
+    await expect(manager.spawnMany([
+      { prompt: "valid", name: "worker" },
+      { prompt: "invalid model", name: "worker-two", model: "test/missing" },
+    ])).rejects.toThrow("is not available");
+    expect(manager.list()).toHaveLength(0);
+    expect(host.created).toHaveLength(0);
+  });
+
+  it("fans out independently while enforcing the configured concurrency budget, then fans in", async () => {
+    const { manager, host } = await createManager(createHost(), { maxConcurrent: 2 });
+    const handles = await manager.spawnMany([
+      { prompt: "worker one", name: "worker-one" },
+      { prompt: "worker two", name: "worker-two" },
+      { prompt: "worker three", name: "worker-three" },
+    ]);
+    expect(handles).toHaveLength(3);
+    await waitFor(() => host.created.length === 2);
+    expect(manager.get(handles[0]!.childId)?.status).toBe("running");
+    expect(manager.get(handles[1]!.childId)?.status).toBe("running");
+    expect(manager.get(handles[2]!.childId)?.status).toBe("queued");
+
+    host.runtimes.get(handles[0]!.childId)?.complete();
+    await waitFor(() => host.created.length === 3 && manager.get(handles[2]!.childId)?.status === "running");
+    host.runtimes.get(handles[1]!.childId)?.complete();
+    host.runtimes.get(handles[2]!.childId)?.complete();
+
+    const terminal = await manager.wait(handles.map((handle) => handle.childId), { timeoutMs: 1_000 });
+    expect(terminal.map((entry) => entry.status)).toEqual(["completed", "completed", "completed"]);
+    expect(manager.maxConcurrent).toBe(2);
+  });
+
+  it("gates fan-out by live RAM and notifies when constrained and resumed", async () => {
+    let safeAdditionalAgents = 1;
+    const notices: Array<{ state: string; running: number; queued: number }> = [];
+    const { manager, host } = await createManager(createHost(), {
+      maxConcurrent: 3,
+      memoryRetryMs: 250,
+      memorySnapshot: () => memorySnapshot(safeAdditionalAgents),
+      onResourceNotice: (notice) => {
+        notices.push({ state: notice.state, running: notice.running, queued: notice.queued });
+      },
+    });
+    const handles = await manager.spawnMany([
+      { prompt: "one", name: "ram-one" },
+      { prompt: "two", name: "ram-two" },
+      { prompt: "three", name: "ram-three" },
+    ]);
+    await waitFor(() => host.created.length === 1);
+    expect(manager.list().filter((entry) => entry.status === "queued")).toHaveLength(2);
+    expect(notices[0]).toMatchObject({ state: "constrained", running: 1, queued: 1 });
+
+    safeAdditionalAgents = 3;
+    await waitFor(() => host.created.length === 3);
+    expect(notices.some((notice) => notice.state === "resumed")).toBe(true);
+
+    for (const handle of handles) host.runtimes.get(handle.childId)?.complete();
+    await manager.wait(handles.map((handle) => handle.childId), { timeoutMs: 1_000 });
+  });
+
+  it("cancels a queued child when its host-request signal is revoked without consuming a worker slot", async () => {
+    const { manager, host } = await createManager(createHost(), { maxConcurrent: 1 });
+    const blocker = await manager.spawn("blocker", { name: "blocker" });
+    await waitFor(() => manager.get(blocker.childId)?.status === "running");
+    const controller = new AbortController();
+    const queued = await manager.spawn("queued", { name: "queued", signal: controller.signal });
+    expect(manager.get(queued.childId)?.status).toBe("queued");
+    controller.abort("kernel disposed");
+    await waitFor(() => manager.get(queued.childId)?.status === "cancelled");
+    expect(host.created).toHaveLength(1);
+    expect(manager.get(queued.childId)?.error).toBe("Host request was cancelled");
+    host.runtimes.get(blocker.childId)?.complete();
   });
 
   it("transitions a detached child to completed and releases it", async () => {
@@ -269,6 +358,7 @@ describe("SubagentManager", () => {
       parentArtifactDir: artifactDir,
       parentModel,
       runtimeHost: host.host,
+      memorySnapshot: () => memorySnapshot(),
       registryStore: store,
     });
     const handle = await manager.spawn("delete while running", { name: "race" });
@@ -280,6 +370,7 @@ describe("SubagentManager", () => {
       parentArtifactDir: artifactDir,
       parentModel,
       runtimeHost: createHost(true).host,
+      memorySnapshot: () => memorySnapshot(),
       registryStore: store,
     });
     expect(reopened.get(handle.childId)).toBeUndefined();
@@ -351,6 +442,7 @@ describe("SubagentManager", () => {
       parentArtifactDir: artifactDir,
       parentModel,
       runtimeHost: firstHost.host,
+      memorySnapshot: () => memorySnapshot(),
       registryStore: createSessionSubagentRegistryStore(session),
     });
     const handle = await first.spawn("persist me", { name: "persisted" });
@@ -362,6 +454,7 @@ describe("SubagentManager", () => {
       parentArtifactDir: artifactDir,
       parentModel,
       runtimeHost: secondHost.host,
+      memorySnapshot: () => memorySnapshot(),
       registryStore: createSessionSubagentRegistryStore(session),
     });
     expect(reopened.get(handle.childId)).toMatchObject({ name: "persisted", status: "completed" });
@@ -372,6 +465,7 @@ describe("SubagentManager", () => {
       parentArtifactDir: artifactDir,
       parentModel,
       runtimeHost: createHost(true).host,
+      memorySnapshot: () => memorySnapshot(),
       registryStore: createSessionSubagentRegistryStore(session),
     });
     expect(third.list()).toEqual([]);

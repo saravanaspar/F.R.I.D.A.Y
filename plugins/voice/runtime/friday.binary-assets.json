@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "assets": [
+    {
+      "source": "python/friday_voice_local.py",
+      "target": "voice/python/friday_voice_local.py"
+    }
+  ]
+}

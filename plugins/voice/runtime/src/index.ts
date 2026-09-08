@@ -1,6 +1,29 @@
-export type VoiceSttProvider = "openai" | "deepgram";
-export type VoiceTtsProvider = "openai" | "elevenlabs";
-export type VoiceCredentialProvider = VoiceSttProvider | VoiceTtsProvider;
+import { synthesizeLocal, transcribeLocal } from "./local.js";
+export type VoiceSttProvider = "openai" | "deepgram" | "local";
+export type VoiceTtsProvider = "openai" | "elevenlabs" | "local";
+export type VoiceCredentialProvider = "openai" | "deepgram" | "elevenlabs";
+
+export const VOICE_EXPRESSION_STYLES = Object.freeze([
+  "neutral", "happy", "sad", "angry", "sarcastic", "annoyed", "embarrassed", "tsundere", "playful", "excited", "nervous", "sleepy",
+] as const);
+export type VoiceExpressionStyle = typeof VOICE_EXPRESSION_STYLES[number];
+
+export const VOICE_EXPRESSION_EVENTS = Object.freeze([
+  "laugh", "chuckle", "sigh", "gasp", "groan", "cough", "clear-throat", "shush", "sniff", "tsk",
+] as const);
+export type VoiceExpressionEvent = typeof VOICE_EXPRESSION_EVENTS[number];
+
+export interface VoiceExpressionRequest {
+  /** High-level delivery intent. Exact acoustic rendering remains provider-dependent. */
+  readonly style?: VoiceExpressionStyle | undefined;
+  /** Ordered non-verbal/paralinguistic events requested around the utterance. */
+  readonly events?: readonly VoiceExpressionEvent[] | undefined;
+}
+
+export interface VoiceSynthesisOptions {
+  readonly signal?: AbortSignal | undefined;
+  readonly expression?: VoiceExpressionRequest | undefined;
+}
 
 export interface VoiceSttSettings {
   readonly provider: VoiceSttProvider;
@@ -12,7 +35,9 @@ export interface VoiceTtsSettings {
   readonly provider: VoiceTtsProvider;
   readonly model: string;
   readonly voice: string;
-  readonly format: "mp3";
+  readonly format: "mp3" | "wav";
+  /** Private local copy of a reference clip used only by cloning-capable local models. */
+  readonly referenceAudio?: string | undefined;
 }
 
 export interface VoiceSettings {
@@ -56,13 +81,15 @@ export interface VoiceRuntime {
   readonly settings: VoiceSettings | undefined;
   status(): VoiceRuntimeStatus;
   transcribe(input: VoiceTranscriptionInput): Promise<VoiceTranscriptionResult>;
-  synthesize(text: string, options?: { readonly signal?: AbortSignal | undefined }): Promise<readonly VoiceAudioChunk[]>;
+  synthesize(text: string, options?: VoiceSynthesisOptions): Promise<readonly VoiceAudioChunk[]>;
 }
 
 export interface VoiceRuntimeOptions {
   readonly settings?: VoiceSettings | undefined;
   readonly credential: (provider: VoiceCredentialProvider) => Promise<string | undefined>;
   readonly fetch?: typeof globalThis.fetch | undefined;
+  readonly localRoot?: string | undefined;
+  readonly localRunner?: string | undefined;
 }
 
 export const OPENAI_STT_MODELS = Object.freeze(["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "whisper-1"] as const);
@@ -72,12 +99,56 @@ export const OPENAI_TTS_VOICES = Object.freeze([
   "alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse", "marin", "cedar",
 ] as const);
 export const ELEVENLABS_TTS_MODELS = Object.freeze(["eleven_multilingual_v2", "eleven_v3"] as const);
+export const LOCAL_STT_MODELS = Object.freeze(["tiny-q5_1", "base-q5_1", "small-q5_1"] as const);
+export const LOCAL_TTS_MODELS = Object.freeze(["chatterbox-nano", "kitten-nano-int8", "piper"] as const);
+export const LOCAL_TTS_VOICES = Object.freeze({
+  "chatterbox-nano": ["clone/default"],
+  "kitten-nano-int8": ["Jasper", "Luna", "Bella", "Bruno", "Rosie", "Hugo", "Kiki", "Leo"],
+  piper: ["en_US-lessac-medium", "en_US-amy-medium", "en_GB-alan-medium"],
+} as const);
+
+export const LOCAL_STT_CATALOG = Object.freeze([
+  Object.freeze({ id: "tiny-q5_1", label: "Whisper tiny Q5_1", ram: "~300 MB target", accuracy: "fast / basic", disk: "~32 MB model" }),
+  Object.freeze({ id: "base-q5_1", label: "Whisper base Q5_1", ram: "~450 MB target", accuracy: "balanced", disk: "~60 MB model" }),
+  Object.freeze({ id: "small-q5_1", label: "Whisper small Q5_1", ram: "~900 MB target", accuracy: "best of the low-memory set", disk: "~190 MB model" }),
+] as const);
+
+export const LOCAL_TTS_CATALOG = Object.freeze([
+  Object.freeze({ id: "chatterbox-nano", label: "Chatterbox Nano 110M", ram: "~0.8-1.0 GB target; host-dependent", cloning: true, expression: true, accuracy: "best expressiveness / clone" }),
+  Object.freeze({ id: "kitten-nano-int8", label: "KittenTTS Nano int8 15M", ram: "well under 500 MB target", cloning: false, expression: false, accuracy: "tiny / efficient" }),
+  Object.freeze({ id: "piper", label: "Piper", ram: "typically under 500 MB target", cloning: false, expression: false, accuracy: "fast / robust / Pi-friendly" }),
+] as const);
 
 export const DEFAULT_OPENAI_STT_MODEL = "gpt-4o-mini-transcribe";
 export const DEFAULT_DEEPGRAM_STT_MODEL = "nova-3";
 export const DEFAULT_OPENAI_TTS_MODEL = "gpt-4o-mini-tts";
 export const DEFAULT_OPENAI_TTS_VOICE = "alloy";
 export const DEFAULT_ELEVENLABS_TTS_MODEL = "eleven_multilingual_v2";
+
+const VOICE_EXPRESSION_STYLE_SET = new Set<string>(VOICE_EXPRESSION_STYLES);
+const VOICE_EXPRESSION_EVENT_SET = new Set<string>(VOICE_EXPRESSION_EVENTS);
+
+function normalizeExpression(value: unknown): VoiceExpressionRequest | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("voice expression must be an object");
+  const raw = value as Record<string, unknown>;
+  for (const key of Object.keys(raw)) if (!new Set(["style", "events"]).has(key)) throw new Error(`unsupported voice expression field: ${key}`);
+  let style: VoiceExpressionStyle | undefined;
+  if (raw.style !== undefined) {
+    if (typeof raw.style !== "string" || !VOICE_EXPRESSION_STYLE_SET.has(raw.style)) throw new Error("voice expression style is unsupported");
+    style = raw.style as VoiceExpressionStyle;
+  }
+  let events: readonly VoiceExpressionEvent[] | undefined;
+  if (raw.events !== undefined) {
+    if (!Array.isArray(raw.events) || raw.events.length > 8) throw new Error("voice expression events must be an array with at most 8 entries");
+    const normalized = raw.events.map((event) => {
+      if (typeof event !== "string" || !VOICE_EXPRESSION_EVENT_SET.has(event)) throw new Error("voice expression event is unsupported");
+      return event as VoiceExpressionEvent;
+    });
+    events = Object.freeze(normalized);
+  }
+  return Object.freeze({ ...(style === undefined ? {} : { style }), ...(events === undefined ? {} : { events }) });
+}
 
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 const MAX_TRANSCRIPT_CHARS = 128_000;
@@ -103,13 +174,13 @@ function optionalLanguage(value: unknown): string | undefined {
 }
 
 function sttProvider(value: unknown): VoiceSttProvider {
-  if (value === "openai" || value === "deepgram") return value;
-  throw new Error("STT provider must be openai or deepgram");
+  if (value === "openai" || value === "deepgram" || value === "local") return value;
+  throw new Error("STT provider must be openai, deepgram, or local");
 }
 
 function ttsProvider(value: unknown): VoiceTtsProvider {
-  if (value === "openai" || value === "elevenlabs") return value;
-  throw new Error("TTS provider must be openai or elevenlabs");
+  if (value === "openai" || value === "elevenlabs" || value === "local") return value;
+  throw new Error("TTS provider must be openai, elevenlabs, or local");
 }
 
 export function normalizeVoiceSettings(value: unknown): VoiceSettings {
@@ -136,13 +207,20 @@ export function normalizeVoiceSettings(value: unknown): VoiceSettings {
   if (raw.tts !== undefined) {
     if (!raw.tts || typeof raw.tts !== "object" || Array.isArray(raw.tts)) throw new Error("voice TTS settings must be an object");
     const entry = raw.tts as Record<string, unknown>;
-    for (const key of Object.keys(entry)) if (!["provider", "model", "voice", "format"].includes(key)) throw new Error(`unsupported voice TTS field: ${key}`);
-    if (entry.format !== "mp3") throw new Error("voice TTS format must be mp3");
+    for (const key of Object.keys(entry)) if (!["provider", "model", "voice", "format", "referenceAudio"].includes(key)) throw new Error(`unsupported voice TTS field: ${key}`);
+    const provider = ttsProvider(entry.provider);
+    const expectedFormat = provider === "local" ? "wav" : "mp3";
+    if (entry.format !== expectedFormat) throw new Error(`voice TTS format must be ${expectedFormat} for ${provider}`);
+    const referenceAudio = entry.referenceAudio === undefined ? undefined : safeText(entry.referenceAudio, "TTS reference audio", 4096);
+    if (referenceAudio !== undefined && (provider !== "local" || entry.model !== "chatterbox-nano")) {
+      throw new Error("TTS referenceAudio is supported only by local chatterbox-nano");
+    }
     tts = Object.freeze({
-      provider: ttsProvider(entry.provider),
+      provider,
       model: safeText(entry.model, "TTS model"),
       voice: safeText(entry.voice, "TTS voice", 256),
-      format: "mp3",
+      format: expectedFormat,
+      ...(referenceAudio === undefined ? {} : { referenceAudio }),
     });
   }
 
@@ -152,14 +230,16 @@ export function normalizeVoiceSettings(value: unknown): VoiceSettings {
 export function defaultSttSettings(provider: VoiceSttProvider): VoiceSttSettings {
   return Object.freeze({
     provider,
-    model: provider === "openai" ? DEFAULT_OPENAI_STT_MODEL : DEFAULT_DEEPGRAM_STT_MODEL,
+    model: provider === "openai" ? DEFAULT_OPENAI_STT_MODEL : provider === "deepgram" ? DEFAULT_DEEPGRAM_STT_MODEL : "base-q5_1",
   });
 }
 
 export function defaultTtsSettings(provider: VoiceTtsProvider): VoiceTtsSettings {
   return Object.freeze(provider === "openai"
     ? { provider, model: DEFAULT_OPENAI_TTS_MODEL, voice: DEFAULT_OPENAI_TTS_VOICE, format: "mp3" as const }
-    : { provider, model: DEFAULT_ELEVENLABS_TTS_MODEL, voice: "", format: "mp3" as const });
+    : provider === "elevenlabs"
+      ? { provider, model: DEFAULT_ELEVENLABS_TTS_MODEL, voice: "", format: "mp3" as const }
+      : { provider, model: "piper", voice: "en_US-lessac-medium", format: "wav" as const });
 }
 
 function extensionForMime(mimeType: string | undefined): string {
@@ -189,6 +269,12 @@ async function requiredCredential(options: VoiceRuntimeOptions, provider: VoiceC
   if (!value) throw new Error(`Voice credential for ${provider} is not configured`);
   if (value.length > 16_384 || /\s/.test(value)) throw new Error(`Voice credential for ${provider} is invalid`);
   return value;
+}
+
+function requiredLocalRoot(options: VoiceRuntimeOptions): string {
+  const root = options.localRoot?.trim();
+  if (!root) throw new Error("Local voice runtime root is not configured");
+  return root;
 }
 
 function providerSignal(signal: AbortSignal | undefined): AbortSignal {
@@ -404,17 +490,32 @@ export function createVoiceRuntime(options: VoiceRuntimeOptions): VoiceRuntime {
       if (!stt) throw new Error("Voice STT is not configured; run `friday setup voice`");
       const text = stt.provider === "openai"
         ? await transcribeOpenAI(options, stt, input)
-        : await transcribeDeepgram(options, stt, input);
+        : stt.provider === "deepgram"
+          ? await transcribeDeepgram(options, stt, input)
+          : await transcribeLocal({
+              localRoot: requiredLocalRoot(options),
+              ...(options.localRunner === undefined ? {} : { localRunner: options.localRunner }),
+            }, stt, input);
       return Object.freeze({ text, provider: stt.provider, model: stt.model });
     },
-    async synthesize(text: string, synthOptions: { readonly signal?: AbortSignal | undefined } = {}): Promise<readonly VoiceAudioChunk[]> {
+    async synthesize(text: string, synthOptions: VoiceSynthesisOptions = {}): Promise<readonly VoiceAudioChunk[]> {
       const tts = settings?.tts;
       if (!tts) throw new Error("Voice TTS is not configured; run `friday setup voice`");
+      const expression = normalizeExpression(synthOptions.expression);
+      const hasExpression = expression !== undefined && (expression.style !== undefined && expression.style !== "neutral" || (expression.events?.length ?? 0) > 0);
+      if (hasExpression && (tts.provider !== "local" || tts.model !== "chatterbox-nano")) {
+        throw new Error("The selected TTS backend does not support FRIDAY expression intents; choose local chatterbox-nano or omit expression");
+      }
       const chunks: VoiceAudioChunk[] = [];
       for (const part of chunkSpeechText(text)) {
         chunks.push(tts.provider === "openai"
           ? await synthesizeOpenAI(options, tts, part, synthOptions.signal)
-          : await synthesizeElevenLabs(options, tts, part, synthOptions.signal));
+          : tts.provider === "elevenlabs"
+            ? await synthesizeElevenLabs(options, tts, part, synthOptions.signal)
+            : await synthesizeLocal({
+                localRoot: requiredLocalRoot(options),
+                ...(options.localRunner === undefined ? {} : { localRunner: options.localRunner }),
+              }, tts, part, synthOptions.signal, expression));
       }
       return Object.freeze(chunks);
     },

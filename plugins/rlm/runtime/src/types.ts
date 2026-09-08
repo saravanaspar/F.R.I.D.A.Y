@@ -43,6 +43,14 @@ export interface RlmSubagentPort {
     prompt: string,
     options?: { name?: string; model?: string; spawnCode?: string; signal?: AbortSignal },
   ): Promise<{ childId: string; name: string; sessionDir: string; model: string }>;
+  spawnMany?(
+    tasks: readonly { prompt: string; name?: string; model?: string }[],
+    options?: { spawnCode?: string; signal?: AbortSignal },
+  ): Promise<readonly { childId: string; name: string; sessionDir: string; model: string }[]>;
+  wait?(
+    targets: readonly string[],
+    options?: { timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<readonly RlmSubagentPortEntry[]>;
   list(): RlmSubagentPortEntry[];
   delete(target: string): Promise<RlmSubagentPortEntry>;
 }

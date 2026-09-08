@@ -141,6 +141,30 @@ async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
     return _spawn_handle_from_payload(payload)
 
 
+async def spawn_many(tasks: list[dict[str, Any] | str]) -> list[RLMSpawnHandle]:
+    """Admit a bounded fan-out batch without serializing child execution."""
+    if not isinstance(tasks, list) or not tasks or len(tasks) > 32:
+        raise ValueError("tasks must be a list containing between 1 and 32 entries")
+    normalized: list[dict[str, Any]] = []
+    for index, task in enumerate(tasks):
+        if isinstance(task, str):
+            if not task.strip():
+                raise ValueError(f"tasks[{index}] must not be empty")
+            normalized.append({"prompt": task})
+            continue
+        if not isinstance(task, dict) or not isinstance(task.get("prompt"), str) or not task["prompt"].strip():
+            raise TypeError(f"tasks[{index}] must be a prompt string or dict with prompt")
+        unsupported = set(task) - {"prompt", "name", "model"}
+        if unsupported:
+            raise ValueError(f"tasks[{index}] contains unsupported keys: {', '.join(sorted(unsupported))}")
+        normalized.append(dict(task))
+    payload = await host_request("rlm.spawn_many", {"tasks": normalized})
+    handles = payload.get("subagents")
+    if not isinstance(handles, list):
+        raise RuntimeError("rlm.spawn_many returned an invalid subagents list")
+    return [_spawn_handle_from_payload(handle) for handle in handles]
+
+
 def _model_from_payload(payload: Any) -> RLMModel:
     if not isinstance(payload, dict):
         raise RuntimeError("rlm.find_models returned an invalid model entry")
@@ -206,6 +230,33 @@ async def list_subagents() -> list[RLMSubagent]:
     return [_subagent_from_payload(entry) for entry in entries]
 
 
+async def wait_subagents(targets: list[str | RLMSpawnHandle | RLMSubagent], timeout: float = 1800.0) -> list[RLMSubagent]:
+    """Wait for a fan-out set to reach terminal state, then return stable registry views."""
+    if not isinstance(targets, list) or not targets or len(targets) > 32:
+        raise ValueError("targets must contain between 1 and 32 entries")
+    if not isinstance(timeout, (int, float)) or timeout <= 0 or timeout > 86400:
+        raise ValueError("timeout must be greater than 0 and at most 86400 seconds")
+    selectors: list[str] = []
+    for index, target in enumerate(targets):
+        if isinstance(target, (RLMSpawnHandle, RLMSubagent)):
+            selectors.append(target.rlm_child_id)
+        elif isinstance(target, str) and target.strip():
+            selectors.append(target.strip())
+        else:
+            raise TypeError(f"targets[{index}] must be str, RLMSpawnHandle, or RLMSubagent")
+    payload = await host_request("rlm.wait_subagents", {"targets": selectors, "timeoutMs": int(timeout * 1000)})
+    entries = payload.get("subagents")
+    if not isinstance(entries, list):
+        raise RuntimeError("rlm.wait_subagents returned an invalid subagents registry")
+    return [_subagent_from_payload(entry, "rlm.wait_subagents") for entry in entries]
+
+
+async def gather(tasks: list[dict[str, Any] | str], timeout: float = 1800.0) -> list[RLMSubagent]:
+    """Fan out independent child tasks concurrently and fan in on terminal status."""
+    handles = await spawn_many(tasks)
+    return await wait_subagents(handles, timeout=timeout)
+
+
 async def delete_subagent(target: str | RLMSubagent) -> RLMSubagent:
     """Delete one running or retained direct child from the current parent session."""
     if isinstance(target, RLMSubagent):
@@ -223,6 +274,15 @@ async def delete_subagent(target: str | RLMSubagent) -> RLMSubagent:
 class _RLMCallable:
     async def run(self, prompt: str, **kwargs: Any) -> RLMSpawnHandle:
         return await run(prompt, **kwargs)
+
+    async def spawn_many(self, tasks: list[dict[str, Any] | str]) -> list[RLMSpawnHandle]:
+        return await spawn_many(tasks)
+
+    async def wait_subagents(self, targets: list[str | RLMSpawnHandle | RLMSubagent], timeout: float = 1800.0) -> list[RLMSubagent]:
+        return await wait_subagents(targets, timeout)
+
+    async def gather(self, tasks: list[dict[str, Any] | str], timeout: float = 1800.0) -> list[RLMSubagent]:
+        return await gather(tasks, timeout)
 
     async def find_models(self, query: str = "", limit: int = 8) -> list[RLMModel]:
         return await find_models(query, limit)
@@ -252,9 +312,12 @@ __all__ = [
     "RLMSpawnHandle",
     "RLMSubagent",
     "delete_subagent",
+    "gather",
     "find_models",
     "host_request",
     "list_subagents",
     "rlm",
     "run",
+    "spawn_many",
+    "wait_subagents",
 ]

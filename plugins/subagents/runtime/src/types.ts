@@ -1,3 +1,5 @@
+import type { SubagentMemorySnapshot } from "./memory-budget.js";
+
 export interface SubagentModel {
 	provider: string;
 	id: string;
@@ -71,6 +73,16 @@ export interface SubagentRegistryStore {
 	remove(childId: string): void | Promise<void>;
 }
 
+
+export interface SubagentResourceNotice {
+	readonly state: "constrained" | "resumed";
+	readonly running: number;
+	readonly queued: number;
+	readonly configuredMaxConcurrent: number;
+	readonly memoryAllowedAdditional: number;
+	readonly snapshot: SubagentMemorySnapshot;
+}
+
 export interface SubagentManagerEvent {
 	type: "child_update";
 	child: SubagentRegistryEntry;
@@ -81,6 +93,14 @@ export interface SubagentManagerOptions {
 	parentArtifactDir?: string;
 	depth?: number;
 	maxDepth?: number;
+	/** Maximum number of direct children executing at once. Additional children remain queued. */
+	maxConcurrent?: number;
+	/** Host/cgroup-aware memory snapshot used to gate new child admission. */
+	memorySnapshot?: (() => SubagentMemorySnapshot) | undefined;
+	/** Public, host-owned notification surface for RAM constraint/resume updates. */
+	onResourceNotice?: ((notice: SubagentResourceNotice) => void | Promise<void>) | undefined;
+	/** Recheck interval while all queued children are blocked by memory pressure. */
+	memoryRetryMs?: number | undefined;
 	parentModel: SubagentModel;
 	models?: readonly SubagentModel[];
 	runtimeHost: SubagentRuntimeHost;
@@ -91,5 +111,21 @@ export interface SpawnSubagentOptions {
 	name?: string;
 	model?: string;
 	spawnCode?: string;
+	signal?: AbortSignal;
+}
+
+export interface SpawnSubagentTask {
+	prompt: string;
+	name?: string;
+	model?: string;
+}
+
+export interface SpawnManySubagentsOptions {
+	spawnCode?: string;
+	signal?: AbortSignal;
+}
+
+export interface WaitForSubagentsOptions {
+	timeoutMs?: number;
 	signal?: AbortSignal;
 }

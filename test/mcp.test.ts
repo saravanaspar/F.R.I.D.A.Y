@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PluginTestHost } from "./helpers/plugin-host.js";
 import authPlugin from "../plugins/auth/index.js";
 import { AGENT_TOOL_CONTRIBUTION } from "../plugins/turn-loop/contract.js";
@@ -15,6 +15,7 @@ import {
   uninstallCapabilityRegistry,
 } from "../plugins/capabilities/protocol.js";
 import { createMcpPlugin } from "../plugins/mcp/index.js";
+import { searchMcpRegistry } from "../plugins/mcp/discovery.js";
 import { MCP_CAPABILITY } from "../plugins/mcp/contract.js";
 import { MCP_TRUSTED_CAPABILITY } from "../plugins/mcp/trusted-contract.js";
 import modelPlugin from "../plugins/model/index.js";
@@ -152,6 +153,44 @@ function memoryCredentials(initial: Record<string, string> = {}) {
 }
 
 describe("MCP production client", () => {
+  it("searches the official Registry with latest-version filtering and discards unsafe remote metadata", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      expect(url.origin + url.pathname).toBe("https://registry.modelcontextprotocol.io/v0.1/servers");
+      expect(url.searchParams.get("search")).toBe("computer control");
+      expect(url.searchParams.get("version")).toBe("latest");
+      expect(url.searchParams.get("limit")).toBe("10");
+      return new Response(JSON.stringify({
+        servers: [{
+          server: {
+            name: "io.example/computer",
+            version: "1.2.3",
+            title: "Computer MCP",
+            description: "Computer-control tools",
+            repository: { url: "https://github.com/example/computer" },
+            remotes: [
+              { type: "streamable-http", url: "https://mcp.example.com/mcp" },
+              { type: "streamable-http", url: "http://unsafe.example.com/mcp" },
+            ],
+            packages: [{ registryType: "npm", identifier: "@example/computer-mcp", version: "1.2.3", transport: { type: "stdio" } }],
+          },
+        }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+
+    await expect(searchMcpRegistry("computer control", fetchMock as unknown as typeof fetch)).resolves.toEqual([
+      {
+        name: "io.example/computer",
+        version: "1.2.3",
+        title: "Computer MCP",
+        description: "Computer-control tools",
+        repositoryUrl: "https://github.com/example/computer",
+        remotes: [{ type: "streamable-http", url: "https://mcp.example.com/mcp" }],
+        packages: [{ registryType: "npm", identifier: "@example/computer-mcp", version: "1.2.3", transportType: "stdio" }],
+      },
+    ]);
+  });
+
   it("discovers tools, calls a tool, reuses the negotiated session, authorizes network access, and persists custom server metadata", async () => {
     const remote = await mockMcpServer({ sseList: true });
     const stateDir = temp();
@@ -301,13 +340,14 @@ describe("MCP production client", () => {
 
       const safe = requireCapability(MCP_CAPABILITY);
       const trusted = requireCapability(MCP_TRUSTED_CAPABILITY);
-      expect(Object.keys(safe).sort()).toEqual(["callTool", "disconnect", "listTools", "servers", "status"]);
+      expect(Object.keys(safe).sort()).toEqual(["callTool", "disconnect", "listTools", "searchRegistry", "servers", "status"]);
       expect(Object.keys(trusted).sort()).toEqual(["credentialRef", "login", "registerServer", "removeServer"]);
       expect(JSON.stringify(safe.servers())).not.toContain("vault://");
       const tools = collectContributions(AGENT_TOOL_CONTRIBUTION);
       expect(tools.map((tool) => tool.name).sort()).toEqual([
         "mcp_call_tool",
         "mcp_list_tools",
+        "mcp_search_registry",
         "mcp_servers",
       ]);
       await expect(tools.find((tool) => tool.name === "mcp_servers")!.execute({})).resolves.toMatchObject({

@@ -46,6 +46,32 @@ function fakeIo(): OnboardingIO {
   };
 }
 
+function localFakeIo(): OnboardingIO {
+  return {
+    isInteractive: true,
+    question: async () => "",
+    text: async (_prompt, initialValue) => initialValue ?? "",
+    secretQuestion: async () => { throw new Error("local voice setup must not request a secret"); },
+    write: () => undefined,
+    select: async (input: OnboardingSelectInput) => {
+      if (input.message === "Speech-to-text provider") return "local";
+      if (input.message === "Local speech-to-text model") return "base-q5_1";
+      if (input.message === "Text-to-speech provider") return "local";
+      if (input.message === "Local text-to-speech model") return "piper";
+      if (input.message === "Local voice") return "en_US-lessac-medium";
+      return input.initialValue ?? input.choices[0]!.value;
+    },
+    confirm: async () => false,
+    runTask: async (_message, operation) => operation(),
+    intro: () => undefined,
+    outro: () => undefined,
+    info: () => undefined,
+    success: () => undefined,
+    warning: () => undefined,
+    close: () => undefined,
+  };
+}
+
 describe("voice setup", () => {
   it("verifies once, stores OpenAI voice credential in the canonical model Vault ref, and saves only non-secret settings", async () => {
     const home = await tempHome();
@@ -75,5 +101,46 @@ describe("voice setup", () => {
     const rawSettings = JSON.stringify(await readVoiceSettings(home));
     expect(rawSettings).not.toContain("OPENAI_VOICE_KEY_SENTINEL");
     expect(rawSettings).toContain("gpt-4o-mini-tts");
+  });
+
+  it("provisions selected local STT/TTS models without asking for API credentials", async () => {
+    const home = await tempHome();
+    let dependencyChecks = 0;
+    let provisions = 0;
+    let verifications = 0;
+    const saved = await runVoiceSetup({
+      home,
+      io: localFakeIo(),
+      ensureLocalHostDependencies: async (settings, providedHome) => {
+        dependencyChecks += 1;
+        expect(providedHome).toBe(home);
+        expect(settings).toMatchObject({
+          stt: { provider: "local", model: "base-q5_1" },
+          tts: { provider: "local", model: "piper", voice: "en_US-lessac-medium", format: "wav" },
+        });
+      },
+      provisionLocal: async (settings, providedHome) => {
+        provisions += 1;
+        expect(providedHome).toBe(home);
+        expect(settings.stt?.provider).toBe("local");
+        expect(settings.tts?.provider).toBe("local");
+      },
+      verify: async (settings, credential) => {
+        verifications += 1;
+        expect(settings.stt?.model).toBe("base-q5_1");
+        expect(settings.tts?.model).toBe("piper");
+        await expect(credential("openai")).resolves.toBeUndefined();
+      },
+    });
+
+    expect(dependencyChecks).toBe(1);
+    expect(provisions).toBe(1);
+    expect(verifications).toBe(1);
+    expect(saved).toMatchObject({
+      schema: 1,
+      stt: { provider: "local", model: "base-q5_1" },
+      tts: { provider: "local", model: "piper", voice: "en_US-lessac-medium", format: "wav" },
+    });
+    expect(JSON.stringify(await readVoiceSettings(home))).not.toContain("vault://");
   });
 });

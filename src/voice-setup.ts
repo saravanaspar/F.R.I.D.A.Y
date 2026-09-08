@@ -1,8 +1,14 @@
+import { stat } from "node:fs/promises";
 import {
   createVoiceProbeWav,
   createVoiceRuntime,
   DEEPGRAM_STT_MODELS,
   ELEVENLABS_TTS_MODELS,
+  LOCAL_STT_CATALOG,
+  LOCAL_STT_MODELS,
+  LOCAL_TTS_CATALOG,
+  LOCAL_TTS_MODELS,
+  LOCAL_TTS_VOICES,
   OPENAI_STT_MODELS,
   OPENAI_TTS_MODELS,
   OPENAI_TTS_VOICES,
@@ -15,6 +21,13 @@ import { modelCredentialVaultRef } from "../plugins/auth/model-credential-ref.js
 import { getFridayHome, getFridayWorkspace } from "../plugins/runtime-settings/runtime-env.js";
 import { voiceCredentialVaultRef } from "../plugins/voice/credential-ref.js";
 import { readVoiceSettings, saveVoiceSettings } from "../plugins/voice/settings.js";
+import { hasFridayPrivilegedHelper, installFridayPrivilegeBroker, installVoiceHostDependencies } from "./privileged-setup.js";
+import {
+  localVoiceToolingRoot,
+  missingLocalVoiceHostDependencies,
+  provisionLocalVoice,
+  stageLocalVoiceReference,
+} from "./voice-local-setup.js";
 import type { OnboardingIO } from "./onboarding.js";
 import { createTerminalOnboardingIO } from "./terminal-setup-ui.js";
 
@@ -22,6 +35,8 @@ export interface VoiceSetupOptions {
   readonly home?: string | undefined;
   readonly io?: OnboardingIO | undefined;
   readonly verify?: ((settings: VoiceSettings, credential: (provider: VoiceCredentialProvider) => Promise<string | undefined>) => Promise<void>) | undefined;
+  readonly provisionLocal?: ((settings: VoiceSettings, home: string) => Promise<void>) | undefined;
+  readonly ensureLocalHostDependencies?: ((settings: VoiceSettings, home: string, io: OnboardingIO) => Promise<void>) | undefined;
 }
 
 function showInfo(io: OnboardingIO, message: string): void { io.info ? io.info(message) : io.write(`${message}\n`); }
@@ -71,45 +86,96 @@ function credentialKind(provider: VoiceCredentialProvider): string {
 
 async function chooseStt(io: OnboardingIO, existing: VoiceSettings | undefined): Promise<VoiceSettings["stt"]> {
   const providerValue = await select(io, "Speech-to-text provider", [
-    { value: "openai", label: "OpenAI", hint: "gpt-4o transcription models" },
-    { value: "deepgram", label: "Deepgram", hint: "Nova speech recognition" },
+    { value: "local", label: "Local / offline", hint: "quantized OpenAI Whisper via whisper.cpp; no API key" },
+    { value: "openai", label: "OpenAI", hint: "hosted gpt-4o transcription models" },
+    { value: "deepgram", label: "Deepgram", hint: "hosted Nova speech recognition" },
     { value: "disabled", label: "Disabled", hint: "do not transcribe audio" },
   ], existing?.stt?.provider ?? "openai");
   if (providerValue === "disabled") return undefined;
   const provider = providerValue as VoiceSttProvider;
-  const models = provider === "openai" ? OPENAI_STT_MODELS : DEEPGRAM_STT_MODELS;
-  const defaultModel = existing?.stt?.provider === provider ? existing.stt.model : models[0]!;
-  const model = await select(io, "Speech-to-text model", models.map((value) => ({ value, label: value })), defaultModel);
+  const models = provider === "openai" ? OPENAI_STT_MODELS : provider === "deepgram" ? DEEPGRAM_STT_MODELS : LOCAL_STT_MODELS;
+  const defaultModel = existing?.stt?.provider === provider ? existing.stt.model : provider === "local" ? "base-q5_1" : models[0]!;
+  const choices = provider === "local"
+    ? LOCAL_STT_CATALOG.map((entry) => ({ value: entry.id, label: entry.label, hint: `${entry.ram} · ${entry.accuracy} · ${entry.disk}` }))
+    : models.map((value) => ({ value, label: value }));
+  const model = await select(io, provider === "local" ? "Local speech-to-text model" : "Speech-to-text model", choices, defaultModel);
+  if (provider === "local") {
+    showInfo(io, "Local STT uses OpenAI Whisper weights converted/quantized for whisper.cpp. RAM figures are setup guidance, not hard process limits.");
+  }
   const languageRaw = (await text(io, "Language code (`auto` for detection)", existing?.stt?.language ?? "auto")).trim();
   const language = languageRaw.toLowerCase() === "auto" || !languageRaw ? undefined : languageRaw;
   return Object.freeze({ provider, model, ...(language === undefined ? {} : { language }) });
 }
 
-async function chooseTts(io: OnboardingIO, existing: VoiceSettings | undefined): Promise<VoiceSettings["tts"]> {
+async function chooseTts(io: OnboardingIO, existing: VoiceSettings | undefined, home: string): Promise<VoiceSettings["tts"]> {
   const providerValue = await select(io, "Text-to-speech provider", [
-    { value: "openai", label: "OpenAI", hint: "gpt-4o-mini-tts" },
-    { value: "elevenlabs", label: "ElevenLabs", hint: "multilingual voice synthesis" },
+    { value: "local", label: "Local / offline", hint: "3 low-memory choices; no API key" },
+    { value: "openai", label: "OpenAI", hint: "hosted gpt-4o-mini-tts" },
+    { value: "elevenlabs", label: "ElevenLabs", hint: "hosted multilingual voice synthesis" },
     { value: "disabled", label: "Disabled", hint: "text replies only" },
   ], existing?.tts?.provider ?? "openai");
   if (providerValue === "disabled") return undefined;
   const provider = providerValue as VoiceTtsProvider;
-  const models = provider === "openai" ? OPENAI_TTS_MODELS : ELEVENLABS_TTS_MODELS;
-  const defaultModel = existing?.tts?.provider === provider ? existing.tts.model : models[0]!;
-  const model = await select(io, "Text-to-speech model", models.map((value) => ({ value, label: value })), defaultModel);
-  let voice: string;
+  const models = provider === "openai" ? OPENAI_TTS_MODELS : provider === "elevenlabs" ? ELEVENLABS_TTS_MODELS : LOCAL_TTS_MODELS;
+  const defaultModel = existing?.tts?.provider === provider ? existing.tts.model : provider === "local" ? "piper" : models[0]!;
+  const choices = provider === "local"
+    ? LOCAL_TTS_CATALOG.map((entry) => ({
+        value: entry.id,
+        label: entry.label,
+        hint: `${entry.ram} · clone ${entry.cloning ? "yes" : "no"} · expression ${entry.expression ? "yes" : "no"} · ${entry.accuracy}`,
+      }))
+    : models.map((value) => ({ value, label: value }));
+  const model = await select(io, provider === "local" ? "Local text-to-speech model" : "Text-to-speech model", choices, defaultModel);
+
   if (provider === "openai") {
     const defaultVoice = existing?.tts?.provider === provider ? existing.tts.voice : "alloy";
-    voice = await select(io, "Voice", OPENAI_TTS_VOICES.map((value) => ({ value, label: value })), defaultVoice);
-  } else {
-    const current = existing?.tts?.provider === provider ? existing.tts.voice : undefined;
-    voice = (await text(io, "ElevenLabs voice ID", current)).trim();
-    if (!voice) throw new Error("ElevenLabs voice ID is required");
+    const voice = await select(io, "Voice", OPENAI_TTS_VOICES.map((value) => ({ value, label: value })), defaultVoice);
+    return Object.freeze({ provider, model, voice, format: "mp3" as const });
   }
-  return Object.freeze({ provider, model, voice, format: "mp3" as const });
+  if (provider === "elevenlabs") {
+    const current = existing?.tts?.provider === provider ? existing.tts.voice : undefined;
+    const voice = (await text(io, "ElevenLabs voice ID", current)).trim();
+    if (!voice) throw new Error("ElevenLabs voice ID is required");
+    return Object.freeze({ provider, model, voice, format: "mp3" as const });
+  }
+
+  const localModel = model as keyof typeof LOCAL_TTS_VOICES;
+  const voices = LOCAL_TTS_VOICES[localModel];
+  const currentVoice = existing?.tts?.provider === "local" && existing.tts.model === model ? existing.tts.voice : voices[0]!;
+  const voice = voices.length === 1 ? voices[0]! : await select(io, "Local voice", voices.map((value) => ({ value, label: value })), currentVoice);
+  if (model !== "chatterbox-nano") return Object.freeze({ provider, model, voice, format: "wav" as const });
+
+  showInfo(io, "Chatterbox Nano supports zero-shot voice cloning plus FRIDAY expression intents such as laugh, chuckle, sigh, angry/annoyed cues, tsundere, gasp, groan, and tsk. Voice identity stays separate from expression. Use a clean reference clip longer than 5 seconds for cloning. Its 110M model targets the 0.8–1.0 GB class, but Python/PyTorch overhead can make peak RSS host-dependent.");
+  const existingReference = existing?.tts?.provider === "local" && existing.tts.model === model ? existing.tts.referenceAudio : undefined;
+  const referenceInput = (await text(io, "Optional reference voice clip path (leave blank for default voice)", existingReference)).trim();
+  if (!referenceInput) return Object.freeze({ provider, model, voice, format: "wav" as const });
+  const info = await stat(referenceInput);
+  if (!info.isFile()) throw new Error("Voice reference must be a regular file");
+  if (info.size <= 0 || info.size > 20 * 1024 * 1024) throw new Error("Voice reference must be between 1 byte and 20 MiB");
+  const referenceAudio = await stageLocalVoiceReference(referenceInput, home);
+  return Object.freeze({ provider, model, voice, format: "wav" as const, referenceAudio });
 }
 
-async function defaultVerify(settings: VoiceSettings, credential: (provider: VoiceCredentialProvider) => Promise<string | undefined>): Promise<void> {
-  const runtime = createVoiceRuntime({ settings, credential });
+async function defaultEnsureLocalHostDependencies(settings: VoiceSettings, _home: string, io: OnboardingIO): Promise<void> {
+  const missing = missingLocalVoiceHostDependencies(settings);
+  if (missing.length === 0) return;
+  if (process.platform !== "linux") {
+    throw new Error(`Local voice is missing host dependencies: ${missing.join(", ")}. Automatic installation is currently available on Debian/Ubuntu via \`friday setup privileges\`.`);
+  }
+  if (!io.isInteractive) throw new Error(`Local voice is missing host dependencies: ${missing.join(", ")}. Run \`friday setup privileges\` and retry.`);
+  showWarning(io, `Local voice needs host dependencies: ${missing.join(", ")}.`);
+  const approved = await confirm(io, "Install FRIDAY's narrowly-scoped sudo broker and approved voice dependencies?", true);
+  if (!approved) throw new Error("Local voice host dependency installation was declined");
+  if (!(await hasFridayPrivilegedHelper())) {
+    await task(io, "Installing FRIDAY privilege broker", () => installFridayPrivilegeBroker());
+  }
+  await task(io, "Installing approved voice host dependencies", () => installVoiceHostDependencies());
+  const after = missingLocalVoiceHostDependencies(settings);
+  if (after.length > 0) throw new Error(`Voice host dependency installation completed but these commands are still unavailable: ${after.join(", ")}`);
+}
+
+async function defaultVerify(settings: VoiceSettings, credential: (provider: VoiceCredentialProvider) => Promise<string | undefined>, home: string): Promise<void> {
+  const runtime = createVoiceRuntime({ settings, credential, localRoot: localVoiceToolingRoot(home) });
   if (settings.stt) {
     await runtime.transcribe({ audio: createVoiceProbeWav(), mimeType: "audio/wav", fileName: "friday-voice-probe.wav" });
   }
@@ -123,10 +189,10 @@ export async function runVoiceSetup(options: VoiceSetupOptions = {}): Promise<Vo
   const home = options.home ?? getFridayHome(process.env);
   const io = options.io ?? createTerminalOnboardingIO();
   const existing = await readVoiceSettings(home);
-  io.intro?.("FRIDAY · Voice", "Configure speech-to-text and text-to-speech. Provider keys are masked, verified, and stored only in Vault.");
+  io.intro?.("FRIDAY · Voice", "Configure hosted or private local speech. Local choices are provisioned automatically; remote keys are masked, verified, and stored only in Vault.");
 
   const stt = await chooseStt(io, existing);
-  const tts = await chooseTts(io, existing);
+  const tts = await chooseTts(io, existing, home);
   if (!stt && !tts) showWarning(io, "Both STT and TTS are disabled; voice settings will remain installed but inactive.");
   const candidate: VoiceSettings = Object.freeze({ schema: 1, ...(stt === undefined ? {} : { stt }), ...(tts === undefined ? {} : { tts }) });
 
@@ -136,8 +202,8 @@ export async function runVoiceSetup(options: VoiceSetupOptions = {}): Promise<Vo
     workspaceRoot: getFridayWorkspace({ ...process.env, FRIDAY_HOME: home }),
   });
   const neededProviders = new Set<VoiceCredentialProvider>();
-  if (stt) neededProviders.add(stt.provider);
-  if (tts) neededProviders.add(tts.provider);
+  if (stt?.provider !== undefined && stt.provider !== "local") neededProviders.add(stt.provider);
+  if (tts?.provider !== undefined && tts.provider !== "local") neededProviders.add(tts.provider);
   const pending = new Map<VoiceCredentialProvider, Uint8Array>();
 
   try {
@@ -170,7 +236,13 @@ export async function runVoiceSetup(options: VoiceSetupOptions = {}): Promise<Vo
       return value;
     };
 
-    await task(io, "Verifying voice providers", () => (options.verify ?? defaultVerify)(candidate, resolveCredential));
+    const hasLocal = stt?.provider === "local" || tts?.provider === "local";
+    if (hasLocal) {
+      await (options.ensureLocalHostDependencies ?? defaultEnsureLocalHostDependencies)(candidate, home, io);
+      await task(io, "Provisioning selected local voice model(s)", () => (options.provisionLocal ?? provisionLocalVoice)(candidate, home));
+    }
+    const verifier = options.verify ?? ((settings: VoiceSettings, credential: (provider: VoiceCredentialProvider) => Promise<string | undefined>) => defaultVerify(settings, credential, home));
+    await task(io, "Verifying voice providers", () => verifier(candidate, resolveCredential));
 
     for (const [provider, secret] of pending) {
       const ref = credentialRef(provider);

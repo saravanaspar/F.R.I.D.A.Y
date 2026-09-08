@@ -62,16 +62,17 @@ You can talk to the same assistant from a configured messaging channel, give it 
 
 F.R.I.D.A.Y does not blindly rewrite itself after every conversation. When an explicitly requested capability is missing, the self-improvement path can:
 
-1. inspect installed actions/tools and capability contracts, and consider whether an MCP integration is the right existing boundary, before choosing new code;
-2. determine whether any genuinely missing capability is feasible and choose the owning placement;
-3. request explicit authorization before making code changes;
-4. create changes in an isolated worktree only when code is actually required;
-5. run quality/evaluation gates;
-6. promote a verified generation;
-7. perform an authenticated two-process handoff; and
-8. resume the original request after the successor is ready.
+1. inspect installed actions/tools and capability contracts before choosing new code;
+2. for external/tool integrations, search configured MCP servers and the official MCP Registry, then accept MCP only after a live tool description/input-schema check verifies the exact requested operation;
+3. determine whether any genuinely missing capability is feasible and choose the owning code placement only after MCP-first discovery finds no exact live match;
+4. request explicit authorization before making code changes;
+5. create changes in an isolated worktree only when code is actually required;
+6. run quality/evaluation gates;
+7. promote a verified generation;
+8. perform an authenticated two-process handoff; and
+9. resume the original request after the successor is ready.
 
-When an existing action, tool, or typed capability already solves the request—or an existing MCP integration is the correct no-code boundary—F.R.I.D.A.Y can avoid the code-generation/restart path.
+When an existing action, tool, or typed capability already solves the request—or an MCP candidate has been live-verified for the exact operation—F.R.I.D.A.Y avoids the code-generation/restart path. Registry names/descriptions alone are never treated as proof that an MCP can do the job.
 
 If other foreground turns or background jobs are active at restart time, F.R.I.D.A.Y asks before pausing them and explains the recovery boundary.
 
@@ -179,6 +180,7 @@ friday setup execution-python
 friday setup self-repository /path/to/F.R.I.D.A.Y
 friday setup whatsapp
 friday setup voice
+friday setup privileges
 friday setup --help
 ```
 
@@ -220,7 +222,7 @@ Email identity is derived from the parsed `From` address; F.R.I.D.A.Y does not c
 
 The `friday` runtime does not read terminal conversation input and registers no CLI channel. The command line is reserved for setup/onboarding compatibility, doctor, and bounded stopped-runtime maintenance.
 
-Voice is an optional plugin, not a second conversational runtime. `friday setup voice` configures provider/model/voice choices and verifies them with a tiny probe. Audio attachments are persisted by Artifacts once, then the Voice plugin enriches them with a bounded STT transcript marked as untrusted user content. TTS is exposed through the typed Voice capability for future audio-capable transports or local voice surfaces; provider keys remain host-side in Vault.
+Voice is an optional plugin, not a second conversational runtime. `friday setup voice` now offers hosted providers or automatically provisioned local models. Local STT choices are Whisper `tiny/base/small` Q5_1 builds for `whisper.cpp` with RAM/accuracy guidance; local TTS choices are Chatterbox Nano (voice cloning + paralinguistic expression), KittenTTS Nano int8, and Piper with RAM/cloning/expression guidance. Selected local assets are installed under private FRIDAY tooling and runtime inference is forced offline. `friday setup privileges` can install only a narrowly allowlisted Debian/Ubuntu voice-dependency operation; it does not expose sudo or a root shell to the model. Audio attachments are persisted by Artifacts once, then Voice enriches them with a bounded STT transcript marked as untrusted user content. Hosted provider keys remain host-side in Vault.
 
 ## How it fits together
 
@@ -271,7 +273,7 @@ The key design rule is separation of authority: model-facing plugins do not auto
 - **Execution / Sandbox** - process supervision, Python kernel execution, and provider-enforced isolation.
 - **Vault** - authenticated encrypted secret persistence.
 - **Permissions** - effect-aware authorization for reads, writes, credentials, network, and system changes.
-- **Self Improvement** - reuse-first action/tool/capability feasibility with MCP as an external-integration placement, candidate worktrees only when code is needed, evaluation, generations, promotion, rollback, and verified restart handoff.
+- **Self Improvement** - reuse-first action/tool/capability feasibility with MCP-first Registry/configured-server discovery and exact live tool-schema verification for external integrations, candidate worktrees only when code is truly needed, evaluation, generations, promotion, rollback, and verified restart handoff.
 - **Conditional Hooks** - user-scoped reusable conditions/instructions with bounded invocation counts across turn/action/handover phases.
 - **Events / Audit / Observability** - operational delivery, tamper-evident audit data, logs, metrics, and model usage telemetry.
 

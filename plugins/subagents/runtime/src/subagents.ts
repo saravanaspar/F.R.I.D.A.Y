@@ -3,12 +3,17 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { reportOperationalError } from "@friday/operational-errors";
+import { readSubagentMemorySnapshot } from "./memory-budget.js";
 import { modelSelector, resolveSubagentModel } from "./model-selection.js";
 import type {
 	CreateSubagentRuntimeOptions,
 	SpawnSubagentOptions,
+	SpawnSubagentTask,
+	SpawnManySubagentsOptions,
+	WaitForSubagentsOptions,
 	SubagentManagerEvent,
 	SubagentManagerOptions,
+	SubagentResourceNotice,
 	SubagentRegistryEntry,
 	SubagentRuntime,
 	SubagentSpawnHandle,
@@ -53,27 +58,52 @@ function copyEntry(entry: SubagentRegistryEntry): SubagentRegistryEntry {
 interface ActiveRun {
 	entry: SubagentRegistryEntry;
 	controller: AbortController;
+	runtimeOptions: CreateSubagentRuntimeOptions;
 	runtime?: SubagentRuntime;
+	started: boolean;
 	settled: boolean;
 	detachExternalAbort?: () => void;
 }
 
+const DEFAULT_MAX_CONCURRENT_SUBAGENTS = 4;
+const MAX_CONCURRENT_SUBAGENTS = 32;
+const DEFAULT_MEMORY_RETRY_MS = 2_000;
+const MIN_MEMORY_RETRY_MS = 250;
+const MAX_MEMORY_RETRY_MS = 60_000;
+const DEFAULT_WAIT_TIMEOUT_MS = 30 * 60_000;
+const MAX_WAIT_TIMEOUT_MS = 24 * 60 * 60_000;
+
 export class SubagentManager {
-	private readonly options: Required<Pick<SubagentManagerOptions, "depth" | "maxDepth">> &
-		Omit<SubagentManagerOptions, "depth" | "maxDepth">;
+	private readonly options: SubagentManagerOptions & {
+		readonly depth: number;
+		readonly maxDepth: number;
+		readonly maxConcurrent: number;
+		readonly memoryRetryMs: number;
+		readonly memorySnapshot: NonNullable<SubagentManagerOptions["memorySnapshot"]>;
+	};
 	private readonly entries = new Map<string, SubagentRegistryEntry>();
 	private readonly active = new Map<string, ActiveRun>();
 	private readonly deleted = new Set<string>();
 	private readonly listeners = new Set<(event: SubagentManagerEvent) => void>();
 	private ephemeralParentDir?: string;
+	private memoryRetryTimer: NodeJS.Timeout | undefined;
+	private memoryConstrained = false;
 	private disposed = false;
 
 	private constructor(options: SubagentManagerOptions) {
 		const depth = options.depth ?? 0;
 		const maxDepth = options.maxDepth ?? 1;
+		const maxConcurrent = options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT_SUBAGENTS;
+		const memoryRetryMs = options.memoryRetryMs ?? DEFAULT_MEMORY_RETRY_MS;
 		if (!Number.isInteger(depth) || depth < 0) throw new Error("subagent depth must be a non-negative integer");
 		if (!Number.isInteger(maxDepth) || maxDepth < 0) throw new Error("subagent maxDepth must be a non-negative integer");
-		this.options = { ...options, depth, maxDepth };
+		if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1 || maxConcurrent > MAX_CONCURRENT_SUBAGENTS) {
+			throw new Error(`subagent maxConcurrent must be an integer from 1 to ${MAX_CONCURRENT_SUBAGENTS}`);
+		}
+		if (!Number.isInteger(memoryRetryMs) || memoryRetryMs < MIN_MEMORY_RETRY_MS || memoryRetryMs > MAX_MEMORY_RETRY_MS) {
+			throw new Error(`subagent memoryRetryMs must be an integer from ${MIN_MEMORY_RETRY_MS} to ${MAX_MEMORY_RETRY_MS}`);
+		}
+		this.options = { ...options, depth, maxDepth, maxConcurrent, memoryRetryMs, memorySnapshot: options.memorySnapshot ?? readSubagentMemorySnapshot };
 	}
 
 	static async create(options: SubagentManagerOptions): Promise<SubagentManager> {
@@ -100,6 +130,10 @@ export class SubagentManager {
 
 	get maxDepth(): number {
 		return this.options.maxDepth;
+	}
+
+	get maxConcurrent(): number {
+		return this.options.maxConcurrent;
 	}
 
 	subscribe(listener: (event: SubagentManagerEvent) => void): () => void {
@@ -145,18 +179,6 @@ export class SubagentManager {
 		await this.persist(entry);
 		this.emit(entry);
 
-		const run: ActiveRun = { entry, controller: new AbortController(), settled: false };
-		if (options.signal) {
-			const onAbort = () => {
-				if (run.settled || run.controller.signal.aborted) return;
-				run.entry.status = "cancelled";
-				run.entry.error = "Host request was cancelled";
-				run.controller.abort(run.entry.error);
-			};
-			options.signal.addEventListener("abort", onAbort, { once: true });
-			run.detachExternalAbort = () => options.signal?.removeEventListener("abort", onAbort);
-		}
-		this.active.set(childId, run);
 		const runtimeOptions: CreateSubagentRuntimeOptions = {
 			...(this.options.parentId ? { parentId: this.options.parentId } : {}),
 			id: childId,
@@ -168,11 +190,91 @@ export class SubagentManager {
 			maxDepth: this.options.maxDepth,
 			...(options.spawnCode === undefined ? {} : { spawnCode: options.spawnCode }),
 		};
-		void this.runDetached(run, runtimeOptions).catch((error: unknown) => {
-			reportOperationalError({ component: "subagents", operation: `execute child ${childId}`, error });
-		});
+		const run: ActiveRun = { entry, controller: new AbortController(), runtimeOptions, started: false, settled: false };
+		if (options.signal) {
+			const onAbort = () => {
+				if (run.settled || run.controller.signal.aborted) return;
+				this.cancel(childId, "Host request was cancelled");
+			};
+			options.signal.addEventListener("abort", onAbort, { once: true });
+			run.detachExternalAbort = () => options.signal?.removeEventListener("abort", onAbort);
+		}
+		this.active.set(childId, run);
+		this.schedule();
 
 		return { childId, name, sessionDir, model: entry.model };
+	}
+
+	async spawnMany(tasks: readonly SpawnSubagentTask[], options: SpawnManySubagentsOptions = {}): Promise<readonly SubagentSpawnHandle[]> {
+		if (!Array.isArray(tasks) || tasks.length === 0) throw new Error("subagent batch must contain at least one task");
+		if (tasks.length > 32) throw new Error("subagent batch may contain at most 32 tasks");
+		options.signal?.throwIfAborted();
+		for (const task of tasks) {
+			if (!task || typeof task !== "object" || typeof task.prompt !== "string" || !task.prompt.trim()) {
+				throw new Error("every subagent batch task must have a non-empty prompt");
+			}
+			const requestedName = normalizeRequestedSubagentName(task.name);
+			if (requestedName) this.assertNameAvailable(requestedName);
+			resolveSubagentModel(task.model, this.options.parentModel, this.options.models ?? [this.options.parentModel]);
+		}
+		const explicitNames = tasks
+			.map((task) => normalizeRequestedSubagentName(task.name))
+			.filter((name): name is string => name !== undefined);
+		if (new Set(explicitNames).size !== explicitNames.length) throw new Error("subagent batch contains duplicate names");
+		const handles: SubagentSpawnHandle[] = [];
+		try {
+			for (const task of tasks) {
+				handles.push(await this.spawn(task.prompt, {
+					...(task.name === undefined ? {} : { name: task.name }),
+					...(task.model === undefined ? {} : { model: task.model }),
+					...(options.spawnCode === undefined ? {} : { spawnCode: options.spawnCode }),
+					...(options.signal === undefined ? {} : { signal: options.signal }),
+				}));
+			}
+		} catch (error) {
+			for (const handle of handles) this.cancel(handle.childId, "Subagent batch admission failed");
+			throw error;
+		}
+		return Object.freeze(handles);
+	}
+
+	async wait(targets: readonly string[], options: WaitForSubagentsOptions = {}): Promise<readonly SubagentRegistryEntry[]> {
+		if (!Array.isArray(targets) || targets.length === 0 || targets.length > 32) {
+			throw new Error("subagent wait requires between 1 and 32 targets");
+		}
+		const timeoutMs = options.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
+		if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_WAIT_TIMEOUT_MS) {
+			throw new Error(`subagent wait timeoutMs must be an integer from 1 to ${MAX_WAIT_TIMEOUT_MS}`);
+		}
+		const resolved = targets.map((target) => {
+			if (typeof target !== "string" || !target.trim()) throw new Error("subagent wait targets must be non-empty strings");
+			const entry = this.resolveTarget(target, true);
+			if (!entry) throw new Error(`no direct subagent matches \"${target}\"`);
+			return entry.childId;
+		});
+		const done = () => resolved.every((id) => {
+			const status = this.entries.get(id)?.status;
+			return status === "completed" || status === "error" || status === "cancelled";
+		});
+		if (!done()) {
+			await new Promise<void>((resolveWait, rejectWait) => {
+				let settled = false;
+				const finish = (error?: unknown) => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(timer);
+					unsubscribe();
+					options.signal?.removeEventListener("abort", onAbort);
+					error === undefined ? resolveWait() : rejectWait(error);
+				};
+				const unsubscribe = this.subscribe(() => { if (done()) finish(); });
+				const timer = setTimeout(() => finish(new Error(`timed out waiting for subagents after ${timeoutMs}ms`)), timeoutMs);
+				const onAbort = () => finish(options.signal?.reason ?? new Error("subagent wait aborted"));
+				if (options.signal?.aborted) onAbort();
+				else options.signal?.addEventListener("abort", onAbort, { once: true });
+			});
+		}
+		return Object.freeze(resolved.map((id) => copyEntry(this.entries.get(id)!)));
 	}
 
 	cancel(target: string, reason = "Cancelled by parent"): boolean {
@@ -183,6 +285,11 @@ export class SubagentManager {
 		run.entry.status = "cancelled";
 		run.entry.error = reason;
 		run.controller.abort(reason);
+		if (!run.started) {
+			run.settled = true;
+			run.detachExternalAbort?.();
+			delete run.detachExternalAbort;
+		}
 		void Promise.resolve(run.runtime?.abort?.(reason)).catch((error: unknown) => {
 			reportOperationalError({ component: "subagents", operation: `abort child ${run.entry.childId}`, error });
 		});
@@ -192,6 +299,7 @@ export class SubagentManager {
 			});
 			this.emit(run.entry);
 		}
+		this.schedule();
 		return true;
 	}
 
@@ -211,14 +319,28 @@ export class SubagentManager {
 	async dispose(): Promise<void> {
 		if (this.disposed) return;
 		this.disposed = true;
+		if (this.memoryRetryTimer) {
+			clearTimeout(this.memoryRetryTimer);
+			this.memoryRetryTimer = undefined;
+		}
+		const queuedPersistence: Promise<void>[] = [];
 		for (const run of this.active.values()) {
 			if (!run.settled) {
 				run.entry.status = "cancelled";
 				run.entry.error = "Parent manager disposed";
 				run.controller.abort(run.entry.error);
-				void run.runtime?.abort?.(run.entry.error);
+				void Promise.resolve(run.runtime?.abort?.(run.entry.error)).catch((error: unknown) => {
+					reportOperationalError({ component: "subagents", operation: `abort child ${run.entry.childId} during dispose`, error });
+				});
+				if (!run.started) {
+					run.settled = true;
+					run.detachExternalAbort?.();
+					delete run.detachExternalAbort;
+					queuedPersistence.push(this.persist(run.entry).then(() => this.emit(run.entry)));
+				}
 			}
 		}
+		await Promise.allSettled(queuedPersistence);
 		await Promise.allSettled(
 			[...this.active.values()].map(async (run) => {
 				await run.runtime?.dispose?.();
@@ -264,6 +386,99 @@ export class SubagentManager {
 	private ensureEphemeralParentDir(): string {
 		this.ephemeralParentDir ??= mkdtempSync(join(tmpdir(), "friday-subagents-"));
 		return this.ephemeralParentDir;
+	}
+
+	private runningCount(): number {
+		return [...this.active.values()].filter((run) => run.started && !run.settled).length;
+	}
+
+	private queuedCount(): number {
+		return [...this.active.values()].filter((run) => !run.started && !run.settled && run.entry.status === "queued" && !run.controller.signal.aborted).length;
+	}
+
+	private emitResourceNotice(notice: SubagentResourceNotice): void {
+		const listener = this.options.onResourceNotice;
+		if (!listener) return;
+		void Promise.resolve(listener(notice)).catch((error: unknown) => {
+			reportOperationalError({ component: "subagents", operation: `deliver ${notice.state} RAM scheduling notice`, error });
+		});
+	}
+
+	private armMemoryRetry(): void {
+		if (this.disposed || this.memoryRetryTimer) return;
+		this.memoryRetryTimer = setTimeout(() => {
+			this.memoryRetryTimer = undefined;
+			this.schedule();
+		}, this.options.memoryRetryMs);
+		this.memoryRetryTimer.unref?.();
+	}
+
+	private clearMemoryRetry(): void {
+		if (!this.memoryRetryTimer) return;
+		clearTimeout(this.memoryRetryTimer);
+		this.memoryRetryTimer = undefined;
+	}
+
+	private schedule(): void {
+		if (this.disposed) return;
+		const running = this.runningCount();
+		const queued = this.queuedCount();
+		const configuredAvailable = this.options.maxConcurrent - running;
+		if (queued <= 0 || configuredAvailable <= 0) {
+			this.clearMemoryRetry();
+			return;
+		}
+
+		let snapshot;
+		try {
+			snapshot = this.options.memorySnapshot();
+		} catch (error) {
+			reportOperationalError({ component: "subagents", operation: "read RAM budget before child admission", error });
+			this.armMemoryRetry();
+			return;
+		}
+		const desiredStarts = Math.min(configuredAvailable, queued);
+		// Treat already-running children as committed reservations as well. This is
+		// intentionally conservative: it avoids a burst of newly-started children
+		// outrunning the OS memory accounting before their RSS becomes visible.
+		const memoryAllowedAdditional = Math.max(0, snapshot.safeAdditionalAgents - running);
+		let available = Math.min(desiredStarts, memoryAllowedAdditional);
+		const constrained = available < desiredStarts;
+
+		if (constrained && !this.memoryConstrained) {
+			this.memoryConstrained = true;
+			this.emitResourceNotice(Object.freeze({
+				state: "constrained",
+				running: running + available,
+				queued: Math.max(0, queued - available),
+				configuredMaxConcurrent: this.options.maxConcurrent,
+				memoryAllowedAdditional: available,
+				snapshot,
+			}));
+		} else if (!constrained && this.memoryConstrained) {
+			this.memoryConstrained = false;
+			this.emitResourceNotice(Object.freeze({
+				state: "resumed",
+				running: running + available,
+				queued: Math.max(0, queued - available),
+				configuredMaxConcurrent: this.options.maxConcurrent,
+				memoryAllowedAdditional: available,
+				snapshot,
+			}));
+		}
+
+		for (const run of this.active.values()) {
+			if (available <= 0) break;
+			if (run.started || run.settled || run.entry.status !== "queued" || run.controller.signal.aborted) continue;
+			run.started = true;
+			available -= 1;
+			void this.runDetached(run, run.runtimeOptions).catch((error: unknown) => {
+				reportOperationalError({ component: "subagents", operation: `execute child ${run.entry.childId}`, error });
+			});
+		}
+
+		if (constrained && this.queuedCount() > 0 && this.runningCount() < this.options.maxConcurrent) this.armMemoryRetry();
+		else this.clearMemoryRetry();
 	}
 
 	private async runDetached(run: ActiveRun, options: CreateSubagentRuntimeOptions): Promise<void> {
@@ -313,6 +528,7 @@ export class SubagentManager {
 					run.entry.status === "completed" ? "completed" : run.entry.status === "cancelled" ? "cancelled" : "error",
 				);
 			}
+			this.schedule();
 		}
 	}
 

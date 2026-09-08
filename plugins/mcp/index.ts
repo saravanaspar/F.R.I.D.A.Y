@@ -25,9 +25,11 @@ import { VAULT_CAPABILITY } from "../vault/contract.js";
 import { VAULT_TRUSTED_CAPABILITY } from "../vault/trusted-contract.js";
 import {
   MCP_CAPABILITY,
+  type McpDiscoveryCandidate,
   type McpJsonValue,
   type McpService,
 } from "./contract.js";
+import { searchMcpRegistry } from "./discovery.js";
 import {
   MCP_TRUSTED_CAPABILITY,
   type McpOAuthLoginCallbacks,
@@ -257,6 +259,19 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
           ? observability.withSpan({ name: "mcp.list-tools", component: "mcp", attributes: { server } }, operation)
           : operation();
       },
+      async searchRegistry(query, signal): Promise<readonly McpDiscoveryCandidate[]> {
+        await permissions.authorize({
+          mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+          workspace: process.cwd(),
+          access: "read",
+          action: { id: "mcp.registry.search", effect: "external-read", resource: "registry.modelcontextprotocol.io", network: true },
+          reason: `search the official MCP Registry for capability candidates matching ${query.slice(0, 160)}`,
+        });
+        const operation = () => searchMcpRegistry(query, options.fetch ?? globalThis.fetch, signal);
+        return observability
+          ? observability.withSpan({ name: "mcp.registry.search", component: "mcp", attributes: { query: query.slice(0, 160) } }, operation)
+          : operation();
+      },
       callTool: (input) => {
         const operation = () => manager.callTool(
           input.server,
@@ -290,6 +305,38 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
             builtIn: server.builtIn,
             credentialConfigured: server.credentialConfigured,
             connected: server.connected,
+          })),
+        };
+      },
+    });
+    bootstrap.contribute(AGENT_TOOL_CONTRIBUTION, {
+      id: "mcp-search-registry",
+      name: "mcp_search_registry",
+      label: "Search MCP Registry",
+      description: "Search the official MCP Registry for exact capability candidates before building a new integration. Registry metadata is discovery evidence only; inspect live tools before assuming a candidate supports an operation.",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string", description: "Short capability or operation search phrase" } },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      async execute(input, signal) {
+        const query = agentString(input, "query");
+        const candidates = await service.searchRegistry(query, signal);
+        return {
+          output: candidates.map((candidate) => ({
+            name: candidate.name,
+            version: candidate.version,
+            ...(candidate.title === undefined ? {} : { title: candidate.title }),
+            ...(candidate.description === undefined ? {} : { description: candidate.description }),
+            ...(candidate.repositoryUrl === undefined ? {} : { repositoryUrl: candidate.repositoryUrl }),
+            remotes: candidate.remotes.map((remote) => ({ type: remote.type, url: remote.url })),
+            packages: candidate.packages.map((entry) => ({
+              registryType: entry.registryType,
+              identifier: entry.identifier,
+              ...(entry.version === undefined ? {} : { version: entry.version }),
+              ...(entry.transportType === undefined ? {} : { transportType: entry.transportType }),
+            })),
           })),
         };
       },

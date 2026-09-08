@@ -54,6 +54,7 @@ declare module "@friday/agent" {
 
 const DEFAULT_CACHE_SIZE = 24;
 const DEFAULT_MAX_SUBAGENT_DEPTH = 2;
+const DEFAULT_MAX_CONCURRENT_SUBAGENTS = 4;
 const MAX_CONTRIBUTED_TOOL_OUTPUT_CHARS = 64_000;
 const MAX_PERSISTED_INPUT_CONTEXT_CHARS = 24_000;
 const MAX_PERSISTED_INPUT_CONTEXTS = 12;
@@ -121,6 +122,7 @@ export interface AgentTurnExecutorOptions {
   readonly defaultCwd?: string | undefined;
   readonly maxCachedSessions?: number | undefined;
   readonly maxSubagentDepth?: number | undefined;
+  readonly maxConcurrentSubagents?: number | undefined;
 }
 
 function stateRoot(input?: string): string {
@@ -426,6 +428,11 @@ export function createAgentTurnExecutor(
   const defaultCwd = resolve(options.defaultCwd ?? process.cwd());
   const maxCachedSessions = positiveInteger(options.maxCachedSessions, DEFAULT_CACHE_SIZE, "maxCachedSessions");
   const maxSubagentDepth = positiveInteger(options.maxSubagentDepth, DEFAULT_MAX_SUBAGENT_DEPTH, "maxSubagentDepth");
+  const maxConcurrentSubagents = positiveInteger(
+    options.maxConcurrentSubagents ?? (process.env.FRIDAY_SUBAGENT_MAX_CONCURRENT ? Number(process.env.FRIDAY_SUBAGENT_MAX_CONCURRENT) : undefined),
+    DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+    "maxConcurrentSubagents",
+  );
   const cache = new Map<string, CachedRuntime>();
   let disposed = false;
 
@@ -574,10 +581,26 @@ export function createAgentTurnExecutor(
           parentId: session.getSessionId(),
           depth: runtimeOptions.depth ?? 0,
           maxDepth: maxSubagentDepth,
+          maxConcurrent: maxConcurrentSubagents,
           parentModel: { provider: String(model.provider), id: String(model.id), name: String(model.name || model.id) },
           models,
           runtimeHost,
           registryStore: optionalSubagents.createSessionSubagentRegistryStore(session),
+          onResourceNotice: async (notice) => {
+            const progress = activeTurnContext?.progress;
+            if (!progress) return;
+            const mib = (bytes: number) => `${Math.max(0, Math.round(bytes / (1024 * 1024)))} MiB`;
+            const message = notice.state === "constrained"
+              ? `RAM-aware subagent scheduling is limiting concurrency to avoid memory pressure: ${notice.running} running, ${notice.queued} queued, ${mib(notice.snapshot.availableBytes)} available, ${mib(notice.snapshot.safetyReserveBytes)} host reserve, ${mib(notice.snapshot.perAgentReserveBytes)} reserved per new agent. Operator ceiling: ${notice.configuredMaxConcurrent}.`
+              : `RAM pressure eased; queued subagents can resume: ${notice.running} running, ${notice.queued} queued, ${mib(notice.snapshot.availableBytes)} available. Operator ceiling: ${notice.configuredMaxConcurrent}.`;
+            await progress({
+              kind: "status",
+              message,
+              timestamp: Date.now(),
+              sessionId,
+              notify: true,
+            });
+          },
         };
         const parentArtifactDir = session.getSessionArtifactDir();
         if (parentArtifactDir !== undefined) managerOptions.parentArtifactDir = parentArtifactDir;

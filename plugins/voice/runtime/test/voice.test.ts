@@ -5,6 +5,7 @@ import {
   normalizeVoiceSettings,
   type VoiceSettings,
 } from "../src/index.js";
+import { renderChatterboxExpression } from "../src/local.js";
 
 function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
@@ -19,9 +20,20 @@ const openaiSettings: VoiceSettings = Object.freeze({
 describe("voice runtime", () => {
   it("normalizes bounded provider settings and rejects unknown fields", () => {
     expect(normalizeVoiceSettings(openaiSettings)).toEqual(openaiSettings);
+    expect(normalizeVoiceSettings({
+      schema: 1,
+      stt: { provider: "local", model: "base-q5_1" },
+      tts: { provider: "local", model: "piper", voice: "en_US-lessac-medium", format: "wav" },
+    })).toEqual({
+      schema: 1,
+      stt: { provider: "local", model: "base-q5_1" },
+      tts: { provider: "local", model: "piper", voice: "en_US-lessac-medium", format: "wav" },
+    });
     expect(() => normalizeVoiceSettings({ ...openaiSettings, extra: true })).toThrow(/unsupported voice settings field/);
     expect(() => normalizeVoiceSettings({ schema: 1, stt: { provider: "other", model: "x" } })).toThrow(/STT provider/);
     expect(() => normalizeVoiceSettings({ schema: 1, tts: { provider: "openai", model: "x", voice: "alloy", format: "wav" } })).toThrow(/format/);
+    expect(() => normalizeVoiceSettings({ schema: 1, tts: { provider: "local", model: "piper", voice: "lessac", format: "mp3" } })).toThrow(/format/);
+    expect(() => normalizeVoiceSettings({ schema: 1, tts: { provider: "openai", model: "gpt-4o-mini-tts", voice: "alloy", format: "mp3", referenceAudio: "/tmp/ref.wav" } })).toThrow(/referenceAudio/);
   });
 
   it("transcribes OpenAI audio with multipart form data and the configured credential", async () => {
@@ -105,6 +117,23 @@ describe("voice runtime", () => {
     expect(chunks).toHaveLength(1);
     expect(chunks[0]).toMatchObject({ provider: "elevenlabs", model: "eleven_multilingual_v2", voice: "voice-123", mimeType: "audio/mpeg" });
     expect([...chunks[0]!.bytes]).toEqual([9, 8, 7]);
+  });
+
+  it("maps provider-neutral expression intents to Chatterbox cues without separate voice identities", () => {
+    expect(renderChatterboxExpression("Fine, I will do it.", { style: "tsundere", events: ["laugh", "tsk"] })).toBe(
+      "Tsk. [sigh] [laugh] Fine, I will do it.",
+    );
+    expect(renderChatterboxExpression("Hello", { style: "neutral" })).toBe("Hello");
+  });
+
+  it("fails closed when expression is requested on a backend that does not support it", async () => {
+    const runtime = createVoiceRuntime({
+      settings: openaiSettings,
+      credential: async () => "secret-openai",
+      fetch: vi.fn() as unknown as typeof fetch,
+    });
+    await expect(runtime.synthesize("hello", { expression: { style: "angry", events: ["tsk"] } })).rejects.toThrow(/does not support FRIDAY expression intents/);
+    await expect(runtime.synthesize("hello", { expression: { style: "invalid" } as never })).rejects.toThrow(/expression style is unsupported/);
   });
 
   it("bounds provider response bodies and rejects non-audio synthesis responses", async () => {

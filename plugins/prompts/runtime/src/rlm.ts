@@ -105,6 +105,9 @@ export function buildRlmPromptPlan(options: RlmPromptOptions): RlmPromptPlan {
       "A callable `rlm` is already in your global namespace. `await rlm('sub-task')` spawns a child and returns immediately after task admission with `rlm_child_id`, `name`, `session_dir`, and `model`; it never waits for or returns the child's answer.",
       "Choose a stable child name with `await rlm('sub-task', name='api-reviewer')`; names must be unique among siblings. If omitted, the host generates a readable unique name.",
       "A child inherits your model. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector.",
+      "For 2–32 independent tasks, prefer `await rlm.gather([...])`: FRIDAY admits them as a bounded concurrent batch and waits for all terminal states. Use `await rlm.spawn_many([...])` plus `await rlm.wait_subagents(handles)` when you need explicit fan-out/fan-in control.",
+      "Honor an explicit user request for multiple independent agents when it is safe and meaningful. Otherwise choose the team size from the prompt and decomposition: use parallel children for genuinely independent work, and keep trivial or serial work in the current agent.",
+      "The host applies an operator concurrency ceiling and live RAM-aware admission. Queued children are intentional under memory pressure; never bypass that resource gate or replace it with unsafe host execution.",
     );
     if (hasAgentMessage) {
       stableParts.push(
@@ -119,7 +122,7 @@ export function buildRlmPromptPlan(options: RlmPromptOptions): RlmPromptPlan {
       stableParts.push("Inspect files a child wrote when you need to collect its work without an observation capability.");
     }
     stableParts.push(
-      "Spawn independent children in separate calls and end your turn instead of awaiting completion. Delete a direct child explicitly with `await rlm.delete_subagent(child)` when it is no longer needed.",
+      "Use a single `await rlm(...)` for one detached child; use `rlm.gather` for true bounded concurrent fan-out/fan-in. Delete a direct child explicitly with `await rlm.delete_subagent(child)` when it is no longer needed.",
     );
   }
 
@@ -148,7 +151,7 @@ export function buildSubagentGuidance(
   const lines = [
     "# Delegating to sub-agents",
     "",
-    "Spawn independent, self-contained work with `handle = await rlm('task', name='worker')`. This returns at admission, not completion; keep the handle to stop or inspect the child later.",
+    "Spawn one independent, self-contained worker with `handle = await rlm('task', name='worker')`. For parallel work use `children = await rlm.gather([...])`; FRIDAY runs the batch concurrently within the parent concurrency budget and returns terminal child records.",
   ];
   if (options.hasAgentMessage) {
     lines.push(

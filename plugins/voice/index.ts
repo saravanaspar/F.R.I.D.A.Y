@@ -1,10 +1,12 @@
 import { performance } from "node:perf_hooks";
-import { createVoiceRuntime, type VoiceCredentialProvider, type VoiceRuntime, type VoiceTranscriptionInput } from "@friday/voice";
+import { join } from "node:path";
+import { createVoiceRuntime, type VoiceCredentialProvider, type VoiceRuntime, type VoiceSttProvider, type VoiceTranscriptionInput, type VoiceTtsProvider } from "@friday/voice";
 import type { FridayPlugin } from "../../src/plugin.js";
 import { MODEL_CREDENTIALS_CAPABILITY } from "../auth/contract.js";
 import { ARTIFACT_INPUT_ENRICHMENT_CONTRIBUTION, type ArtifactRecord } from "../artifacts/contract.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { OBSERVABILITY_CAPABILITY } from "../observability/contract.js";
+import { getFridayHome } from "../runtime-settings/runtime-env.js";
 import { SYSTEM_STATUS_CONTRIBUTION } from "../system/contract.js";
 import { VAULT_CAPABILITY } from "../vault/contract.js";
 import { VAULT_TRUSTED_CAPABILITY } from "../vault/trusted-contract.js";
@@ -37,13 +39,15 @@ const voicePlugin: FridayPlugin = definePlugin({
     return voiceCredentialVaultRef(provider);
   };
 
-  const credentialConfigured = (provider: "openai" | "deepgram" | "elevenlabs"): boolean => {
+  const credentialConfigured = (provider: VoiceSttProvider | VoiceTtsProvider): boolean => {
+    if (provider === "local") return true;
     if (provider === "openai") return modelCredentials.has("openai");
     return vault.exists(voiceCredentialVaultRef(provider));
   };
 
   const runtime: VoiceRuntime = createVoiceRuntime({
     settings,
+    localRoot: join(getFridayHome(process.env), "tooling", "voice"),
     async credential(provider) {
       if (provider === "openai") return modelCredentials.getApiKey("openai");
       const ref = credentialRef(provider);
