@@ -1,6 +1,6 @@
 {
   "name": "@friday/prompts",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "FRIDAY system prompt composition",
   "type": "module",
   "main": "./dist/index.js",
