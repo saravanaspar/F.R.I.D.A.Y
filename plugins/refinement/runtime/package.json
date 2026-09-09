@@ -1,6 +1,6 @@
 {
   "name": "@friday/refinement",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "FRIDAY continual refinement planning and application",
   "type": "module",
   "main": "./dist/index.js",

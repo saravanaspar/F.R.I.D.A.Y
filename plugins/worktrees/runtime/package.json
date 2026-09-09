@@ -1,6 +1,6 @@
 {
   "name": "@friday/worktrees",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "FRIDAY isolated git worktree lifecycle and inspection",
   "type": "module",
   "main": "./dist/index.js",
