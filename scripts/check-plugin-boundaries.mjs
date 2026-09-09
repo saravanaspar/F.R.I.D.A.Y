@@ -174,6 +174,128 @@ function semanticSurfaceReachability(source, publicTypes, surfaces) {
 const violations = [];
 const contractCatalog = [];
 const definedSurfaceOwners = new Map();
+const contributionSurfacesByConstant = new Map();
+const configuredOrdinaryPlugins = [];
+
+function skipWhitespace(source, start) {
+  let index = start;
+  while (index < source.length && /\s/u.test(source[index])) index += 1;
+  return index;
+}
+
+function quotedLiteral(source, start) {
+  const quote = source[start];
+  if (quote !== '"' && quote !== "'") return undefined;
+  let value = "";
+  for (let index = start + 1; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "\\") {
+      const next = source[index + 1];
+      if (next === undefined) return undefined;
+      value += next;
+      index += 1;
+      continue;
+    }
+    if (char === quote) return { value, end: index + 1 };
+    value += char;
+  }
+  return undefined;
+}
+
+function literalObjectIdentity(source, start, field) {
+  let index = skipWhitespace(source, start);
+  if (source[index] !== "{") return undefined;
+  let depth = 0;
+  for (; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === '"' || char === "'" || char === "`") {
+      const quote = char;
+      index += 1;
+      while (index < source.length) {
+        const current = source[index];
+        if (current === "\\") index += 2;
+        else if (current === quote) break;
+        else index += 1;
+      }
+      continue;
+    }
+    if (char === "/" && source[index + 1] === "/") {
+      const newline = source.indexOf("\n", index + 2);
+      if (newline < 0) return undefined;
+      index = newline;
+      continue;
+    }
+    if (char === "/" && source[index + 1] === "*") {
+      const end = source.indexOf("*/", index + 2);
+      if (end < 0) return undefined;
+      index = end + 1;
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return undefined;
+      continue;
+    }
+    if (depth !== 1 || !/[A-Za-z_$]/u.test(char)) continue;
+    let end = index + 1;
+    while (end < source.length && /[A-Za-z0-9_$]/u.test(source[end])) end += 1;
+    if (source.slice(index, end) !== field) {
+      index = end - 1;
+      continue;
+    }
+    let valueStart = skipWhitespace(source, end);
+    if (source[valueStart] !== ":") {
+      index = end - 1;
+      continue;
+    }
+    valueStart = skipWhitespace(source, valueStart + 1);
+    return quotedLiteral(source, valueStart)?.value;
+  }
+  return undefined;
+}
+
+function contributionRegistrations(source, path) {
+  const registrations = [];
+  const expression = /\.[ \t]*contribute\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*,/g;
+  for (const match of source.matchAll(expression)) {
+    const constant = match[1];
+    const surface = contributionSurfacesByConstant.get(constant);
+    if (!surface) continue;
+    const argumentStart = (match.index ?? 0) + match[0].length;
+    const id = surface.identityField === undefined ? undefined : literalObjectIdentity(source, argumentStart, surface.identityField);
+    const line = source.slice(0, match.index ?? 0).split("\n").length;
+    registrations.push({ surface: surface.id, type: surface.type, id, source: `${relative(root, path).split(sep).join("/")}:${line}` });
+  }
+  return registrations;
+}
+
+function groupedContributionInstances(registrations) {
+  const groups = new Map();
+  for (const registration of registrations) {
+    const key = `${registration.surface}\u0000${registration.type}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { surface: registration.surface, type: registration.type, ids: new Set(), dynamic: 0, registrations: [] };
+      groups.set(key, group);
+    }
+    if (registration.id === undefined) group.dynamic += 1;
+    else group.ids.add(registration.id);
+    group.registrations.push(registration);
+  }
+  return [...groups.values()]
+    .map((group) => ({
+      surface: group.surface,
+      type: group.type,
+      ids: [...group.ids].sort((left, right) => left.localeCompare(right)),
+      dynamic: group.dynamic,
+      registrations: group.registrations,
+    }))
+    .sort((left, right) => left.surface.localeCompare(right.surface) || left.type.localeCompare(right.type));
+}
 
 try {
   const config = JSON.parse(await readFile(configPath, "utf8"));
@@ -198,6 +320,7 @@ try {
       }
       seen.add(pluginName);
       if (contractlessKernelPlugins.has(pluginName)) continue;
+      configuredOrdinaryPlugins.push(pluginName);
       const entrypointPath = join(pluginsRoot, pluginName, "index.ts");
       let entrypointSource = "";
       try {
@@ -249,6 +372,16 @@ try {
             violations.push(`${relative(root, contractPath)} capability ${id} must bind to an exported interface; ${publicType} is not an exported interface`);
           }
         }
+        if (factory === "Contribution") {
+          const interfaceText = exportedInterfaces.get(publicType) ?? "";
+          const identityField = ["id", "type", "name"].find((field) => new RegExp(`\\breadonly\\s+${field}\\??\\s*:\\s*string\\b`, "u").test(interfaceText));
+          const previous = contributionSurfacesByConstant.get(constant);
+          if (previous && (previous.id !== id || previous.type !== publicType)) {
+            violations.push(`${relative(root, contractPath)} contribution constant ${constant} conflicts with ${previous.id}/${previous.type}`);
+          } else {
+            contributionSurfacesByConstant.set(constant, { id, type: publicType, identityField });
+          }
+        }
       }
 
       const { reachable: reachablePublicTypes } = semanticSurfaceReachability(contract, exportedPublicTypes, pluginSurfaces);
@@ -271,11 +404,40 @@ try {
         surfaces: pluginSurfaces.map(({ kind, id, type }) => ({ kind, id, type })),
         publicTypes: [...exportedPublicTypes].sort((left, right) => left.localeCompare(right)),
         reachablePublicTypes: [...reachablePublicTypes].sort((left, right) => left.localeCompare(right)),
+        contributionInstances: [],
       });
     }
   }
 } catch (error) {
   violations.push(`friday.config.json could not be validated for plugin discovery: ${error instanceof Error ? error.message : String(error)}`);
+}
+
+const staticContributionOwners = new Map();
+for (const pluginName of configuredOrdinaryPlugins) {
+  const pluginPath = join(pluginsRoot, pluginName);
+  const registrations = [];
+  for (const path of await walk(pluginPath)) {
+    const source = await readFile(path, "utf8");
+    for (const match of source.matchAll(/\.[ \t]*contribute\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*,/g)) {
+      const constant = match[1];
+      if (!contributionSurfacesByConstant.has(constant)) {
+        violations.push(`${relative(root, path)} registers non-discoverable contribution constant ${constant}; contribution extension points must come from an ordinary contract.ts`);
+      }
+    }
+    registrations.push(...contributionRegistrations(source, path));
+  }
+  for (const registration of registrations) {
+    if (registration.id === undefined) continue;
+    const key = `${registration.surface}\u0000${registration.id}`;
+    const previous = staticContributionOwners.get(key);
+    if (previous) {
+      violations.push(`duplicate static ${registration.surface} contribution id ${registration.id}: ${previous} and ${registration.source}`);
+    } else {
+      staticContributionOwners.set(key, registration.source);
+    }
+  }
+  const catalogEntry = contractCatalog.find((entry) => entry.plugin === pluginName);
+  if (catalogEntry) catalogEntry.contributionInstances = groupedContributionInstances(registrations);
 }
 
 for (const file of retiredHostDomainShims) {
@@ -372,6 +534,10 @@ if (violations.length > 0) {
 } else {
   const sortedCatalog = [...contractCatalog].sort((left, right) => left.plugin.localeCompare(right.plugin));
   const rows = sortedCatalog.flatMap((entry) => entry.surfaces.map((surface) => ({ plugin: entry.plugin, ...surface })));
+  const contributionRows = sortedCatalog.flatMap((entry) => entry.contributionInstances.flatMap((group) =>
+    group.registrations.map((registration) => ({ plugin: entry.plugin, ...registration }))));
+  const staticContributionRows = contributionRows.filter((row) => row.id !== undefined);
+  const dynamicContributionRows = contributionRows.filter((row) => row.id === undefined);
   const publicTypeCount = sortedCatalog.reduce((sum, entry) => sum + entry.publicTypes.length, 0);
   const reachablePublicTypeCount = sortedCatalog.reduce((sum, entry) => sum + entry.reachablePublicTypes.length, 0);
   if (process.argv.includes("--catalog-json")) {
@@ -380,6 +546,8 @@ if (violations.length > 0) {
       typedPublicSurfaces: rows.length,
       exportedPublicTypes: publicTypeCount,
       surfaceReachablePublicTypes: reachablePublicTypeCount,
+      staticContributionInstances: staticContributionRows.length,
+      dynamicContributionRegistrations: dynamicContributionRows.length,
       plugins: sortedCatalog,
     }, null, 2));
   } else if (process.argv.includes("--catalog")) {
@@ -392,8 +560,19 @@ if (violations.length > 0) {
     for (const row of rows) {
       console.log(`${row.plugin.padEnd(widths.plugin)}  ${row.kind.padEnd(widths.kind)}  ${row.id.padEnd(widths.id)}  ${row.type}`);
     }
-    console.log(`\nConfigured ordinary plugins: ${sortedCatalog.length}; typed public surfaces: ${rows.length}; exported public types: ${publicTypeCount}; surface-reachable public types: ${reachablePublicTypeCount}`);
-    console.log("All ordinary surface ids/type bindings are derived automatically from contract.ts; trusted-contract.ts surfaces are intentionally excluded from model/self-improvement discovery.");
+    if (contributionRows.length > 0) {
+      const contributionWidths = {
+        plugin: Math.max("CONTRIBUTOR".length, ...contributionRows.map((row) => row.plugin.length)),
+        surface: Math.max("SURFACE".length, ...contributionRows.map((row) => row.surface.length)),
+        instance: Math.max("INSTANCE".length, ...contributionRows.map((row) => (row.id ?? "<dynamic>").length)),
+      };
+      console.log(`\n${"CONTRIBUTOR".padEnd(contributionWidths.plugin)}  ${"SURFACE".padEnd(contributionWidths.surface)}  ${"INSTANCE".padEnd(contributionWidths.instance)}  SOURCE`);
+      for (const row of contributionRows.sort((left, right) => left.plugin.localeCompare(right.plugin) || left.surface.localeCompare(right.surface) || (left.id ?? "").localeCompare(right.id ?? ""))) {
+        console.log(`${row.plugin.padEnd(contributionWidths.plugin)}  ${row.surface.padEnd(contributionWidths.surface)}  ${(row.id ?? "<dynamic>").padEnd(contributionWidths.instance)}  ${row.source}`);
+      }
+    }
+    console.log(`\nConfigured ordinary plugins: ${sortedCatalog.length}; typed public surfaces: ${rows.length}; exported public types: ${publicTypeCount}; surface-reachable public types: ${reachablePublicTypeCount}; static contribution instances: ${staticContributionRows.length}; dynamic contribution registrations: ${dynamicContributionRows.length}`);
+    console.log("Ordinary surface ids/type bindings come from contract.ts, while contribution ownership/instances are derived from actual .contribute(...) registrations; trusted-contract.ts surfaces are intentionally excluded from model/self-improvement discovery.");
   } else {
     console.log("Plugin boundary check: PASS");
   }

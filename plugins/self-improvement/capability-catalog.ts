@@ -1,4 +1,4 @@
-import { readFile, realpath } from "node:fs/promises";
+import { readdir, readFile, realpath } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 
 const MAX_CONFIGURED_PLUGINS = 128;
@@ -6,14 +6,26 @@ const MAX_DETAILED_CONTRACTS = 12;
 const MAX_DECLARATION_CHARS = 3_000;
 const MAX_PUBLIC_API_CHARS = 6_000;
 const MAX_PUBLIC_TYPES = 48;
-const MAX_CATALOG_CHARS = 32_000;
+const MAX_CATALOG_CHARS = 64_000;
 const MAX_ISSUES = 32;
+const MAX_PLUGIN_SOURCE_FILES = 256;
+const MAX_PLUGIN_SOURCE_CHARS = 2_000_000;
 const CONTRACTLESS_KERNEL_PLUGINS = new Set(["capabilities"]);
 
 export interface ContractSurfaceBinding {
   readonly kind: "capability" | "contribution" | "hook";
   readonly id: string;
   readonly type: string;
+}
+
+export interface ContributionInstanceSummary {
+  /** Extension-point id, for example `agent.tool` or `system.action`. */
+  readonly surface: string;
+  readonly type: string;
+  /** Statically declared instance identities attributed to this plugin. */
+  readonly ids: readonly string[];
+  /** Registrations whose identity is intentionally computed at runtime/factory time. */
+  readonly dynamic: number;
 }
 
 export interface CapabilityContractSummary {
@@ -26,6 +38,8 @@ export interface CapabilityContractSummary {
   readonly publicTypes: readonly string[];
   /** Exact public type bound to each callable/extension identifier. */
   readonly surfaces: readonly ContractSurfaceBinding[];
+  /** Concrete contribution registrations auto-derived from this plugin's source. */
+  readonly contributionInstances: readonly ContributionInstanceSummary[];
   readonly publicApi?: string | undefined;
 }
 
@@ -45,6 +59,17 @@ interface ConfiguredPluginList {
 interface PublicInterfaceBlock {
   readonly name: string;
   readonly text: string;
+}
+
+interface ContractSurfaceDefinition extends ContractSurfaceBinding {
+  readonly constant: string;
+  readonly identityField?: "id" | "type" | "name" | undefined;
+}
+
+interface ContributionRegistration {
+  readonly surface: string;
+  readonly type: string;
+  readonly id?: string | undefined;
 }
 
 function objectiveTerms(objective: string): ReadonlySet<string> {
@@ -90,19 +115,25 @@ function configuredPluginNames(configSource: string): ConfiguredPluginList {
   return Object.freeze({ names: Object.freeze(names), issues: Object.freeze(issues.slice(0, MAX_ISSUES)) });
 }
 
-function surfaceBindings(source: string): readonly ContractSurfaceBinding[] {
-  const bindings: ContractSurfaceBinding[] = [];
+function surfaceDefinitions(source: string): readonly ContractSurfaceDefinition[] {
+  const interfaces = new Map(interfaceBlocks(source).map((block) => [block.name, block.text] as const));
+  const bindings: ContractSurfaceDefinition[] = [];
   const seen = new Set<string>();
-  const expression = /export\s+const\s+[A-Za-z_$][A-Za-z0-9_$]*\s*(?::[^=]{0,240})?=\s*define(Capability|Contribution|Hook)\s*<\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*>\s*\(\s*["']([A-Za-z0-9._:-]+)["']/g;
+  const expression = /export\s+const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=]{0,240})?=\s*define(Capability|Contribution|Hook)\s*<\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*>\s*\(\s*["']([A-Za-z0-9._:-]+)["']/g;
   for (const match of source.matchAll(expression)) {
-    const factory = match[1]!;
-    const type = match[2]!.trim();
-    const id = match[3]!;
+    const constant = match[1]!;
+    const factory = match[2]!;
+    const type = match[3]!.trim();
+    const id = match[4]!;
     const kind = factory === "Capability" ? "capability" : factory === "Contribution" ? "contribution" : "hook";
     const key = `${kind}:${id}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    bindings.push(Object.freeze({ kind, id, type }));
+    const interfaceText = interfaces.get(type) ?? "";
+    const identityField = kind === "contribution"
+      ? (["id", "type", "name"] as const).find((field) => new RegExp(`\\breadonly\\s+${field}\\??\\s*:\\s*string\\b`, "u").test(interfaceText))
+      : undefined;
+    bindings.push(Object.freeze({ kind, id, type, constant, ...(identityField === undefined ? {} : { identityField }) }));
   }
   return Object.freeze(bindings);
 }
@@ -113,6 +144,156 @@ function rawSurfaceDefinitionCount(source: string): number {
 
 function definitionIds(bindings: readonly ContractSurfaceBinding[]): readonly string[] {
   return Object.freeze(bindings.map((binding) => binding.id));
+}
+
+function skipWhitespace(source: string, start: number): number {
+  let index = start;
+  while (index < source.length && /\s/u.test(source[index]!)) index += 1;
+  return index;
+}
+
+function quotedLiteral(source: string, start: number): { readonly value: string; readonly end: number } | undefined {
+  const quote = source[start];
+  if (quote !== '"' && quote !== "'") return undefined;
+  let value = "";
+  for (let index = start + 1; index < source.length; index += 1) {
+    const char = source[index]!;
+    if (char === "\\") {
+      const next = source[index + 1];
+      if (next === undefined) return undefined;
+      value += next;
+      index += 1;
+      continue;
+    }
+    if (char === quote) return { value, end: index + 1 };
+    value += char;
+  }
+  return undefined;
+}
+
+function literalObjectIdentity(source: string, start: number, field: "id" | "type" | "name"): string | undefined {
+  let index = skipWhitespace(source, start);
+  if (source[index] !== "{") return undefined;
+  let depth = 0;
+  for (; index < source.length; index += 1) {
+    const char = source[index]!;
+    if (char === '"' || char === "'" || char === "`") {
+      const quote = char;
+      index += 1;
+      while (index < source.length) {
+        const current = source[index]!;
+        if (current === "\\") index += 2;
+        else if (current === quote) break;
+        else index += 1;
+      }
+      continue;
+    }
+    if (char === "/" && source[index + 1] === "/") {
+      const newline = source.indexOf("\n", index + 2);
+      if (newline < 0) return undefined;
+      index = newline;
+      continue;
+    }
+    if (char === "/" && source[index + 1] === "*") {
+      const end = source.indexOf("*/", index + 2);
+      if (end < 0) return undefined;
+      index = end + 1;
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return undefined;
+      continue;
+    }
+    if (depth !== 1 || !/[A-Za-z_$]/u.test(char)) continue;
+    let end = index + 1;
+    while (end < source.length && /[A-Za-z0-9_$]/u.test(source[end]!)) end += 1;
+    if (source.slice(index, end) !== field) {
+      index = end - 1;
+      continue;
+    }
+    let valueStart = skipWhitespace(source, end);
+    if (source[valueStart] !== ":") {
+      index = end - 1;
+      continue;
+    }
+    valueStart = skipWhitespace(source, valueStart + 1);
+    return quotedLiteral(source, valueStart)?.value;
+  }
+  return undefined;
+}
+
+function contributionRegistrations(
+  source: string,
+  surfacesByConstant: ReadonlyMap<string, ContractSurfaceDefinition>,
+): readonly ContributionRegistration[] {
+  const registrations: ContributionRegistration[] = [];
+  const expression = /\.[ \t]*contribute\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*,/g;
+  for (const match of source.matchAll(expression)) {
+    const constant = match[1]!;
+    const surface = surfacesByConstant.get(constant);
+    if (!surface || surface.kind !== "contribution") continue;
+    const argumentStart = (match.index ?? 0) + match[0].length;
+    const id = surface.identityField === undefined ? undefined : literalObjectIdentity(source, argumentStart, surface.identityField);
+    registrations.push(Object.freeze({ surface: surface.id, type: surface.type, ...(id === undefined ? {} : { id }) }));
+  }
+  return Object.freeze(registrations);
+}
+
+function contributionCallConstants(source: string): readonly string[] {
+  return Object.freeze([...source.matchAll(/\.[ \t]*contribute\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*,/g)].map((match) => match[1]!));
+}
+
+async function pluginTypeScriptSources(repository: string, plugin: string): Promise<readonly string[]> {
+  const root = join(repository, "plugins", plugin);
+  const pending = [root];
+  const sources: string[] = [];
+  let totalChars = 0;
+  while (pending.length > 0) {
+    const directory = pending.pop()!;
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === "node_modules" || entry.name === "dist") continue;
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(path);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
+      if (sources.length >= MAX_PLUGIN_SOURCE_FILES) throw new Error(`${plugin}: source file count exceeds ${MAX_PLUGIN_SOURCE_FILES}`);
+      const source = await readFile(path, "utf8");
+      totalChars += source.length;
+      if (totalChars > MAX_PLUGIN_SOURCE_CHARS) throw new Error(`${plugin}: source size exceeds ${MAX_PLUGIN_SOURCE_CHARS} characters`);
+      sources.push(source);
+    }
+  }
+  return Object.freeze(sources);
+}
+
+function groupContributionInstances(registrations: readonly ContributionRegistration[]): readonly ContributionInstanceSummary[] {
+  const groups = new Map<string, { surface: string; type: string; ids: Set<string>; dynamic: number }>();
+  for (const registration of registrations) {
+    const key = `${registration.surface}\u0000${registration.type}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { surface: registration.surface, type: registration.type, ids: new Set<string>(), dynamic: 0 };
+      groups.set(key, group);
+    }
+    if (registration.id === undefined) group.dynamic += 1;
+    else group.ids.add(registration.id);
+  }
+  return Object.freeze([...groups.values()]
+    .map((group) => Object.freeze({
+      surface: group.surface,
+      type: group.type,
+      ids: Object.freeze([...group.ids].sort((left, right) => left.localeCompare(right))),
+      dynamic: group.dynamic,
+    }))
+    .sort((left, right) => left.surface.localeCompare(right.surface) || left.type.localeCompare(right.type)));
 }
 
 function interfaceBlocks(source: string): readonly PublicInterfaceBlock[] {
@@ -307,6 +488,8 @@ export async function buildCapabilityContractCatalog(
     readonly services: readonly string[];
     readonly publicTypes: readonly string[];
     readonly surfaces: readonly ContractSurfaceBinding[];
+    readonly surfaceDefinitions: readonly ContractSurfaceDefinition[];
+    readonly contributionInstances: readonly ContributionInstanceSummary[];
     readonly publicApi: string;
     readonly score: number;
   }> = [];
@@ -329,7 +512,8 @@ export async function buildCapabilityContractCatalog(
     }
 
     const interfaces = interfaceBlocks(source);
-    const surfaces = surfaceBindings(source);
+    const definitions = surfaceDefinitions(source);
+    const surfaces = Object.freeze(definitions.map(({ kind, id, type }) => Object.freeze({ kind, id, type })));
     const capabilities = definitionIds(surfaces.filter((surface) => surface.kind === "capability"));
     const contributions = definitionIds(surfaces.filter((surface) => surface.kind === "contribution"));
     const hooks = definitionIds(surfaces.filter((surface) => surface.kind === "hook"));
@@ -358,6 +542,8 @@ export async function buildCapabilityContractCatalog(
       services,
       publicTypes,
       surfaces,
+      surfaceDefinitions: definitions,
+      contributionInstances: Object.freeze([]),
       publicApi,
       score: relevance(plugin, source, capabilities, contributions, hooks, services, publicTypes, terms),
     }));
@@ -366,6 +552,48 @@ export async function buildCapabilityContractCatalog(
   const configuredOrdinaryCount = configured.names.filter((plugin) => !CONTRACTLESS_KERNEL_PLUGINS.has(plugin)).length;
   if (candidates.length !== configuredOrdinaryCount) {
     issues.push(`discovered ${candidates.length} of ${configuredOrdinaryCount} configured ordinary plugin contracts`);
+  }
+
+  const contributionSurfacesByConstant = new Map<string, ContractSurfaceDefinition>();
+  for (const candidate of candidates) {
+    for (const surface of candidate.surfaceDefinitions) {
+      if (surface.kind !== "contribution") continue;
+      const previous = contributionSurfacesByConstant.get(surface.constant);
+      if (previous && (previous.id !== surface.id || previous.type !== surface.type)) {
+        issues.push(`contribution constant ${surface.constant} is ambiguous between ${previous.id} and ${surface.id}`);
+        continue;
+      }
+      contributionSurfacesByConstant.set(surface.constant, surface);
+    }
+  }
+
+  const staticContributionOwners = new Map<string, string>();
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index]!;
+    const registrations: ContributionRegistration[] = [];
+    try {
+      for (const source of await pluginTypeScriptSources(canonicalRoot, candidate.plugin)) {
+        for (const constant of contributionCallConstants(source)) {
+          if (!contributionSurfacesByConstant.has(constant)) {
+            issues.push(`${candidate.plugin}: registers non-discoverable contribution constant ${constant}; contribution extension points must come from an ordinary contract.ts`);
+          }
+        }
+        registrations.push(...contributionRegistrations(source, contributionSurfacesByConstant));
+      }
+    } catch (error) {
+      issues.push(`${candidate.plugin}: contribution implementation discovery failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    for (const registration of registrations) {
+      if (registration.id === undefined) continue;
+      const key = `${registration.surface}\u0000${registration.id}`;
+      const previous = staticContributionOwners.get(key);
+      if (previous) {
+        issues.push(`duplicate static ${registration.surface} contribution id ${registration.id} from ${previous} and ${candidate.plugin}`);
+      } else {
+        staticContributionOwners.set(key, candidate.plugin);
+      }
+    }
+    candidates[index] = Object.freeze({ ...candidate, contributionInstances: groupContributionInstances(registrations) });
   }
 
   const summaries = new Map<string, CapabilityContractSummary>();
@@ -380,6 +608,7 @@ export async function buildCapabilityContractCatalog(
       services: candidate.services,
       publicTypes: candidate.publicTypes,
       surfaces: candidate.surfaces,
+      contributionInstances: candidate.contributionInstances,
     });
     summaries.set(candidate.plugin, summary);
     totalChars += JSON.stringify(summary).length;

@@ -45,6 +45,30 @@ describe("self-improvement plugin contract catalog", () => {
     const memory = catalog.contracts.find((entry) => entry.plugin === "memory");
     expect(memory?.publicTypes).toContain("MemoryStoreService");
     expect(memory?.publicTypes).toContain("MemoryEntry");
+    expect(memory?.contributionInstances).toContainEqual({
+      surface: "agent.tool",
+      type: "AgentToolContribution",
+      ids: [
+        "memory-forget-note",
+        "memory-index-project-docs",
+        "memory-recall",
+        "memory-remember-note",
+        "memory-remember-relation",
+      ],
+      dynamic: 0,
+    });
+    expect(memory?.contributionInstances).toContainEqual({
+      surface: "system.action",
+      type: "SystemActionContribution",
+      ids: [
+        "memory.correct",
+        "memory.preference.forget",
+        "memory.preference.remember",
+        "memory.preferences",
+        "memory.review",
+      ],
+      dynamic: 0,
+    });
 
     const toolCatalog = await buildCapabilityContractCatalog(process.cwd(), "agent tool extension");
     const toolTurnLoop = toolCatalog.contracts.find((entry) => entry.plugin === "turn-loop");
@@ -66,6 +90,7 @@ describe("self-improvement plugin contract catalog", () => {
         plugin: string;
         surfaces: Array<{ kind: string; id: string; type: string }>;
         publicTypes: string[];
+        contributionInstances: Array<{ surface: string; type: string; ids: string[]; dynamic: number }>;
       }>;
     };
 
@@ -73,11 +98,47 @@ describe("self-improvement plugin contract catalog", () => {
       plugin: entry.plugin,
       surfaces: entry.surfaces,
       publicTypes: entry.publicTypes,
+      contributionInstances: entry.contributionInstances.map(({ surface, type, ids, dynamic }) => ({ surface, type, ids, dynamic })),
     }))).toEqual(catalog.contracts.map((entry) => ({
       plugin: entry.plugin,
       surfaces: [...entry.surfaces],
       publicTypes: [...entry.publicTypes].sort((left, right) => left.localeCompare(right)),
+      contributionInstances: [...entry.contributionInstances],
     })));
+  });
+
+  it("auto-discovers concrete contribution ownership and rejects duplicate static ids", async () => {
+    const root = await mkdtemp(join(tmpdir(), "friday-contract-contributions-"));
+    temporaryRoots.push(root);
+    await mkdir(join(root, "plugins", "owner"), { recursive: true });
+    await mkdir(join(root, "plugins", "one"), { recursive: true });
+    await mkdir(join(root, "plugins", "two"), { recursive: true });
+    await writeFile(
+      join(root, "friday.config.json"),
+      `${JSON.stringify({ plugins: ["./plugins/owner/index.ts", "./plugins/one/index.ts", "./plugins/two/index.ts"] }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    await writeFile(join(root, "plugins", "owner", "contract.ts"), [
+      "export interface DemoContribution { readonly id: string; run(): void; }",
+      "export const DEMO_CONTRIBUTION = defineContribution<DemoContribution>(\"demo.action\");",
+      "",
+    ].join("\n"), { mode: 0o600 });
+    await writeFile(join(root, "plugins", "owner", "index.ts"), "export {};\n", { mode: 0o600 });
+    for (const plugin of ["one", "two"]) {
+      await writeFile(join(root, "plugins", plugin, "contract.ts"), [
+        `export interface ${plugin === "one" ? "One" : "Two"}Service { status(): string; }`,
+        `export const ${plugin.toUpperCase()}_CAPABILITY = defineCapability<${plugin === "one" ? "One" : "Two"}Service>(\"${plugin}\");`,
+        "",
+      ].join("\n"), { mode: 0o600 });
+      await writeFile(join(root, "plugins", plugin, "index.ts"), [
+        "ctx.contribute(DEMO_CONTRIBUTION, { id: \"same\", run() {} });",
+        "",
+      ].join("\n"), { mode: 0o600 });
+    }
+
+    const catalog = await buildCapabilityContractCatalog(root, "demo action");
+    expect(catalog.complete).toBe(false);
+    expect(catalog.issues.join(" ")).toMatch(/duplicate static demo\.action contribution id same/i);
   });
 
   it("marks discovery incomplete when a configured ordinary plugin contract cannot be inspected", async () => {
