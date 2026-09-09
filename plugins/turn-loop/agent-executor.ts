@@ -166,6 +166,17 @@ function configuredModel(environment: NodeJS.ProcessEnv = process.env): { provid
   return { provider, modelId };
 }
 
+function routerOnlyResult(): TurnExecutionResult {
+  return Object.freeze({
+    text: [
+      "FRIDAY is currently running in router-only bootstrap mode, so the main reasoning model is not configured yet.",
+      "Setup, Doctor, diagnostics, voice, sandbox, execution-Python, MCP, Skills, and other typed system administration remain available through this trusted channel.",
+      "Send `continue setup` or `configure main model` to finish full assistant setup.",
+    ].join(" "),
+    metadata: { routerOnly: true },
+  });
+}
+
 function resolveModel(
   models: ModelService,
   sessionModel: { provider: string; modelId: string } | null,
@@ -1116,6 +1127,10 @@ export function createAgentTurnExecutor(
     async execute(context: TurnExecutionContext): Promise<TurnExecutionResult> {
       if (disposed) throw new Error("Agent turn executor is disposed");
       context.signal?.throwIfAborted();
+      const mainModel = configuredModel();
+      if (!mainModel && (context.decision.destination.kind === "transient" || context.decision.destination.id === "session:new")) {
+        return routerOnlyResult();
+      }
       if (context.decision.destination.kind === "transient") {
         const session = dependencies.sessions.SessionManager.inMemory(defaultCwd, "", {
           ownerScope: principalScope(context.turn.principal),
@@ -1144,11 +1159,19 @@ export function createAgentTurnExecutor(
             notify: false,
           })
         : undefined;
-      const cached = await persistentRuntime(
-        destinationId,
-        context.turn.principal,
-        destinationId === "session:new" ? reportReady : undefined,
-      );
+      let cached: CachedRuntime;
+      try {
+        cached = await persistentRuntime(
+          destinationId,
+          context.turn.principal,
+          destinationId === "session:new" ? reportReady : undefined,
+        );
+      } catch (error) {
+        if (!mainModel && error instanceof Error && error.message.includes("Agent model selection is required")) {
+          return routerOnlyResult();
+        }
+        throw error;
+      }
       if (destinationId !== "session:new") await reportReady?.(cached.runtime.sessionId);
       cached.busy += 1;
       cached.lastUsedAt = Date.now();

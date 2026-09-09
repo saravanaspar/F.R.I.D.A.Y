@@ -8,7 +8,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../scheduler/contract.js";
-import { SYSTEM_STATUS_CONTRIBUTION } from "../system/contract.js";
+import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION, type SystemActionExecutionContext, type SystemJsonObject } from "../system/contract.js";
 import { AGENT_TOOL_CONTRIBUTION, TURN_INGRESS_HOOK, type AgentExtensionJsonValue } from "../turn-loop/contract.js";
 import { VAULT_CAPABILITY } from "../vault/contract.js";
 import { VAULT_TRUSTED_CAPABILITY } from "../vault/trusted-contract.js";
@@ -17,7 +17,8 @@ import {
   LIFECYCLE_HANDOFF_CONTRIBUTION,
 } from "../lifecycle/contract.js";
 import { CHANNELS_CAPABILITY, type ChannelsService } from "./contract.js";
-import { readSavedChannels, type SavedChannelConfig } from "./config.js";
+import { setupWhatsApp } from "./tooling.js";
+import { readSavedChannels, updateSavedChannel, type ConfigurableChannelId, type SavedChannelConfig } from "./config.js";
 import {
   CHANNELS_TRUSTED_CAPABILITY,
   type ChannelsTrustedService,
@@ -183,6 +184,102 @@ export interface ChannelsPluginOptions {
   readonly email?: channels.EmailChannelConfig | false | undefined;
   readonly sms?: channels.SmsChannelConfig | false | undefined;
   readonly autoStart?: boolean | undefined;
+}
+
+
+
+const REMOTE_CHANNEL_IDS = Object.freeze<readonly ConfigurableChannelId[]>([
+  "telegram", "whatsapp", "discord", "slack", "teams", "google-chat", "signal", "email", "sms",
+]);
+const REMOTE_CHANNEL_ID_SET = new Set<string>(REMOTE_CHANNEL_IDS);
+const SENSITIVE_SETTING_KEY = /(?:token|secret|password|passphrase|api[-_.]?key|credential)/i;
+
+function remoteChannelPrincipal(context: SystemActionExecutionContext) {
+  if (context.turn.principal.authority !== "channel") throw new Error("Channel management requires an originating trusted channel");
+  return Object.freeze({
+    channel: context.turn.principal.channel,
+    accountId: context.turn.principal.accountId,
+    conversationId: context.turn.principal.conversationId,
+    senderId: context.turn.principal.senderId,
+    ...(context.turn.principal.threadId === undefined ? {} : { threadId: context.turn.principal.threadId }),
+  });
+}
+
+function systemChannelId(input: Readonly<SystemJsonObject>): ConfigurableChannelId {
+  const value = input.channelId;
+  if (typeof value !== "string" || !REMOTE_CHANNEL_ID_SET.has(value)) throw new Error(`channelId must be one of: ${REMOTE_CHANNEL_IDS.join(", ")}`);
+  return value as ConfigurableChannelId;
+}
+
+function systemOptionalString(input: Readonly<SystemJsonObject>, name: string, maximum = 4_096): string | undefined {
+  const value = input[name];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new Error(`${name} must be a string`);
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maximum || /[\r\n\0]/.test(normalized)) throw new Error(`${name} is invalid`);
+  return normalized;
+}
+
+function systemOptionalBoolean(input: Readonly<SystemJsonObject>, name: string): boolean | undefined {
+  const value = input[name];
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") throw new Error(`${name} must be boolean`);
+  return value;
+}
+
+function systemStringList(input: Readonly<SystemJsonObject>, name: string): readonly string[] | undefined {
+  const value = input[name];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 128) throw new Error(`${name} must be a bounded string list`);
+  const result: string[] = [];
+  for (const [index, item] of value.entries()) {
+    if (typeof item !== "string") throw new Error(`${name}[${index}] must be a string`);
+    const normalized = item.trim();
+    if (!normalized || normalized.length > 512 || /[\r\n\0]/.test(normalized)) throw new Error(`${name}[${index}] is invalid`);
+    result.push(normalized);
+  }
+  return Object.freeze([...new Set(result)]);
+}
+
+function systemChannelSettings(input: Readonly<SystemJsonObject>): Readonly<Record<string, string | number | boolean>> | undefined {
+  const value = input.settings;
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("settings must be an object");
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 48) throw new Error("settings has too many fields");
+  const output: Record<string, string | number | boolean> = {};
+  for (const [key, item] of entries) {
+    if (!/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(key)) throw new Error(`settings key is invalid: ${key}`);
+    if (SENSITIVE_SETTING_KEY.test(key)) throw new Error(`settings.${key} looks like a credential; use channels.capture-credential so the secret goes directly to Vault`);
+    if (typeof item === "string") {
+      const normalized = item.trim();
+      if (normalized.length > 8_192 || /[\r\n\0]/.test(normalized)) throw new Error(`settings.${key} is invalid`);
+      output[key] = normalized;
+    } else if (typeof item === "number" && Number.isFinite(item)) output[key] = item;
+    else if (typeof item === "boolean") output[key] = item;
+    else throw new Error(`settings.${key} must be a string, number, or boolean`);
+  }
+  return Object.freeze(output);
+}
+
+type ChannelCredentialSpec = Readonly<{ key: string; suffix: string; kind: string; inputMode: "opaque-token" | "text"; label: string }>;
+const CHANNEL_CREDENTIALS: Readonly<Partial<Record<ConfigurableChannelId, Readonly<Record<string, ChannelCredentialSpec>>>>> = Object.freeze({
+  telegram: Object.freeze({ botToken: Object.freeze({ key: "botToken", suffix: "bot-token", kind: "bot-token", inputMode: "opaque-token", label: "Telegram bot token" }) }),
+  discord: Object.freeze({ botToken: Object.freeze({ key: "botToken", suffix: "bot-token", kind: "bot-token", inputMode: "opaque-token", label: "Discord bot token" }) }),
+  slack: Object.freeze({
+    botToken: Object.freeze({ key: "botToken", suffix: "bot-token", kind: "bot-token", inputMode: "opaque-token", label: "Slack bot token" }),
+    appToken: Object.freeze({ key: "appToken", suffix: "app-token", kind: "app-token", inputMode: "opaque-token", label: "Slack app token" }),
+  }),
+  email: Object.freeze({ password: Object.freeze({ key: "password", suffix: "password", kind: "password", inputMode: "text", label: "Email password/app-password" }) }),
+  teams: Object.freeze({ clientSecret: Object.freeze({ key: "clientSecret", suffix: "client-secret", kind: "client-secret", inputMode: "opaque-token", label: "Teams client secret" }) }),
+  "google-chat": Object.freeze({ serviceAccount: Object.freeze({ key: "serviceAccount", suffix: "service-account", kind: "service-account", inputMode: "text", label: "Google Chat service-account JSON" }) }),
+  sms: Object.freeze({ authToken: Object.freeze({ key: "authToken", suffix: "auth-token", kind: "auth-token", inputMode: "opaque-token", label: "Twilio auth token" }) }),
+});
+
+function channelCredentialSpec(id: ConfigurableChannelId, credential: string): ChannelCredentialSpec {
+  const spec = CHANNEL_CREDENTIALS[id]?.[credential];
+  if (!spec) throw new Error(`Unsupported protected credential ${credential} for ${id}`);
+  return spec;
 }
 
 export function createChannelsPlugin(options: ChannelsPluginOptions = {}): FridayPlugin {
@@ -412,6 +509,14 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
     const safe: ChannelsService = Object.freeze({
       list: () => hub.list(),
       status: () => hub.status(),
+      access: () => {
+        const enabledEntries = Object.entries(saved.channels).filter(([, value]) => value?.enabled);
+        return Object.freeze({
+          enabled: Object.freeze(enabledEntries.map(([id]) => id).sort()),
+          allowAll: Object.freeze(enabledEntries.filter(([, value]) => value?.allowAll === true).map(([id]) => id).sort()),
+          whatsappEnabled: saved.channels.whatsapp?.enabled === true,
+        });
+      },
       subscribe: (listener: Parameters<ChannelsService["subscribe"]>[0]) => hub.subscribe(listener),
     });
     const trusted: ChannelsTrustedService = Object.freeze({
@@ -530,6 +635,129 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
         await trusted.send(reminder.target, reminder.text);
       },
     });
+    ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+      id: "channels.configure",
+      label: "Configure a communication channel",
+      description: "Create/update/enable/disable one additional FRIDAY channel using non-secret settings. Ingress remains default-deny unless exact sender/conversation IDs or allowAll are explicitly configured. Credentials must use channels.capture-credential, and trusting a new operator identity remains a separate permissions action.",
+      parameters: Object.freeze({
+        type: "object",
+        properties: {
+          channelId: { type: "string", enum: REMOTE_CHANNEL_IDS },
+          enabled: { type: "boolean" },
+          accountId: { type: "string" },
+          allowAll: { type: "boolean" },
+          allowedSenderIds: { type: "array", items: { type: "string" }, maxItems: 128 },
+          allowedConversationIds: { type: "array", items: { type: "string" }, maxItems: 128 },
+          requireMention: { type: "boolean" },
+          settings: { type: "object", additionalProperties: true },
+        },
+        required: ["channelId"],
+        additionalProperties: false,
+      }),
+      permission() {
+        return { id: "channels.configure", effect: "system-write", resource: "channels:configuration", network: false };
+      },
+      async execute(input) {
+        const id = systemChannelId(input);
+        const current = (await readSavedChannels()).channels[id];
+        const enabled = systemOptionalBoolean(input, "enabled") ?? current?.enabled ?? true;
+        const accountId = systemOptionalString(input, "accountId", 256) ?? current?.accountId;
+        const settingsPatch = systemChannelSettings(input);
+        const mergedSettings = settingsPatch || current?.settings
+          ? Object.freeze({ ...(current?.settings ?? {}), ...(settingsPatch ?? {}) })
+          : undefined;
+        const next: SavedChannelConfig = Object.freeze({
+          enabled,
+          ...(accountId ? { accountId } : {}),
+          allowAll: systemOptionalBoolean(input, "allowAll") ?? current?.allowAll ?? false,
+          allowedSenderIds: systemStringList(input, "allowedSenderIds") ?? current?.allowedSenderIds ?? Object.freeze([]),
+          allowedConversationIds: systemStringList(input, "allowedConversationIds") ?? current?.allowedConversationIds ?? Object.freeze([]),
+          requireMention: systemOptionalBoolean(input, "requireMention") ?? current?.requireMention ?? false,
+          ...(mergedSettings ? { settings: mergedSettings } : {}),
+          ...(current?.secretRefs ? { secretRefs: current.secretRefs } : {}),
+        });
+        await updateSavedChannel(id, next);
+        return {
+          channelId: id,
+          enabled: next.enabled,
+          accountId: next.accountId ?? "default",
+          allowAll: next.allowAll === true,
+          allowedSenderIds: next.allowedSenderIds ?? [],
+          allowedConversationIds: next.allowedConversationIds ?? [],
+          credentialsConfigured: Object.keys(next.secretRefs ?? {}),
+          message: "Channel configuration saved. If this introduces a new operator, use the permissions identity action explicitly; FRIDAY never auto-trusts a sender from configuration alone.",
+        };
+      },
+    });
+
+    ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+      id: "channels.capture-credential",
+      label: "Capture a channel credential",
+      description: "Open protected credential-capture mode on the originating trusted channel and write the supplied value directly to the canonical Vault reference. The credential text is not forwarded to the model or stored in channel config.",
+      parameters: Object.freeze({
+        type: "object",
+        properties: {
+          channelId: { type: "string", enum: REMOTE_CHANNEL_IDS },
+          credential: { type: "string", enum: ["botToken", "appToken", "password", "clientSecret", "serviceAccount", "authToken"] },
+        },
+        required: ["channelId", "credential"],
+        additionalProperties: false,
+      }),
+      permission() {
+        return { id: "channels.capture-credential", effect: "credential-write", resource: "channels:credential", network: false };
+      },
+      async execute(input, context) {
+        const principal = remoteChannelPrincipal(context);
+        const id = systemChannelId(input);
+        const credential = systemOptionalString(input, "credential", 64);
+        if (!credential) throw new Error("credential is required");
+        const spec = channelCredentialSpec(id, credential);
+        const state = await readSavedChannels();
+        const current = state.channels[id];
+        if (!current) throw new Error(`Configure ${id} first with channels.configure`);
+        const accountId = current.accountId ?? "default";
+        const ref = `vault://channels/${id}/${accountId}/${spec.suffix}`;
+        const exists = vault.exists(ref);
+        const pending = trusted.requestCredentialCapture({
+          principal,
+          ref,
+          kind: spec.kind,
+          mode: exists ? "rotate" : "create",
+          label: spec.label,
+          inputMode: spec.inputMode,
+          ...(id === "google-chat" && credential === "serviceAccount" ? {
+            validateSecret(secret: Uint8Array) {
+              const parsed = JSON.parse(Buffer.from(secret).toString("utf8")) as unknown;
+              if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Google service-account credential must be a JSON object");
+            },
+          } : {}),
+          successMessage: `${spec.label} stored securely in FRIDAY Vault.`,
+          failureMessage: `${spec.label} was not stored.`,
+        });
+        const completion = await trusted.waitForCredentialCapture(pending.id);
+        if (completion.status !== "stored") throw new Error(`${spec.label} capture ${completion.status}`);
+        await updateSavedChannel(id, Object.freeze({
+          ...current,
+          secretRefs: Object.freeze({ ...(current.secretRefs ?? {}), [spec.key]: ref }),
+        }));
+        return { channelId: id, credential: spec.key, stored: true };
+      },
+    });
+
+    ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+      id: "channels.whatsapp.setup",
+      label: "Set up WhatsApp bridge tooling",
+      description: "Install FRIDAY's private WhatsApp bridge dependencies in user space. This never grants root or sudo access.",
+      parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+      permission() {
+        return { id: "channels.whatsapp.setup", effect: "system-write", resource: "channels:whatsapp-tooling", network: true };
+      },
+      async execute() {
+        const root = await setupWhatsApp();
+        return { configured: true, root, message: "WhatsApp bridge tooling is ready." };
+      },
+    });
+
     ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
       id: "channels",
       label: "Channels",

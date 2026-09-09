@@ -35,8 +35,9 @@ export interface AutonomousRunnerDependencies {
   readonly credentials?: (() => ModelCredentialService | undefined) | undefined;
 }
 
-function stateRoot(input?: string): string {
-  return resolve(input ?? process.env.FRIDAY_STATE_DIR ?? join(homedir(), ".friday"));
+export function getAutonomyStateRoot(input?: string, environment: NodeJS.ProcessEnv = process.env): string {
+  const configured = input?.trim() || environment.FRIDAY_STATE_DIR?.trim() || environment.FRIDAY_HOME?.trim();
+  return resolve(configured || join(homedir(), ".friday"));
 }
 
 function textFromAssistant(message: AssistantMessage | undefined): string {
@@ -87,7 +88,7 @@ export async function runAutonomousObjective(
   options: AutonomousRunOptions,
 ): Promise<AutonomousRunResult> {
   const cwd = resolve(options.cwd);
-  const root = stateRoot(options.stateDir);
+  const root = getAutonomyStateRoot(options.stateDir);
   const model = normalizeModel(dependencies.model, options.provider, options.model);
   const session = dependencies.sessions.SessionManager.create(cwd, join(root, "sessions"));
   const gateCommands = options.gates?.map((gate) => gate.command) ?? [];

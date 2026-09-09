@@ -12,6 +12,7 @@ import { CHANNELS_TRUSTED_CAPABILITY } from "../channels/trusted-contract.js";
 import { EVENTS_CAPABILITY } from "../events/contract.js";
 import { OBSERVABILITY_CAPABILITY } from "../observability/contract.js";
 import { PERMISSIONS_CAPABILITY } from "../permissions/contract.js";
+import { RUNTIME_SETTINGS_CAPABILITY } from "../runtime-settings/contract.js";
 import { SELF_IMPROVEMENT_CAPABILITY, type SelfImprovementContinuation } from "../self-improvement/contract.js";
 import {
   SYSTEM_ACTION_CONTRIBUTION,
@@ -30,6 +31,7 @@ import {
   type McpService,
 } from "./contract.js";
 import { searchMcpRegistry } from "./discovery.js";
+import { resolveMcpSelfRepository } from "./self-repository.js";
 import {
   MCP_TRUSTED_CAPABILITY,
   type McpOAuthLoginCallbacks,
@@ -118,7 +120,7 @@ export interface McpPluginOptions {
 }
 
 export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
-  return definePlugin({ id: "mcp", requires: [AUTH_CAPABILITY, EVENTS_CAPABILITY, PERMISSIONS_CAPABILITY, VAULT_CAPABILITY, VAULT_TRUSTED_CAPABILITY], optional: [ARTIFACTS_CAPABILITY, CHANNELS_TRUSTED_CAPABILITY, OBSERVABILITY_CAPABILITY, SELF_IMPROVEMENT_CAPABILITY], provides: [MCP_CAPABILITY, MCP_TRUSTED_CAPABILITY] }, (bootstrap) => {
+  return definePlugin({ id: "mcp", requires: [AUTH_CAPABILITY, EVENTS_CAPABILITY, PERMISSIONS_CAPABILITY, VAULT_CAPABILITY, VAULT_TRUSTED_CAPABILITY], optional: [ARTIFACTS_CAPABILITY, CHANNELS_TRUSTED_CAPABILITY, OBSERVABILITY_CAPABILITY, RUNTIME_SETTINGS_CAPABILITY, SELF_IMPROVEMENT_CAPABILITY], provides: [MCP_CAPABILITY, MCP_TRUSTED_CAPABILITY] }, (bootstrap) => {
     const auth = bootstrap.services.require(AUTH_CAPABILITY);
     const events = bootstrap.services.require(EVENTS_CAPABILITY);
     const permissions = bootstrap.services.require(PERMISSIONS_CAPABILITY);
@@ -474,14 +476,14 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
         const id = systemString(input, "id", { required: true, maximum: 128 })!;
         return { id: "mcp.add-server", effect: "system-write", resource: `mcp-server:${id}`, network: false };
       },
-      execute(input) {
+      async execute(input) {
         const id = systemString(input, "id", { required: true, maximum: 128 })!;
         const url = systemString(input, "url", { required: true, maximum: 2_048 })!;
         const label = systemString(input, "label", { maximum: 256 });
         const credentialRef = systemString(input, "credentialRef", { maximum: 512 });
         const oauthClientId = systemString(input, "oauthClientId", { maximum: 512 });
         const oauthScopes = systemString(input, "oauthScopes", { maximum: 2_048 });
-        return trusted.registerServer({
+        const registered = trusted.registerServer({
           id,
           url,
           authKind: systemAuthKind(input),
@@ -490,6 +492,8 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
           ...(oauthClientId === undefined ? {} : { oauthClientId }),
           ...(oauthScopes === undefined ? {} : { oauthScopes }),
         });
+        await bootstrap.services.optional(RUNTIME_SETTINGS_CAPABILITY)?.markOnboardingStep("mcp", "complete");
+        return registered;
       },
     });
     bootstrap.contribute(SYSTEM_ACTION_CONTRIBUTION, {
@@ -578,6 +582,7 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
             } else {
               await service.listTools(id, context.signal);
             }
+            await bootstrap.services.optional(RUNTIME_SETTINGS_CAPABILITY)?.markOnboardingStep("mcp", "complete");
             return { installed: true, verified: true, server: registered };
           } catch (error) {
             const rollbackFailures: unknown[] = [];
@@ -599,9 +604,14 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
         if (!artifacts || !selfImprovement) {
           throw new Error("GitHub MCP installation requires Artifacts and Self-Improvement capabilities");
         }
+        const runtimeSettings = await bootstrap.services.optional(RUNTIME_SETTINGS_CAPABILITY)?.read();
+        const selfRepository = resolveMcpSelfRepository(runtimeSettings?.selfRepository);
+        if (!selfRepository) {
+          throw new Error("GitHub MCP capability extension requires a configured FRIDAY self-improvement source repository");
+        }
         await permissions.authorize({
           mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
-          workspace: process.cwd(),
+          workspace: selfRepository,
           access: "read",
           action: { id: "mcp.inspect-package", effect: "external-read", resource: url.toString(), network: true },
           reason: "inspect the user-provided MCP repository before presenting its installation/capability plan",
@@ -648,7 +658,7 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
         }
         const ensured = await selfImprovement.ensureCapability({
           objective: `Add secure installation and execution support for user-provided local/stdio MCP repository packages. Preserve the existing Streamable HTTP MCP path. After implementation the original request must be able to install ${url.toString()} (${packageHint}) through the MCP plugin, with sandboxed package setup, typed Permissions authorization, Vault-backed credentials, bounded output, and tests.`,
-          cwd: process.cwd(),
+          cwd: selfRepository,
           provider,
           model: modelId,
           permissionMode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
@@ -671,7 +681,7 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
           async authorize() {
             await permissions.authorize({
               mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
-              workspace: process.cwd(),
+              workspace: selfRepository,
               access: "write",
               action: { id: "mcp.install.extend", effect: "system-write", resource: `mcp-package:${url.toString()}`, network: false },
               reason: "build missing local/stdio MCP package support",

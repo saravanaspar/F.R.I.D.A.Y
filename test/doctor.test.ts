@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { saveSavedChannels } from "../plugins/channels/config.js";
-import { modelCredentialVaultRef } from "../plugins/auth/model-credential-ref.js";
+import { modelCredentialVaultRef, modelOAuthCredentialVaultRef } from "../plugins/auth/model-credential-ref.js";
 import { VaultStore, getVaultStateDir } from "@friday/vault";
 import { saveRuntimeSettings } from "../plugins/runtime-settings/runtime-env.js";
 import { collectDoctorChecks, formatDoctorReport } from "../src/doctor.js";
@@ -83,6 +83,29 @@ describe("friday doctor", () => {
     expect(report).toContain("RECOVERY");
     expect(report).toContain("Summary");
   }, 15_000);
+
+  it("recognizes OAuth-only model authentication stored in Vault", async () => {
+    const home = await temp("friday-doctor-oauth-home-");
+    const workspace = await temp("friday-doctor-oauth-workspace-");
+    await saveRuntimeSettings({
+      modelProvider: "anthropic",
+      modelId: "claude-test",
+      permissionMode: "ask",
+      timezone: "UTC",
+      workspaceRoot: workspace,
+    }, home);
+    const vault = new VaultStore({ stateDir: getVaultStateDir({ FRIDAY_HOME: home }), workspaceRoot: workspace });
+    vault.create({
+      ref: modelOAuthCredentialVaultRef("anthropic"),
+      kind: "model-oauth",
+      secret: JSON.stringify({ access: "test-access", refresh: "test-refresh", expires: Date.now() + 60_000 }),
+    });
+
+    const checks = await collectDoctorChecks({ ...process.env, FRIDAY_HOME: home });
+    const credential = checks.find((entry) => entry.id === "model-credential");
+    expect(credential).toMatchObject({ level: "ok", message: "main OAuth credential stored in Vault" });
+    expect(credential?.detail).toBe(modelOAuthCredentialVaultRef("anthropic"));
+  });
 
   it("fails health when first-run configuration is missing and gives one-line fixes", async () => {
     const home = await temp("friday-doctor-empty-home-");

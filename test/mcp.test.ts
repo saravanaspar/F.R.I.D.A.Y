@@ -16,6 +16,7 @@ import {
 } from "../plugins/capabilities/protocol.js";
 import { createMcpPlugin } from "../plugins/mcp/index.js";
 import { searchMcpRegistry } from "../plugins/mcp/discovery.js";
+import { resolveMcpSelfRepository } from "../plugins/mcp/self-repository.js";
 import { MCP_CAPABILITY } from "../plugins/mcp/contract.js";
 import { MCP_TRUSTED_CAPABILITY } from "../plugins/mcp/trusted-contract.js";
 import modelPlugin from "../plugins/model/index.js";
@@ -27,6 +28,21 @@ import {
 import sessionResourcesPlugin from "../plugins/session-resources/index.js";
 import { createVaultPlugin } from "../plugins/vault/index.js";
 import { McpManager, getMcpStateDir } from "@friday/mcp";
+
+describe("MCP self-improvement source resolution", () => {
+  it("prefers configured Runtime Settings over the host environment", () => {
+    expect(resolveMcpSelfRepository("./configured-friday", { FRIDAY_SELF_REPOSITORY: "./environment-friday" })).toBe(
+      join(process.cwd(), "configured-friday"),
+    );
+  });
+
+  it("falls back to FRIDAY_SELF_REPOSITORY and refuses an implicit process cwd", () => {
+    expect(resolveMcpSelfRepository(undefined, { FRIDAY_SELF_REPOSITORY: "./environment-friday" })).toBe(
+      join(process.cwd(), "environment-friday"),
+    );
+    expect(resolveMcpSelfRepository(undefined, {})).toBeUndefined();
+  });
+});
 
 const tempDirs: string[] = [];
 const servers: Array<{ close(): Promise<void> }> = [];

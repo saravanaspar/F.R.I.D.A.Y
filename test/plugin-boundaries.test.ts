@@ -4,17 +4,23 @@ import { describe, expect, it } from "vitest";
 import alertsPlugin from "../plugins/alerts/index.js";
 import artifactsPlugin from "../plugins/artifacts/index.js";
 import auditPlugin from "../plugins/audit/index.js";
+import diagnosticsPlugin from "../plugins/diagnostics/index.js";
+import hostDoctorPlugin from "../plugins/host-doctor/index.js";
+import hostPrivilegesPlugin from "../plugins/host-privileges/index.js";
 import mcpPlugin from "../plugins/mcp/index.js";
 import modelPlugin from "../plugins/model/index.js";
 import observabilityPlugin from "../plugins/observability/index.js";
 import permissionsPlugin from "../plugins/permissions/index.js";
 import routingPlugin from "../plugins/routing/index.js";
+import sandboxPlugin from "../plugins/sandbox/index.js";
 import runtimeSettingsPlugin from "../plugins/runtime-settings/index.js";
 import schedulerPlugin from "../plugins/scheduler/index.js";
 import sessionJobsPlugin from "../plugins/session-jobs/index.js";
 import selfImprovementPlugin from "../plugins/self-improvement/index.js";
+import skillsPlugin from "../plugins/skills/index.js";
 import systemPlugin from "../plugins/system/index.js";
 import turnLoopPlugin from "../plugins/turn-loop/index.js";
+import voicePlugin from "../plugins/voice/index.js";
 import { getPluginManifest } from "../plugins/capabilities/protocol.js";
 
 const implementationPluginNames = ["session-resources", "sessions", "memory", "vault", "channels", "execution", "lifecycle", "evaluation", "worktrees", "generations", "self-improvement", "model", "refinement", "compaction", "autonomy", "subagents", "rlm", "prompts", "auth", "mcp", "agent", "tools", "skills", "voice"] as const;
@@ -801,7 +807,7 @@ describe("plugin boundaries", () => {
       "vault",
       "vault.trusted",
     ]);
-    expect(manifest.optional.map((capability) => capability.id).sort()).toEqual(["artifacts", "channels.trusted", "observability", "self-improvement"]);
+    expect(manifest.optional.map((capability) => capability.id).sort()).toEqual(["artifacts", "channels.trusted", "observability", "runtime-settings", "self-improvement"]);
   });
 
   it("keeps Routing as a classifier rather than an execution or mutation boundary", async () => {
@@ -961,6 +967,76 @@ describe("plugin boundaries", () => {
       "channels.trusted", "events", "permissions", "permissions.trusted",
     ]);
     expect(manifest.provides.map((capability) => capability.id)).toEqual(["alerts"]);
+  });
+
+  it("keeps remote administration capabilities typed and fail-closed", async () => {
+    const diagnosticsManifest = getPluginManifest(diagnosticsPlugin)!;
+    expect(diagnosticsManifest.requires.map((capability) => capability.id).sort()).toEqual([
+      "doctor.host",
+      "observability",
+      "runtime-settings",
+    ]);
+    expect(diagnosticsManifest.provides.map((capability) => capability.id)).toEqual(["diagnostics"]);
+
+    for (const path of await sourceFiles(resolve("plugins/diagnostics"))) {
+      const source = await readFile(path, "utf8");
+      expect(source, path).not.toContain("node:child_process");
+      expect(source, path).not.toMatch(/(?:from|import\()\s*["']\.\.\/(?:agent|tools|vault|channels|execution)\//);
+    }
+
+    const hostDoctorManifest = getPluginManifest(hostDoctorPlugin)!;
+    expect(hostDoctorManifest.requires.map((capability) => capability.id).sort()).toEqual([
+      "channels",
+      "host-privileges",
+      "model-credentials",
+      "runtime-settings",
+      "sandbox.health",
+      "voice",
+    ]);
+    expect(hostDoctorManifest.provides.map((capability) => capability.id)).toEqual(["doctor.host"]);
+    const hostDoctor = await readFile(resolve("plugins/host-doctor/index.ts"), "utf8");
+    expect(hostDoctor).not.toContain("SYSTEM_ACTION_CONTRIBUTION");
+    expect(hostDoctor).not.toContain("sudo");
+
+    const hostPrivilegesManifest = getPluginManifest(hostPrivilegesPlugin)!;
+    expect(hostPrivilegesManifest.requires.map((capability) => capability.id)).toEqual(["runtime-settings"]);
+    expect(hostPrivilegesManifest.provides.map((capability) => capability.id)).toEqual(["host-privileges"]);
+    const privileged = await readFile(resolve("plugins/host-privileges/privileged.ts"), "utf8");
+    expect(privileged).toContain('"voice-deps"');
+    expect(privileged).not.toContain("NOPASSWD: ALL");
+    expect(privileged).not.toContain("sudo -S");
+
+    const sandboxManifest = getPluginManifest(sandboxPlugin)!;
+    expect(sandboxManifest.optional.map((capability) => capability.id).sort()).toEqual(["observability", "runtime-settings"]);
+    expect(sandboxManifest.provides.map((capability) => capability.id).sort()).toEqual(["sandbox", "sandbox.health"]);
+
+    const skillsManifest = getPluginManifest(skillsPlugin)!;
+    expect(skillsManifest.requires.map((capability) => capability.id).sort()).toEqual(["artifacts", "permissions"]);
+    expect(skillsManifest.optional.map((capability) => capability.id)).toEqual(["runtime-settings"]);
+
+    const voiceManifest = getPluginManifest(voicePlugin)!;
+    expect(voiceManifest.requires.map((capability) => capability.id).sort()).toEqual([
+      "model-credentials",
+      "vault",
+      "vault.trusted",
+    ]);
+    expect(voiceManifest.optional.map((capability) => capability.id).sort()).toEqual([
+      "artifacts",
+      "host-privileges",
+      "observability",
+      "protected-credentials",
+      "runtime-settings",
+    ]);
+
+    const selfImprovementManifest = getPluginManifest(selfImprovementPlugin)!;
+    expect(selfImprovementManifest.optional.map((capability) => capability.id).sort()).toEqual([
+      "artifacts",
+      "channels.trusted",
+      "diagnostics",
+      "mcp",
+      "mcp.trusted",
+      "model-credentials",
+    ]);
   });
 
   it("keeps proxy transport outside agent", async () => {

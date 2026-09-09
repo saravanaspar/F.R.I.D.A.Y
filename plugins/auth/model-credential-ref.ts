@@ -15,14 +15,22 @@ export function modelProviderTypicallyNeedsApiKey(providerInput: string): boolea
   return provider.startsWith("custom:") || API_KEY_PROVIDERS.has(provider);
 }
 
-/** Produce the one canonical Vault ref used for a model provider's API key. */
-export function modelCredentialVaultRef(providerInput: string): string {
+function modelCredentialSegment(providerInput: string): string {
   const provider = providerInput.trim();
   if (!provider || provider.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(provider)) {
     throw new Error("provider is invalid");
   }
-  const segment = SAFE_VAULT_SEGMENT.test(provider)
+  return SAFE_VAULT_SEGMENT.test(provider)
     ? provider
     : `provider-${createHash("sha256").update(provider).digest("hex").slice(0, 48)}`;
-  return `vault://models/${segment}/api-key`;
+}
+
+/** Produce the canonical Vault ref used for a model provider's API key. */
+export function modelCredentialVaultRef(providerInput: string): string {
+  return `vault://models/${modelCredentialSegment(providerInput)}/api-key`;
+}
+
+/** Produce the canonical Vault ref used for a model provider's OAuth credential bundle. */
+export function modelOAuthCredentialVaultRef(providerInput: string): string {
+  return `vault://models/${modelCredentialSegment(providerInput)}/oauth`;
 }

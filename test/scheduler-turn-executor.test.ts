@@ -11,11 +11,13 @@ import {
 } from "../plugins/scheduler/contract.js";
 import { createSchedulerService } from "../plugins/scheduler/scheduler.js";
 import {
+  createSchedulerModelPlanner,
   createSchedulerTurnExecutor,
   installScheduledActionDispatcher,
   type SchedulerTurnPlan,
 } from "../plugins/scheduler/turn-executor.js";
 import type { TurnExecutionContext } from "../plugins/turn-loop/contract.js";
+import type { ModelService } from "../plugins/model/contract.js";
 
 const roots: string[] = [];
 
@@ -79,6 +81,39 @@ function trustedPermissions(systemRuns: string[]): PermissionsTrustedService {
 }
 
 describe("scheduler turn executor", () => {
+  it("uses the routing model for scheduling in router-only bootstrap mode", async () => {
+    const names = [
+      "FRIDAY_MODEL_PROVIDER", "FRIDAY_MODEL_ID",
+      "FRIDAY_ROUTING_PROVIDER", "FRIDAY_ROUTING_MODEL_ID",
+      "FRIDAY_SCHEDULER_PROVIDER", "FRIDAY_SCHEDULER_MODEL_ID",
+    ] as const;
+    const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    const selected: Array<{ provider: string; id: string }> = [];
+    try {
+      delete process.env.FRIDAY_MODEL_PROVIDER;
+      delete process.env.FRIDAY_MODEL_ID;
+      delete process.env.FRIDAY_SCHEDULER_PROVIDER;
+      delete process.env.FRIDAY_SCHEDULER_MODEL_ID;
+      process.env.FRIDAY_ROUTING_PROVIDER = "router-provider";
+      process.env.FRIDAY_ROUTING_MODEL_ID = "router-model";
+      const models = {
+        getModel(provider: string, id: string) { selected.push({ provider, id }); return { provider, id }; },
+        async completeSimple() { return { content: [{ type: "text", text: JSON.stringify({ operation: "list" }) }], stopReason: "stop" }; },
+        parseJsonWithRepair(text: string) { return JSON.parse(text) as unknown; },
+      } as unknown as ModelService;
+      await expect(createSchedulerModelPlanner(models)({
+        text: "list reminders", now: new Date().toISOString(), timezone: "UTC", actions: [], tasks: [],
+      })).resolves.toEqual({ operation: "list" });
+      expect(selected).toEqual([{ provider: "router-provider", id: "router-model" }]);
+    } finally {
+      for (const name of names) {
+        const value = previous[name];
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
   it("creates a host-bound scheduled action and executes it later as the Scheduler system principal", async () => {
     let current = new Date("2026-08-19T12:00:00.000Z");
     const ids = ["task-1", "lease-1", "run-1"];

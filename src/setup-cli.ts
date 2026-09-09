@@ -1,82 +1,17 @@
-import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, copyFile, mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { runOnboarding } from "./onboarding.js";
+import { runOnboarding, runRouterBootstrap, type OnboardingIO } from "./onboarding.js";
 import { runOnboardingCli } from "./cli.js";
 import { getFridayHome, readRuntimeSettings, updateRuntimeSettings } from "../plugins/runtime-settings/runtime-env.js";
 import { runVoiceSetup } from "./voice-setup.js";
-import { installFridayPrivilegeBroker } from "./privileged-setup.js";
+import { installFridayPrivilegeBroker } from "../plugins/host-privileges/privileged.js";
+import { setupExecutionPython } from "../plugins/execution/setup.js";
+import { setupWhatsApp } from "../plugins/channels/tooling.js";
+import { createTerminalOnboardingIO } from "./terminal-setup-ui.js";
+import { initializeOnboardingState, updateOnboardingStep, type OnboardingStepId } from "../plugins/runtime-settings/onboarding-state.js";
+import type { HostPrivilegeMode } from "../plugins/runtime-settings/runtime-env.js";
 import { selectSandboxProvider } from "../plugins/sandbox/providers/index.js";
-
-function bundledRoot(): string | undefined {
-  const value = process.env.FRIDAY_BUNDLED_ROOT?.trim();
-  return value ? resolve(value) : undefined;
-}
-
-function toolingRoot(component: string): string {
-  return join(getFridayHome(process.env), "tooling", component);
-}
-
-function whatsappAssetsRoot(): string {
-  return bundledRoot()
-    ? join(bundledRoot()!, "channels", "whatsapp")
-    : resolve("plugins", "channels", "runtime", "bridge", "whatsapp");
-}
-
-async function run(command: string, args: readonly string[], cwd?: string): Promise<void> {
-  await new Promise<void>((resolveRun, rejectRun) => {
-    const child = spawn(command, [...args], { cwd, stdio: "inherit", env: process.env });
-    child.once("error", rejectRun);
-    child.once("exit", (code, signal) => {
-      if (code === 0) resolveRun();
-      else rejectRun(new Error(`${command} failed${signal ? ` with ${signal}` : ` with exit code ${code ?? "unknown"}`}`));
-    });
-  });
-}
-
-function commandAvailable(command: string, args: readonly string[] = ["--version"]): boolean {
-  const result = spawnSync(command, [...args], { stdio: "ignore", windowsHide: true });
-  return result.status === 0 && result.error === undefined;
-}
-
-function python311Available(command: string, prefix: readonly string[] = []): boolean {
-  return commandAvailable(command, [
-    ...prefix,
-    "-c",
-    "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)",
-  ]);
-}
-
-async function setupExecutionPython(): Promise<void> {
-  const root = toolingRoot("execution-python");
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  await chmod(root, 0o700);
-  const venv = join(root, "venv");
-  const python = process.platform === "win32" ? join(venv, "Scripts", "python.exe") : join(venv, "bin", "python");
-  const dependencies = ["ipykernel==6.30.1", "dill==0.4.0"] as const;
-  process.stdout.write("[execution] provisioning the private Python 3.11 kernel environment\n");
-
-  if (commandAvailable("uv")) {
-    await run("uv", ["venv", venv, "--python", "3.11", "--clear"]);
-    await run("uv", ["pip", "install", "--python", python, ...dependencies]);
-  } else {
-    const candidates: readonly { command: string; args: readonly string[] }[] = process.platform === "win32"
-      ? [
-          { command: "py", args: ["-3.11"] },
-          { command: "python", args: [] },
-        ]
-      : [
-          { command: "python3.11", args: [] },
-          { command: "python3", args: [] },
-        ];
-    const selected = candidates.find((candidate) => python311Available(candidate.command, candidate.args));
-    if (!selected) throw new Error("Python 3.11 or uv is required for the execution kernel");
-    await run(selected.command, [...selected.args, "-m", "venv", "--clear", venv]);
-    await run(python, ["-m", "pip", "install", "--disable-pip-version-check", ...dependencies]);
-  }
-  process.stdout.write(`[execution] ready: ${python}\n`);
-}
+import { recordSetupLog } from "./setup-log.js";
 
 async function setupSelfRepository(path: string): Promise<void> {
   const repository = resolve(path);
@@ -90,27 +25,7 @@ async function setupSelfRepository(path: string): Promise<void> {
   process.stdout.write("Restart FRIDAY to apply the saved self-improvement source.\n");
 }
 
-async function setupWhatsApp(): Promise<void> {
-  const source = whatsappAssetsRoot();
-  if (!existsSync(join(source, "package.json")) || !existsSync(join(source, "package-lock.json")) || !existsSync(join(source, "bridge.mjs"))) {
-    throw new Error(`WhatsApp bridge assets are missing: ${source}`);
-  }
-  if (!commandAvailable("node") || !commandAvailable("npm")) {
-    throw new Error("WhatsApp bridge setup requires a host Node.js/npm installation");
-  }
-  const root = toolingRoot("whatsapp");
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  await chmod(root, 0o700);
-  await rm(join(root, "node_modules"), { recursive: true, force: true });
-  for (const file of ["bridge.mjs", "package.json", "package-lock.json"] as const) {
-    await copyFile(join(source, file), join(root, file));
-    await chmod(join(root, file), 0o600);
-  }
-  await run("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], root);
-  process.stdout.write(`[whatsapp] ready: ${root}\n`);
-}
-
-async function setupSandbox(): Promise<void> {
+export async function setupSandbox(): Promise<void> {
   const provider = selectSandboxProvider();
   const result = await provider.setup();
   const artifact = result.image ? ` · ${result.image}` : "";
@@ -122,45 +37,203 @@ function setupHelp(): void {
     "FRIDAY setup",
     "",
     "Usage:",
-    "  friday setup                    First run: model, timezone, credential, and mandatory channel setup",
+    "  friday setup                    First run: Quick or Custom; router + trusted operator channel + privilege policy are mandatory",
     "  friday setup [model options]    Scriptable model/routing/permission configuration",
     "  friday setup execution-python   Provision the private IPython kernel environment",
     "  friday setup sandbox            Prepare the configured sandbox provider and its approved image",
     "  friday setup whatsapp           Install the optional WhatsApp bridge dependencies",
     "  friday setup voice              Configure hosted/local STT + TTS and automatically provision selected local models",
-    "  friday setup privileges         Install FRIDAY's narrowly-scoped host privilege broker (never an arbitrary model sudo shell)",
+    "  friday setup privileges [broker|none]  Locally enable the restricted privilege broker or disable all FRIDAY sudo operations",
     "  friday setup self-repository <path>  Save the canonical FRIDAY source checkout for self-improvement",
     "  friday setup --help",
     "",
-    "First-run setup requires the main model, its credential when needed, a timezone, and at least one enabled ingress channel.",
-    "Routing defaults to the main model and permissions default to ask. Additional channels, sandbox, Python,",
-    "MCP servers, and skills can be configured later.",
+    "First-run setup requires a routing model, its credential when needed, one trusted operator channel, and a host privilege policy.",
+    "Quick setup stops after those mandatory items so onboarding can continue from the paired channel. Custom setup offers",
+    "the existing terminal model/runtime/voice/sandbox/Python sections as optional steps. The main reasoning model is optional during bootstrap.",
     "",
-    "When FRIDAY is running, MCP, skills, and other plugin-owned operations can be configured from",
-    "trusted ingress channels. The local terminal remains the setup/foreground runtime surface, not chat ingress.",
+    "When FRIDAY is running, onboarding and plugin-owned administration can continue from trusted ingress channels.",
+    "Local setup remains fully available; sudo authentication and privilege-broker installation are always terminal-only.",
     "",
   ].join("\n"));
+}
+
+async function chooseSetupMode(io: OnboardingIO): Promise<"quick" | "custom"> {
+  if (io.select) {
+    const value = await io.select({
+      message: "Setup style",
+      searchable: false,
+      initialValue: "quick",
+      maxItems: 2,
+      choices: [
+        { value: "quick", label: "Quick setup", hint: "mandatory local bootstrap, finish from your trusted channel" },
+        { value: "custom", label: "Custom setup", hint: "mandatory bootstrap first, then optional terminal setup" },
+      ],
+    });
+    return value === "custom" ? "custom" : "quick";
+  }
+  const answer = (await io.question("Setup style [quick/custom] [quick]: ")).trim().toLowerCase();
+  if (!answer || answer === "quick" || answer === "q") return "quick";
+  if (answer === "custom" || answer === "c") return "custom";
+  throw new Error("setup style must be quick or custom");
+}
+
+async function chooseHostPrivilegeMode(io: OnboardingIO): Promise<HostPrivilegeMode> {
+  if (io.select) {
+    const value = await io.select({
+      message: "Privileged host operations",
+      searchable: false,
+      initialValue: "none",
+      maxItems: 2,
+      choices: [
+        {
+          value: "broker",
+          label: "Allow approved FRIDAY operations",
+          hint: "restricted root-owned broker; never arbitrary sudo",
+        },
+        {
+          value: "none",
+          label: "Never allow privileged operations",
+          hint: "FRIDAY returns manual commands when root is required",
+        },
+      ],
+    });
+    return value === "broker" ? "broker" : "none";
+  }
+  const answer = (await io.question("Privileged host operations [broker/none] [none]: ")).trim().toLowerCase();
+  if (!answer || answer === "none" || answer === "n") return "none";
+  if (answer === "broker" || answer === "b") return "broker";
+  throw new Error("privileged host operations must be broker or none");
+}
+
+async function optionalStep(
+  io: OnboardingIO,
+  home: string,
+  step: OnboardingStepId,
+  message: string,
+  operation: () => Promise<void>,
+): Promise<void> {
+  const approved = io.confirm
+    ? await io.confirm(message, false)
+    : ["y", "yes"].includes((await io.question(`${message} [y/N] `)).trim().toLowerCase());
+  if (!approved) {
+    await updateOnboardingStep(step, "skipped", home);
+    return;
+  }
+  await operation();
+  await updateOnboardingStep(step, "complete", home);
+}
+
+async function runCustomOptionalSetup(io: OnboardingIO, home: string, hostPrivilegeMode: HostPrivilegeMode): Promise<void> {
+  const configureCore = io.confirm
+    ? await io.confirm("Configure the main reasoning model, permissions, timezone, and additional channels in this terminal?", false)
+    : ["y", "yes"].includes((await io.question("Configure main model/runtime settings now? [y/N] ")).trim().toLowerCase());
+  if (configureCore) {
+    await runOnboarding({ home, io, configureChannels: true, setupSandbox: false, hostPrivilegeMode });
+    for (const step of ["mainModel", "permissions", "timezone"] as const) await updateOnboardingStep(step, "complete", home);
+  } else {
+    for (const step of ["mainModel", "permissions", "timezone"] as const) await updateOnboardingStep(step, "skipped", home);
+  }
+
+  await optionalStep(io, home, "voice", "Configure voice now?", async () => {
+    await runVoiceSetup({ home, io });
+  });
+  await optionalStep(io, home, "sandbox", "Prepare the coding sandbox now?", setupSandbox);
+  await optionalStep(io, home, "executionPython", "Provision the private execution Python environment now?", async () => { await setupExecutionPython(home); });
+
+  const selfRepo = io.confirm
+    ? await io.confirm("Configure the self-improvement source repository now?", false)
+    : ["y", "yes"].includes((await io.question("Configure self-improvement source repository now? [y/N] ")).trim().toLowerCase());
+  if (selfRepo) {
+    const value = io.text ? await io.text("FRIDAY source checkout path", process.cwd()) : await io.question(`FRIDAY source checkout path [${process.cwd()}]: `);
+    await setupSelfRepository(value.trim() || process.cwd());
+    await updateOnboardingStep("selfRepository", "complete", home);
+  } else {
+    await updateOnboardingStep("selfRepository", "skipped", home);
+  }
+
+  // MCP and Skills already expose typed trusted-channel administration. Custom
+  // setup keeps them explicitly visible and optional rather than inventing a
+  // second local configuration surface that did not exist before v1.0.3.
+  const optionalAdminNote = [
+    "MCP and Skills remain optional. They do not have a separate terminal wizard,",
+    "so this Custom pass leaves them for normal typed administration after FRIDAY starts.",
+    "You can configure them from the trusted channel, or use their existing local/runtime actions later.",
+  ].join(" ");
+  if (io.info) io.info(optionalAdminNote);
+  else io.write(`${optionalAdminNote}\n`);
+  await updateOnboardingStep("mcp", "skipped", home);
+  await updateOnboardingStep("skills", "skipped", home);
 }
 
 async function runInteractiveSetup(): Promise<void> {
   const home = getFridayHome(process.env);
   const existing = await readRuntimeSettings(home);
-  if (!existing) {
-    await runOnboarding({
-      home,
-      useMainForRouting: true,
-      permission: "ask",
-      configureChannels: true,
-      setupSandbox: false,
-      requireMainCredential: true,
-    });
+  if (existing) {
+    // Existing installations retain the full local onboarding flow. On the
+    // first v1.0.3 setup we can derive router/operator completion from v1.0.2,
+    // but the new host-privilege policy still requires a conscious LOCAL
+    // operator decision before it is marked complete.
+    const onboarding = await import("../plugins/runtime-settings/onboarding-state.js");
+    const currentState = await onboarding.readOnboardingState(home);
+    const io = createTerminalOnboardingIO();
+    try {
+      if (!currentState) {
+        await onboarding.initializeOnboardingState("custom", home);
+        await onboarding.updateOnboardingStep("router", "complete", home);
+        await onboarding.updateOnboardingStep("operatorChannel", "complete", home);
+        const hostPrivilegeMode = await chooseHostPrivilegeMode(io);
+        if (hostPrivilegeMode === "broker") await installFridayPrivilegeBroker();
+        await updateRuntimeSettings({ hostPrivilegeMode }, home);
+        await onboarding.updateOnboardingStep("privilegePolicy", "complete", home);
+      }
+      await runOnboarding({ home, io });
+      await onboarding.updateOnboardingStep("mainModel", "complete", home);
+      await onboarding.updateOnboardingStep("permissions", "complete", home);
+      await onboarding.updateOnboardingStep("timezone", "complete", home);
+    } finally {
+      io.close?.();
+    }
     return;
   }
 
-  await runOnboarding({ home });
+  const io = createTerminalOnboardingIO();
+  try {
+    const mode = await chooseSetupMode(io);
+    await initializeOnboardingState(mode, home);
+
+    // The privilege decision is deliberately local-only. If broker mode is
+    // selected, sudo authentication happens here in the host terminal and is
+    // never captured by FRIDAY or a remote channel.
+    const hostPrivilegeMode = await chooseHostPrivilegeMode(io);
+    if (hostPrivilegeMode === "broker") await installFridayPrivilegeBroker();
+    await updateOnboardingStep("privilegePolicy", "complete", home);
+
+    await runRouterBootstrap({ home, io, hostPrivilegeMode, permission: "ask" });
+    await updateOnboardingStep("router", "complete", home);
+    await updateOnboardingStep("operatorChannel", "complete", home);
+
+    if (mode === "quick") {
+      io.outro?.("Mandatory setup complete", [
+        "Router, trusted operator channel, and host privilege policy are ready.",
+        "Start FRIDAY, then send `continue setup` from the paired trusted channel.",
+        "The full local setup remains available later with `friday setup` and component commands.",
+      ]);
+      return;
+    }
+
+    await runCustomOptionalSetup(io, home, hostPrivilegeMode);
+    const state = await import("../plugins/runtime-settings/onboarding-state.js").then((module) => module.readOnboardingState(home));
+    io.outro?.("Custom setup complete", [
+      `Onboarding phase: ${state?.phase ?? "unknown"}`,
+      "Skipped optional items can still be configured later locally or from the trusted channel.",
+      "Run `friday` to start.",
+    ]);
+  } finally {
+    io.close?.();
+  }
 }
 
-export async function runSetupCli(args: readonly string[]): Promise<void> {
+async function runSetupCliInternal(args: readonly string[]): Promise<void> {
   const [component, ...rest] = args;
   if (component === undefined) return runInteractiveSetup();
   if (component === "--help" || component === "-h" || component === "help") {
@@ -173,15 +246,42 @@ export async function runSetupCli(args: readonly string[]): Promise<void> {
     if (rest.length !== 1) throw new Error("Usage: friday setup self-repository <path>");
     return setupSelfRepository(rest[0]!);
   }
-  if (rest.length > 0) throw new Error(`Unexpected setup arguments: ${rest.join(" ")}`);
-  if (component === "execution-python") return setupExecutionPython();
-  if (component === "whatsapp") return setupWhatsApp();
-  if (component === "voice") return runVoiceSetup({ home: getFridayHome(process.env) }).then(() => undefined);
   if (component === "privileges") {
-    await installFridayPrivilegeBroker();
-    process.stdout.write("[privileges] ready: FRIDAY may run only explicitly allowlisted privileged setup operations; the model has no sudo tool or password access.\n");
+    if (rest.length > 1) throw new Error("Usage: friday setup privileges [broker|none]");
+    const mode = rest[0]?.trim().toLowerCase() || "broker";
+    if (mode !== "broker" && mode !== "none") throw new Error("Usage: friday setup privileges [broker|none]");
+    if (mode === "broker") await installFridayPrivilegeBroker();
+    const home = getFridayHome(process.env);
+    if (await readRuntimeSettings(home)) await updateRuntimeSettings({ hostPrivilegeMode: mode }, home);
+    process.stdout.write(mode === "broker"
+      ? "[privileges] policy=broker: FRIDAY may run only explicitly allowlisted privileged helper operations; the model has no arbitrary sudo tool or password access.\n"
+      : "[privileges] policy=none: FRIDAY will not invoke sudo; root-required operations must be run manually on this host.\n");
     return;
   }
+  if (rest.length > 0) throw new Error(`Unexpected setup arguments: ${rest.join(" ")}`);
+  if (component === "execution-python") { await setupExecutionPython(); return; }
+  if (component === "whatsapp") { await setupWhatsApp(); return; }
+  if (component === "voice") return runVoiceSetup({ home: getFridayHome(process.env) }).then(() => undefined);
   if (component === "sandbox") return setupSandbox();
   throw new Error(`Unknown setup component: ${component}. Run \`friday setup --help\`.`);
+}
+
+
+export async function runSetupCli(args: readonly string[]): Promise<void> {
+  const operation = args.length === 0 ? "interactive" : args.join(" ").slice(0, 256);
+  const started = Date.now();
+  await recordSetupLog({ component: "setup", operation, outcome: "started" });
+  try {
+    await runSetupCliInternal(args);
+    await recordSetupLog({ component: "setup", operation, outcome: "success", durationMs: Date.now() - started });
+  } catch (error) {
+    await recordSetupLog({
+      component: "setup",
+      operation,
+      outcome: "failure",
+      durationMs: Date.now() - started,
+      message: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+    });
+    throw error;
+  }
 }

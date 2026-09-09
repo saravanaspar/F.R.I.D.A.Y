@@ -43,16 +43,19 @@ Those belong to plugins.
 ## Setup Rule
 
 `friday setup` is a fixed, non-extensible host setup surface, not FRIDAY's runtime
-entrypoint. On first run it asks only for the minimum boot configuration: the
-main model plus a credential when that provider requires one, the IANA timezone,
-and at least one ingress channel with one explicitly confirmed exact operator
-identity. `allowAll` transport admission never implies operator authority. Safe
-defaults use the main model for routing and `ask` permission mode. Rerunning setup
-may collect and persist bounded non-secret runtime defaults and perform explicitly
-approved host provisioning such as building the approved local sandbox image or
-preflighting optional Voice STT/TTS providers. Setup also persists a dedicated
-`FRIDAY_WORKSPACE` outside `FRIDAY_HOME`; the runtime enters it before plugin
-activation. Secrets remain Vault-owned.
+entrypoint. On first run its mandatory bootstrap establishes the routing/system
+model plus a credential when that provider requires one, at least one ingress
+channel with one explicitly confirmed exact operator identity, and an explicit
+host-privilege policy (`broker` or `none`). The IANA timezone and dedicated
+`FRIDAY_WORKSPACE` are persisted as bounded runtime settings. The main reasoning
+model is optional during router-only bootstrap and can be configured later; a
+legacy main-only installation may derive routing from the main pair until a
+dedicated router is selected. `allowAll` transport admission never implies
+operator authority, and agent permission mode remains independent from host
+privilege. Rerunning setup may perform explicitly approved host provisioning such
+as building the approved local sandbox image or preflighting optional Voice
+STT/TTS providers. The workspace remains outside `FRIDAY_HOME`; the runtime enters
+it before plugin activation. Secrets remain Vault-owned.
 
 Setup must not load the runtime plugin graph, expose a dynamic command
 registry, dispatch plugin operations, or become a second orchestration surface.
@@ -62,6 +65,25 @@ not consume stdin as conversational ingress. Human turns arrive through configur
 Channels transports such as Telegram or Discord. There is no conversational CLI
 transport; local interactive administration belongs to `friday setup` and
 `friday doctor`, not the runtime conversation path.
+
+## Routing / Main-Model Ownership Rule
+
+Routing is classification and control-plane selection, not a cheaper general
+assistant. Classification is by ownership rather than apparent difficulty:
+
+- `system` operates F.R.I.D.A.Y itself through typed plugin-owned actions;
+- `scheduler` owns bounded parsing/management of concrete schedules; and
+- every ordinary user objective, including short or simple one-off work, is an
+  Agent destination executed with the main reasoning model.
+
+`transient:utility` is still an Agent/main-model path; it only avoids creating a
+durable project session. A System result may be returned raw or passed through a
+separate bounded presenter call using the System/routing model when no new
+reasoning is allowed. Requests for causal analysis, non-obvious diagnosis or
+substantive interpretation of system evidence require the main reasoning model.
+Router-only mode therefore supports setup/administration/Doctor/scheduling but
+never silently substitutes the router for coding, research, planning, project
+work or general conversation.
 
 ## Composition Kernel Rule
 
@@ -93,11 +115,14 @@ Implementation-only classes, registries, transports, persistence helpers, and te
 fixtures remain behind the owner boundary.
 
 This contract surface is also FRIDAY's reuse catalog for self-improvement. Feasibility
-review must inspect configured capability contracts before proposing code, and an
-autonomous candidate must prefer a declared capability call over duplicating behavior.
-When the needed semantic operation is absent, extend the closest owning contract only
-if that responsibility genuinely belongs there; otherwise use an existing contribution
-seam, MCP boundary, or pass the Plugin Admission Test for a distinct plugin.
+review must inspect every configured ordinary contract before proposing code. The
+catalog distinguishes callable capabilities from typed contributions and hooks, exposes
+bounded public type/API detail for relevant owners, and fails closed if configured
+contract discovery is incomplete. An autonomous candidate must prefer a declared
+capability call or existing contribution/hook seam over duplicating behavior. When the
+needed semantic operation or extension point is absent, extend the closest owning
+contract only if that responsibility genuinely belongs there; otherwise use the MCP
+boundary or pass the Plugin Admission Test for a distinct plugin.
 
 ### Plugin Admission Test
 

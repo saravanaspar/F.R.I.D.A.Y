@@ -14,7 +14,7 @@ import { MEMORY_CAPABILITY } from "../plugins/memory/contract.js";
 import type { ObservabilityService } from "../plugins/observability/contract.js";
 import * as modelRuntime from "@friday/model";
 import { MODEL_CAPABILITY, type ModelService } from "../plugins/model/contract.js";
-import { principalStateRoot } from "../plugins/principal-scope.js";
+import { principalScope, principalStateRoot } from "../plugins/principal-scope.js";
 import promptsPlugin from "../plugins/prompts/index.js";
 import { PROMPTS_CAPABILITY } from "../plugins/prompts/contract.js";
 import sessionResourcesPlugin from "../plugins/session-resources/index.js";
@@ -98,6 +98,60 @@ afterEach(() => {
 });
 
 describe("Turn Loop agent executor", () => {
+  it("returns a bootstrap response for a new general-agent turn when no main model is configured", async () => {
+    delete process.env.FRIDAY_MODEL_PROVIDER;
+    delete process.env.FRIDAY_MODEL_ID;
+    const executor = createAgentTurnExecutor({} as never, { stateDir: tempRoot() });
+    try {
+      const result = await executor.execute({
+        turn: channelTurn("router-only-1", "Explain this architecture", "operator-1"),
+        decision: decision("session:new"),
+      });
+      expect(result.text).toContain("router-only bootstrap mode");
+      expect(result.text).toContain("continue setup");
+      expect(result.metadata).toEqual({ routerOnly: true });
+    } finally {
+      await executor.dispose();
+    }
+  });
+
+  it("returns the same router-only guidance for an existing session that has no pinned model", async () => {
+    delete process.env.FRIDAY_MODEL_PROVIDER;
+    delete process.env.FRIDAY_MODEL_ID;
+    const stateDir = tempRoot();
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(sessionsPlugin);
+    await friday.activatePlugin(promptsPlugin);
+    await friday.activatePlugin(modelPlugin);
+    await friday.activatePlugin(agentPlugin);
+    const sessions = requireCapability(SESSIONS_CAPABILITY);
+    const owner = channelTurn("owner-scope", "", "operator-1").principal;
+    const session = sessions.SessionManager.create(process.cwd(), join(stateDir, "sessions"), { ownerScope: principalScope(owner) });
+    session.flushNow();
+    const sessionId = session.getSessionId();
+    const executor = createAgentTurnExecutor({
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: requireCapability(MODEL_CAPABILITY),
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions,
+      tools: { createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService,
+    }, { stateDir });
+    try {
+      const result = await executor.execute({
+        turn: channelTurn("router-only-existing", "continue this old session", "operator-1"),
+        decision: decision(`session:${sessionId}`),
+      });
+      expect(result.text).toContain("router-only bootstrap mode");
+      expect(result.metadata).toEqual({ routerOnly: true });
+    } finally {
+      await executor.dispose();
+      await friday.dispose();
+    }
+  });
+
   it("evaluates model-request policy immediately before a job model call", async () => {
     process.env.FRIDAY_MODEL_PROVIDER = "faux";
     process.env.FRIDAY_MODEL_ID = "faux-1";

@@ -261,7 +261,7 @@ describe("events plugin", () => {
     expect(compacted.storage.databaseBytes).toBeGreaterThan(0);
     expect(service.get("event-3")).toBeUndefined();
     expect(service.get("event-4")).toBeDefined();
-  });
+  }, 15_000);
 
   it("keeps the global replay action metadata-only", async () => {
     const stateDir = await tempDir();

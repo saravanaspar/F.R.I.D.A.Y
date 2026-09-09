@@ -2,15 +2,15 @@ import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from "node:f
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { normalizeVoiceSettings, type VoiceSettings } from "@friday/voice";
-import { getFridayHome } from "../runtime-settings/runtime-env.js";
+import { voiceFridayHome } from "./paths.js";
 
 const SETTINGS_FILE = "settings.json";
 
-function voiceRoot(home = getFridayHome()): string {
+function voiceRoot(home = voiceFridayHome()): string {
   return join(resolve(home), "voice");
 }
 
-export function getVoiceSettingsPath(home = getFridayHome()): string {
+export function getVoiceSettingsPath(home = voiceFridayHome()): string {
   return join(voiceRoot(home), SETTINGS_FILE);
 }
 
@@ -33,7 +33,7 @@ async function ensurePrivateDirectory(path: string, create: boolean): Promise<bo
   }
 }
 
-export async function readVoiceSettings(home = getFridayHome()): Promise<VoiceSettings | undefined> {
+export async function readVoiceSettings(home = voiceFridayHome()): Promise<VoiceSettings | undefined> {
   const root = voiceRoot(home);
   if (!(await ensurePrivateDirectory(root, false))) return undefined;
   const path = getVoiceSettingsPath(home);
@@ -55,7 +55,7 @@ export async function readVoiceSettings(home = getFridayHome()): Promise<VoiceSe
   return normalizeVoiceSettings(parsed);
 }
 
-export async function saveVoiceSettings(settings: VoiceSettings, home = getFridayHome()): Promise<VoiceSettings> {
+export async function saveVoiceSettings(settings: VoiceSettings, home = voiceFridayHome()): Promise<VoiceSettings> {
   const normalized = normalizeVoiceSettings(settings);
   const root = voiceRoot(home);
   await ensurePrivateDirectory(root, true);

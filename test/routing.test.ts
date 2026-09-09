@@ -76,6 +76,10 @@ describe("routing plugin", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.systemPrompt).toContain("Your only job is to choose WHERE");
     expect(requests[0]?.systemPrompt).toContain("Never invent a destination id");
+    expect(requests[0]?.systemPrompt).toContain("Classify by ownership, not by apparent difficulty");
+    expect(requests[0]?.systemPrompt).toContain("Everything else is ordinary user work and must go to an agent destination");
+    expect(requests[0]?.systemPrompt).toContain("transient:utility destination is still an Agent/main-reasoning-model execution path");
+    expect(requests[0]?.systemPrompt).toContain("Never treat it as permission for the routing model to answer");
     const payload = JSON.parse(requests[0]!.userPrompt) as Record<string, any>;
     expect(payload.message.text).toBe("Continue the PSCLS byte-text design.");
     expect(payload.memoryHints).toEqual([expect.objectContaining({ id: "pscls-text", title: "PSCLS text representation" })]);

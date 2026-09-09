@@ -14,6 +14,7 @@ import {
   normalizeRuntimeTimezone,
   readRuntimeSettings,
   saveRuntimeSettings,
+  type HostPrivilegeMode,
   type RuntimePermissionMode,
   type RuntimeSettings,
 } from "../plugins/runtime-settings/runtime-env.js";
@@ -79,6 +80,8 @@ export interface OnboardingOptions {
   readonly routingModel?: string | undefined;
   readonly useMainForRouting?: boolean | undefined;
   readonly permission?: string | undefined;
+  /** Local-only host privilege boundary. Defaults fail-closed to none. */
+  readonly hostPrivilegeMode?: HostPrivilegeMode | undefined;
   readonly timezone?: string | undefined;
   readonly setupSandbox?: boolean | undefined;
   readonly configureChannels?: boolean | undefined;
@@ -90,6 +93,18 @@ export interface OnboardingOptions {
   readonly ensureSandbox?: (() => OnboardingSandboxSetupResult | Promise<OnboardingSandboxSetupResult>) | undefined;
   /** Test/integration seam for probing a custom OpenAI-compatible descriptor before registration. */
   readonly verifyCustomModel?: ((descriptor: ReturnType<typeof toCustomModelDescriptor>, apiKey?: string) => Promise<void>) | undefined;
+}
+
+export interface RouterBootstrapOptions {
+  readonly home?: string | undefined;
+  readonly routingProvider?: string | undefined;
+  readonly routingModel?: string | undefined;
+  readonly permission?: string | undefined;
+  readonly hostPrivilegeMode: HostPrivilegeMode;
+  readonly timezone?: string | undefined;
+  readonly io?: OnboardingIO | undefined;
+  readonly catalog?: OnboardingModelCatalog | undefined;
+  readonly verifyCustomModel?: OnboardingOptions["verifyCustomModel"] | undefined;
 }
 
 function nonEmpty(value: string | undefined, label: string, maximum = 256): string {
@@ -600,12 +615,13 @@ async function maybeSetupSandbox(
 }
 
 function summary(io: OnboardingIO, settings: RuntimeSettings): void {
+  const main = settings.modelProvider && settings.modelId ? `${settings.modelProvider}/${settings.modelId}` : "not configured (router-only)";
   const routing = settings.routingProvider && settings.routingModelId
     ? `${settings.routingProvider}/${settings.routingModelId}`
-    : "main model";
+    : "not configured";
   if (io.outro) {
     io.outro("FRIDAY is ready", [
-      `Model       ${settings.modelProvider}/${settings.modelId}`,
+      `Model       ${main}`,
       `Routing     ${routing}`,
       `Permissions ${settings.permissionMode}`,
       `Timezone    ${settings.timezone}`,
@@ -617,13 +633,76 @@ function summary(io: OnboardingIO, settings: RuntimeSettings): void {
   io.write([
     "",
     "Configuration summary",
-    `  Main model:    ${settings.modelProvider}/${settings.modelId}`,
+    `  Main model:    ${main}`,
     `  Routing model: ${routing}`,
     `  Permissions:   ${settings.permissionMode}`,
     `  Timezone:      ${settings.timezone}`,
     `  Workspace:     ${settings.workspaceRoot ?? "default"}`,
     "",
   ].join("\n"));
+}
+
+/**
+ * Minimal first-run bootstrap used by v1.0.3 Quick/Custom setup. It deliberately
+ * configures only the routing/system model plus the mandatory initial trusted
+ * operator channel. A main reasoning model may be added later locally or from
+ * that trusted channel.
+ */
+export async function runRouterBootstrap(options: RouterBootstrapOptions): Promise<OnboardingSettings> {
+  const ownsTerminalIO = options.io === undefined;
+  const io = options.io ?? createTerminalOnboardingIO();
+  try {
+    const processEnvironment = process.env;
+    const home = options.home ?? getFridayHome(processEnvironment);
+    const stored = await readRuntimeSettings(home);
+    const environment: NodeJS.ProcessEnv = { ...processEnvironment, FRIDAY_HOME: home };
+    await loadRuntimeEnvironment({ home, environment });
+    if (stored?.workspaceRoot) environment.FRIDAY_WORKSPACE = stored.workspaceRoot;
+    const workspaceRoot = await ensureFridayWorkspace(environment, home);
+    const catalog = options.catalog ?? await defaultCatalog(home);
+    if (io.isInteractive) {
+      if (io.intro) io.intro("FRIDAY · Mandatory bootstrap", "Configure the routing model and pair at least one trusted operator channel. The main reasoning model and all optional features can be configured later.");
+      else io.write("\nFRIDAY · Mandatory bootstrap\nRouter + trusted operator channel are required. Optional setup can continue later.\n\n");
+    }
+
+    const routing = await resolveSelection(
+      options.routingProvider,
+      options.routingModel,
+      environment.FRIDAY_ROUTING_PROVIDER ?? environment.FRIDAY_MODEL_PROVIDER,
+      environment.FRIDAY_ROUTING_MODEL_ID ?? environment.FRIDAY_MODEL_ID,
+      io,
+      catalog,
+      home,
+      "Routing model",
+      options.verifyCustomModel,
+    );
+    if (!routing.provider.startsWith("custom:")) {
+      await maybeConfigureProviderCredential(routing.provider, routing.modelId, home, io, true);
+    }
+
+    const permissionMode = normalizeRuntimePermissionMode(options.permission ?? stored?.permissionMode ?? environment.FRIDAY_PERMISSION_MODE ?? "ask");
+    const timezone = normalizeRuntimeTimezone(options.timezone ?? stored?.timezone ?? environment.FRIDAY_TIMEZONE);
+    const settings: OnboardingSettings = Object.freeze({
+      ...(stored?.modelProvider && stored.modelId ? { modelProvider: stored.modelProvider, modelId: stored.modelId } : {}),
+      routingProvider: nonEmpty(routing.provider, "routing model provider"),
+      routingModelId: nonEmpty(routing.modelId, "routing model id"),
+      permissionMode,
+      hostPrivilegeMode: options.hostPrivilegeMode,
+      timezone,
+      workspaceRoot,
+      ...(stored?.selfRepository ? { selfRepository: stored.selfRepository } : {}),
+    });
+
+    // Mandatory channel pairing is completed before runtime settings are
+    // published. An aborted bootstrap can therefore never unlock remote admin.
+    const { maybeManageChannels } = await import("./onboarding-channels.js");
+    await maybeManageChannels(io, home, true, true, workspaceRoot);
+    const path = await saveRuntimeSettings(settings, home);
+    showInfo(io, `Mandatory bootstrap saved · ${path}`);
+    return settings;
+  } finally {
+    if (ownsTerminalIO) io.close?.();
+  }
 }
 
 export async function runOnboarding(options: OnboardingOptions = {}): Promise<OnboardingSettings> {
@@ -680,6 +759,7 @@ export async function runOnboarding(options: OnboardingOptions = {}): Promise<On
       modelId: nonEmpty(main.modelId, "model id"),
       ...routing,
       permissionMode,
+      hostPrivilegeMode: options.hostPrivilegeMode ?? stored?.hostPrivilegeMode ?? "none",
       timezone,
       workspaceRoot,
       // Rerunning general setup must not silently forget the canonical source

@@ -42,6 +42,21 @@ export interface SandboxProbeResult {
   readonly reason?: string | undefined;
 }
 
+/**
+ * Read-only provider health exposed to administration/diagnostics without
+ * granting sandbox execution or setup authority.
+ */
+export interface SandboxHealthSnapshot {
+  readonly provider: SandboxProviderDescriptor;
+  readonly probe: SandboxProbeResult;
+  readonly image?: string | undefined;
+  readonly repairHint: string;
+}
+
+export interface SandboxHealthService {
+  snapshot(): SandboxHealthSnapshot;
+}
+
 export interface SandboxSetupResult {
   readonly status: "already-ready" | "prepared";
   readonly providerId: string;
@@ -171,3 +186,6 @@ export function sandboxNetworkEnabled(service: SandboxService, requested = false
 
 export const SANDBOX_CAPABILITY: Capability<SandboxService> =
   defineCapability<SandboxService>("sandbox");
+
+export const SANDBOX_HEALTH_CAPABILITY: Capability<SandboxHealthService> =
+  defineCapability<SandboxHealthService>("sandbox.health");

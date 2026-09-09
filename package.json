@@ -38,6 +38,8 @@
     "version:set": "node scripts/release-version.mjs --set",
     "check:versions": "node scripts/release-version.mjs --check-packages",
     "check:architecture": "node scripts/check-plugin-boundaries.mjs && node scripts/generate-builtin-plugins.mjs --check",
+    "inspect:plugins": "node scripts/check-plugin-boundaries.mjs --catalog",
+    "inspect:plugins:json": "node scripts/check-plugin-boundaries.mjs --catalog-json",
     "generate:builtin-plugins": "node scripts/generate-builtin-plugins.mjs",
     "clean:workspace-node-modules": "node scripts/workspace-packages.mjs clean-node-modules",
     "check:workspace-node-modules": "node scripts/workspace-packages.mjs check-node-modules"

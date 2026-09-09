@@ -4,6 +4,7 @@ import { AGENT_PROMPT_SECTION_CONTRIBUTION, AGENT_TOOL_CONTRIBUTION, type AgentE
 import { ARTIFACTS_CAPABILITY } from "../artifacts/contract.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { PERMISSIONS_CAPABILITY } from "../permissions/contract.js";
+import { RUNTIME_SETTINGS_CAPABILITY } from "../runtime-settings/contract.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION, type SystemJsonObject } from "../system/contract.js";
 import { SKILLS_CAPABILITY, type SkillsService } from "./contract.js";
 import { installSkills } from "./installer.js";
@@ -19,6 +20,7 @@ function optionalString(input: Readonly<SystemJsonObject>, name: string): string
 const skillsPlugin: FridayPlugin = definePlugin({
   id: "skills",
   requires: [ARTIFACTS_CAPABILITY, PERMISSIONS_CAPABILITY],
+  optional: [RUNTIME_SETTINGS_CAPABILITY],
   provides: [SKILLS_CAPABILITY],
 }, (ctx) => {
   let revision = 0;
@@ -162,6 +164,7 @@ const skillsPlugin: FridayPlugin = definePlugin({
         context,
       });
       revision += 1;
+      await ctx.services.optional(RUNTIME_SETTINGS_CAPABILITY)?.markOnboardingStep("skills", "complete");
       return result;
     },
   });

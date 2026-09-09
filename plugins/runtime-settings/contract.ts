@@ -2,6 +2,7 @@ import type { Capability } from "../capabilities/protocol.js";
 import { defineCapability } from "../capabilities/protocol.js";
 import type { TurnFinalizerDescriptor } from "../turn-loop/contract.js";
 import type { RuntimeSettings, RuntimeSettingsPatch } from "./runtime-env.js";
+import type { OnboardingState, OnboardingStepId, OnboardingStepStatus } from "./onboarding-state.js";
 
 export interface RuntimeSettingsUpdateOptions {
   readonly restart?: boolean | undefined;
@@ -15,6 +16,8 @@ export interface RuntimeSettingsUpdateOptions {
 export interface RuntimeSettingsService {
   read(): Promise<RuntimeSettings | undefined>;
   update(patch: RuntimeSettingsPatch, options?: RuntimeSettingsUpdateOptions): Promise<RuntimeSettings>;
+  onboarding(): Promise<OnboardingState | undefined>;
+  markOnboardingStep(step: OnboardingStepId, status: OnboardingStepStatus): Promise<OnboardingState>;
 }
 
 export const RUNTIME_SETTINGS_CAPABILITY: Capability<RuntimeSettingsService> =
