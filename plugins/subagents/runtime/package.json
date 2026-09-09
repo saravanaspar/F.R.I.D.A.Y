@@ -1,6 +1,6 @@
 {
   "name": "@friday/subagents",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "FRIDAY recursive child-agent orchestration and registry",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,7 +20,7 @@
     "test": "vitest run --config vitest.config.ts --configLoader runner --no-cache"
   },
   "dependencies": {
-    "@friday/operational-errors": "1.0.3"
+    "@friday/operational-errors": "1.0.4"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
