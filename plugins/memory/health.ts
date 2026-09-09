@@ -79,4 +79,3 @@ export function memoryEmbeddingHealth(environment: NodeJS.ProcessEnv = process.e
     ...(providerState.reason === undefined ? {} : { reason: providerState.reason }),
   });
 }
-
