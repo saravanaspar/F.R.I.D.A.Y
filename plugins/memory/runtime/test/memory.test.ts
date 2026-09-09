@@ -1,10 +1,18 @@
-import { chmodSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { execFileSync } from "node:child_process";
 import { MemoryDatabase } from "../src/database.js";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  BGE_SMALL_EN_V15_DIMENSIONS,
+  BGE_SMALL_EN_V15_INT8_PROVIDER_ID,
+  BGE_SMALL_EN_V15_MODEL_ID,
+  BGE_SMALL_EN_V15_MODEL_REVISION,
+  BGE_SMALL_EN_V15_MODEL_SHA256,
+  MEMORY_BGE_PROFILE_SCHEMA,
+  BgeSmallEnV15Int8EmbeddingProvider,
   MemoryStore,
   createEmptyMemoryState,
   formatMemoryOverview,
@@ -45,6 +53,43 @@ function makeTempDir(): string {
   return dir;
 }
 
+function fakeBgeToolingRoot(): string {
+  const root = makeTempDir();
+  const bin = join(root, "venv", "bin");
+  const model = join(root, "models", "Xenova", "bge-small-en-v1.5");
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(join(model, "onnx"), { recursive: true });
+  const fakePython = join(bin, "python");
+  writeFileSync(fakePython, `#!/usr/bin/env node
+const readline = require("node:readline");
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  const vector = Array(${BGE_SMALL_EN_V15_DIMENSIONS}).fill(0);
+  vector[0] = 1;
+  if (request.texts[0] === "noise") process.stdout.write("null\\nnot-json\\n");
+  const vectors = request.texts[0] === "wrong-count" ? [] : request.texts.map(() => vector);
+  setTimeout(() => {
+    process.stdout.write(JSON.stringify({ id: request.id, ok: true, vectors }) + "\\n");
+  }, request.texts[0] === "slow" ? 100 : 0);
+});
+`, "utf8");
+  chmodSync(fakePython, 0o755);
+  writeFileSync(join(root, "bge_worker.py"), "# fake worker path marker\n", "utf8");
+  writeFileSync(join(model, "tokenizer.json"), "{}\n", "utf8");
+  writeFileSync(join(model, "onnx", "model_int8.onnx"), "fake", "utf8");
+  writeFileSync(join(root, "profile.json"), `${JSON.stringify({
+    schema: MEMORY_BGE_PROFILE_SCHEMA,
+    providerId: BGE_SMALL_EN_V15_INT8_PROVIDER_ID,
+    dimensions: BGE_SMALL_EN_V15_DIMENSIONS,
+    modelId: BGE_SMALL_EN_V15_MODEL_ID,
+    modelRevision: BGE_SMALL_EN_V15_MODEL_REVISION,
+    modelSha256: BGE_SMALL_EN_V15_MODEL_SHA256,
+    runtime: "test",
+  })}\n`, "utf8");
+  return root;
+}
+
 afterEach(() => {
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
@@ -82,6 +127,80 @@ const semanticTestProvider: MemoryEmbeddingProvider = {
     return new Float32Array([0, 0, 0]);
   },
 };
+
+describe("BGE semantic provider", () => {
+  it("fails closed to lexical mode when the pinned local INT8 tooling is not provisioned", () => {
+    const provider = new BgeSmallEnV15Int8EmbeddingProvider({ toolingRoot: makeTempDir() });
+    expect(provider.id).toBe(BGE_SMALL_EN_V15_INT8_PROVIDER_ID);
+    expect(provider.dimensions).toBe(BGE_SMALL_EN_V15_DIMENSIONS);
+    expect(provider.status()).toMatchObject({
+      ready: false,
+      reason: expect.stringMatching(/friday setup memory/),
+    });
+  });
+
+  it("keeps one warm worker during activity, unloads it after idle, and disposes explicitly", async () => {
+    if (process.platform === "win32") return;
+    const provider = new BgeSmallEnV15Int8EmbeddingProvider({
+      toolingRoot: fakeBgeToolingRoot(),
+      idleTimeoutMs: 25,
+    });
+    try {
+      expect(provider.status()).toMatchObject({ ready: true, active: false });
+      expect((await provider.embed("first document"))[0]).toBe(1);
+      expect(provider.status()).toMatchObject({ ready: true, active: true });
+      expect((await provider.embedQuery("second query"))[0]).toBe(1);
+      expect(provider.status()).toMatchObject({ ready: true, active: true });
+      await new Promise((resolveWait) => setTimeout(resolveWait, 80));
+      expect(provider.status()).toMatchObject({ ready: true, active: false });
+      await provider.embed("restart worker");
+      expect(provider.status()).toMatchObject({ ready: true, active: true });
+      provider.dispose();
+      expect(provider.status()).toMatchObject({ ready: true, active: false });
+    } finally {
+      provider.dispose();
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("isolates replacement requests from a disposed worker and keeps pending inference alive past idle", async () => {
+    const provider = new BgeSmallEnV15Int8EmbeddingProvider({ toolingRoot: fakeBgeToolingRoot(), idleTimeoutMs: 25 });
+    try {
+      await provider.embed("ready");
+      const pending = expect(provider.embed("slow")).rejects.toThrow(/disposed/);
+      provider.dispose();
+      const replacement = provider.embed("slow");
+      await pending;
+      expect((await replacement)[0]).toBe(1);
+      expect(provider.status().active).toBe(true);
+      expect(await provider.embedBatch(Array.from({ length: 17 }, () => "document"))).toHaveLength(17);
+    } finally {
+      provider.dispose();
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("ignores protocol noise and rejects a wrong response count without poisoning later requests", async () => {
+    const provider = new BgeSmallEnV15Int8EmbeddingProvider({ toolingRoot: fakeBgeToolingRoot() });
+    try {
+      expect((await provider.embed("noise"))[0]).toBe(1);
+      await expect(provider.embedBatch(["wrong-count", "second"])).rejects.toThrow(/batch size/);
+      expect((await provider.embed("healthy"))[0]).toBe(1);
+    } finally {
+      provider.dispose();
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("finishes inference in a one-shot process and exits without waiting for idle", () => {
+    const root = fakeBgeToolingRoot();
+    const moduleUrl = new URL("../dist/bge.js", import.meta.url).href;
+    const output = execFileSync(process.execPath, ["--input-type=module", "-e", `
+      import { BgeSmallEnV15Int8EmbeddingProvider } from ${JSON.stringify(moduleUrl)};
+      const provider = new BgeSmallEnV15Int8EmbeddingProvider({ toolingRoot: ${JSON.stringify(root)} });
+      const vector = await provider.embed("slow");
+      console.log(vector[0]);
+    `], { encoding: "utf8", timeout: 5_000 });
+    expect(output.trim()).toBe("1");
+  });
+});
 
 describe("memory state paths", () => {
   it("uses explicit memory directories beneath host-owned roots", () => {
@@ -131,6 +250,38 @@ describe("memory SQLite persistence and migration", () => {
     saveMemoryState(dir, state);
     expect(statSync(statePath).mode & 0o777).toBe(0o640);
     expect(loadMemoryState(dir).entries.memory.one?.content).toBe("content");
+  });
+
+  it("keeps read-only recall from creating or mutating file-backed state", () => {
+    const parent = makeTempDir();
+    const missing = join(parent, "not-created", "memory");
+    const emptyRead = new MemoryStore({
+      stateDir: missing,
+      scope: "global",
+      readOnly: true,
+      embeddingProvider: null,
+    });
+    expect(emptyRead.list("memory")).toEqual([]);
+    expect(existsSync(join(parent, "not-created"))).toBe(false);
+    expect(() => emptyRead.create("memory", { title: "blocked", content: "blocked" })).toThrow(/read-only/);
+    emptyRead.close();
+
+    const dir = makeTempDir();
+    const writable = new MemoryStore({ stateDir: dir, scope: "global", embeddingProvider: null });
+    writable.create("memory", { id: "known", title: "Known", content: "durable" });
+    writable.close();
+    const database = new DatabaseSync(getMemoryStatePath(dir));
+    database.exec("PRAGMA user_version = 3");
+    database.close();
+
+    const reader = new MemoryStore({ stateDir: dir, scope: "global", readOnly: true, embeddingProvider: null });
+    expect(reader.get("memory", "known")?.content).toBe("durable");
+    expect(() => reader.delete("memory", "known")).toThrow(/read-only/);
+    reader.close();
+    const reopened = new DatabaseSync(getMemoryStatePath(dir), { readOnly: true });
+    const version = reopened.prepare("PRAGMA user_version").get() as { user_version: number };
+    reopened.close();
+    expect(version.user_version).toBe(3);
   });
 
   it("fails closed on a corrupt SQLite database", () => {
@@ -191,7 +342,7 @@ describe("memory SQLite persistence and migration", () => {
     expect(existsSync(getMemoryStatePath(dir))).toBe(true);
   });
 
-  it("upgrades schema-1 SQLite state for embedding storage without losing entries", () => {
+  it("upgrades schema-1 SQLite state for embedding storage without losing entries", async () => {
     const dir = makeTempDir();
     const store = new MemoryStore({ stateDir: dir, embeddingProvider: null });
     store.create("memory", {
@@ -206,9 +357,9 @@ describe("memory SQLite persistence and migration", () => {
 
     const upgraded = new MemoryStore({ stateDir: dir, embeddingProvider: semanticTestProvider });
     expect(upgraded.search("adaptive sequence")).toEqual([]);
-    expect(upgraded.refreshEmbeddings()).toBe(1);
-    expect(upgraded.refreshEmbeddings()).toBe(0);
-    expect(upgraded.search("adaptive sequence")[0]).toMatchObject({
+    expect(await upgraded.refreshEmbeddings()).toBe(1);
+    expect(await upgraded.refreshEmbeddings()).toBe(0);
+    expect((await upgraded.hybridSearch("adaptive sequence"))[0]).toMatchObject({
       entry: { id: "pscls" },
       matchedBy: "semantic",
     });
@@ -304,6 +455,23 @@ describe("MemoryStore", () => {
       expect(store.get(kind, entry.id)?.content).toContain("content");
     }
     expect(store.list()).toHaveLength(4);
+  });
+
+  it("lists recent entries with a SQL-level bound", () => {
+    const dir = makeTempDir();
+    const state = createEmptyMemoryState();
+    for (const [id, updated] of [["old", "2026-01-01T00:00:00.000Z"], ["mid", "2026-02-01T00:00:00.000Z"], ["new", "2026-03-01T00:00:00.000Z"]] as const) {
+      state.entries.memory[id] = {
+        id, kind: "memory", title: id, content: id, path: "review", scope: "global",
+        reference: {}, arguments: {}, metadata: {}, source: "test",
+        created_at: updated, updated_at: updated, version: 1,
+      };
+    }
+    const store = new MemoryStore({ stateDir: dir, scope: "global", embeddingProvider: null });
+    store.replaceState(state);
+    expect(store.listRecent("memory", 2).map((entry) => entry.id)).toEqual(["new", "mid"]);
+    expect(() => store.listRecent("memory", 201)).toThrow(/list limit/);
+    store.close();
   });
 
   it("generates bounded ids and fills defaults", () => {
@@ -591,7 +759,7 @@ describe("memory hybrid search", () => {
     expect(store.search("adaptive sequence")).toEqual([]);
   });
 
-  it("finds semantic-only matches and applies the same scope/kind/path filters", () => {
+  it("finds semantic-only matches and applies the same scope/kind/path filters", async () => {
     const store = new MemoryStore({
       stateDir: makeTempDir(),
       scope: "global",
@@ -609,16 +777,17 @@ describe("memory hybrid search", () => {
       content: "Durable cron scheduling.",
       path: "projects/friday",
     });
+    expect(await store.refreshEmbeddings()).toBe(2);
 
-    const result = store.search("adaptive sequence representation")[0];
+    const result = (await store.hybridSearch("adaptive sequence representation"))[0];
     expect(result).toMatchObject({ entry: { id: "pscls" }, matchedBy: "semantic" });
     expect(result?.semanticScore).toBeGreaterThan(0.99);
-    expect(store.search("adaptive sequence", { kinds: ["prompt"] })).toEqual([]);
-    expect(store.search("adaptive sequence", { pathPrefix: "projects/fr" })).toEqual([]);
-    expect(store.search("adaptive sequence", { scope: "local" })).toEqual([]);
+    expect(await store.hybridSearch("adaptive sequence", { kinds: ["prompt"] })).toEqual([]);
+    expect(await store.hybridSearch("adaptive sequence", { pathPrefix: "projects/fr" })).toEqual([]);
+    expect(await store.hybridSearch("adaptive sequence", { scope: "local" })).toEqual([]);
   });
 
-  it("combines lexical and vector evidence and refreshes vectors on update/delete", () => {
+  it("combines lexical and vector evidence and ignores stale vectors until explicit refresh", async () => {
     const store = new MemoryStore({
       stateDir: makeTempDir(),
       embeddingProvider: semanticTestProvider,
@@ -628,8 +797,9 @@ describe("memory hybrid search", () => {
       title: "Adaptive sequence",
       content: "Persistent learned chunks over byte primitives.",
     });
+    expect(await store.refreshEmbeddings()).toBe(1);
 
-    expect(store.search("adaptive sequence")[0]).toMatchObject({
+    expect((await store.hybridSearch("adaptive sequence"))[0]).toMatchObject({
       entry: { id: "changing" },
       matchedBy: "hybrid",
     });
@@ -638,17 +808,21 @@ describe("memory hybrid search", () => {
       title: "Archived note",
       content: "legacy marker",
     });
-    expect(store.search("adaptive sequence")).toEqual([]);
-    expect(store.search("archive concept")[0]).toMatchObject({
+    expect(await store.hybridSearch("adaptive sequence")).toEqual([]);
+    // The vector for version 1 is stale and must never be reused for version 2.
+    expect(await store.hybridSearch("archive concept")).toEqual([]);
+    expect(store.embeddingStatus()).toMatchObject({ readyEntries: 0, staleEntries: 1, missingEntries: 0 });
+    expect(await store.refreshEmbeddings()).toBe(1);
+    expect((await store.hybridSearch("archive concept"))[0]).toMatchObject({
       entry: { id: "changing" },
       matchedBy: "semantic",
     });
 
     expect(store.delete("memory", "changing")).toBe(true);
-    expect(store.search("archive concept")).toEqual([]);
+    expect(await store.hybridSearch("archive concept")).toEqual([]);
   });
 
-  it("keeps entry mutations atomic when embedding generation fails", () => {
+  it("keeps durable entry mutations successful when neural embedding maintenance fails", async () => {
     const provider: MemoryEmbeddingProvider = {
       id: "throwing-v1",
       dimensions: 3,
@@ -659,23 +833,40 @@ describe("memory hybrid search", () => {
     };
     const store = new MemoryStore({ stateDir: makeTempDir(), embeddingProvider: provider });
 
-    expect(() =>
-      store.create("memory", { id: "bad", title: "explode", content: "never persist" }),
-    ).toThrow("embedding failed");
-    expect(store.get("memory", "bad")).toBeUndefined();
+    store.create("memory", { id: "bad", title: "explode", content: "durable first" });
+    expect(store.get("memory", "bad")).toMatchObject({ title: "explode", content: "durable first", version: 1 });
+    await expect(store.refreshEmbeddings()).rejects.toThrow("embedding failed");
+    expect(store.get("memory", "bad")).toMatchObject({ title: "explode", version: 1 });
 
-    store.create("memory", { id: "stable", title: "Stable", content: "original" });
-    expect(() =>
-      store.update("memory", "stable", { title: "explode", content: "replacement" }),
-    ).toThrow("embedding failed");
-    expect(store.get("memory", "stable")).toMatchObject({
-      title: "Stable",
-      content: "original",
-      version: 1,
+    store.update("memory", "bad", { title: "explode again", content: "replacement persisted" });
+    expect(store.get("memory", "bad")).toMatchObject({
+      title: "explode again",
+      content: "replacement persisted",
+      version: 2,
     });
   });
 
-  it("can disable embeddings for deterministic lexical-only callers", () => {
+  it("does not attach an asynchronously computed vector to a newer entry version", async () => {
+    let release: ((value: Float32Array) => void) | undefined;
+    const provider: MemoryEmbeddingProvider = {
+      id: "delayed-v1",
+      dimensions: 3,
+      embed(): Promise<Float32Array> {
+        return new Promise<Float32Array>((resolve) => { release = resolve; });
+      },
+    };
+    const store = new MemoryStore({ stateDir: makeTempDir(), embeddingProvider: provider });
+    store.create("memory", { id: "race", title: "Original", content: "version one" });
+    const refreshing = store.refreshEmbedding("memory", "race");
+    await Promise.resolve();
+    store.update("memory", "race", { content: "version two" });
+    release?.(new Float32Array([1, 0, 0]));
+    expect(await refreshing).toBe(false);
+    expect(store.embeddingStatus()).toMatchObject({ readyEntries: 0, staleEntries: 0, missingEntries: 1 });
+    expect(store.get("memory", "race")?.version).toBe(2);
+  });
+
+  it("can disable embeddings for deterministic lexical-only callers", async () => {
     const store = new MemoryStore({ stateDir: makeTempDir(), embeddingProvider: null });
     store.create("memory", {
       id: "pscls",
@@ -689,6 +880,48 @@ describe("memory hybrid search", () => {
     });
     expect(lexical?.semanticScore).toBeUndefined();
     expect(store.search("adaptive hierarchy encoding")).toEqual([]);
+    await expect(store.hybridSearch("byte")).resolves.toMatchObject([{ entry: { id: "pscls" }, matchedBy: "fts" }]);
+    expect(store.embeddingStatus()).toMatchObject({ enabled: false, ready: false, totalEntries: 1, missingEntries: 1 });
+  });
+
+  it("uses a provider-specific query embedding path without mixing it with document embedding", async () => {
+    let documentCalls = 0;
+    let queryCalls = 0;
+    const provider: MemoryEmbeddingProvider = {
+      id: "query-aware-v1",
+      dimensions: 3,
+      embed(): Float32Array {
+        documentCalls += 1;
+        return new Float32Array([1, 0, 0]);
+      },
+      embedQuery(): Float32Array {
+        queryCalls += 1;
+        return new Float32Array([1, 0, 0]);
+      },
+    };
+    const store = new MemoryStore({ stateDir: makeTempDir(), embeddingProvider: provider });
+    store.create("memory", { id: "semantic", title: "Stored document", content: "different lexical words" });
+    expect(await store.refreshEmbeddings()).toBe(1);
+    expect(documentCalls).toBe(1);
+    expect((await store.hybridSearch("unrelated query"))[0]).toMatchObject({
+      entry: { id: "semantic" },
+      matchedBy: "semantic",
+    });
+    expect(queryCalls).toBe(1);
+  });
+
+  it("reports missing, ready, and stale embedding maintenance state", async () => {
+    const store = new MemoryStore({ stateDir: makeTempDir(), embeddingProvider: semanticTestProvider });
+    store.create("memory", { id: "one", title: "Adaptive sequence", content: "learned chunks" });
+    expect(store.embeddingStatus()).toMatchObject({
+      enabled: true, providerId: "test-semantic-v1", ready: true, totalEntries: 1, readyEntries: 0, staleEntries: 0, missingEntries: 1,
+    });
+    expect(await store.refreshEmbeddings()).toBe(1);
+    expect(store.embeddingStatus()).toMatchObject({ readyEntries: 1, staleEntries: 0, missingEntries: 0 });
+    store.update("memory", "one", { content: "legacy marker" });
+    expect(store.embeddingStatus()).toMatchObject({ readyEntries: 0, staleEntries: 1, missingEntries: 0 });
+    expect(await store.refreshEmbedding("memory", "one")).toBe(true);
+    expect(store.embeddingStatus()).toMatchObject({ readyEntries: 1, staleEntries: 0, missingEntries: 0 });
   });
 
   it("bounds search requests and safely handles empty queries", () => {

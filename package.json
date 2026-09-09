@@ -25,6 +25,8 @@
     "setup:sandbox": "tsx src/friday.ts setup sandbox",
     "presetup:execution-python": "npm run build:workspaces",
     "setup:execution-python": "tsx src/friday.ts setup execution-python",
+    "presetup:memory": "npm run build:workspaces",
+    "setup:memory": "tsx src/friday.ts setup memory",
     "presetup:whatsapp": "npm run build:workspaces",
     "setup:whatsapp": "tsx src/friday.ts setup whatsapp",
     "preonboard": "npm run build:workspaces",

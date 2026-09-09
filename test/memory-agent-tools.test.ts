@@ -181,7 +181,7 @@ describe("agent memory tools", () => {
       path: "preferences/deploy",
       source: "operator-correction",
     });
-    expect(() => correct.execute({ id: noteId, kind: "note" }, context)).toThrow(/requires at least one/);
+    await expect(correct.execute({ id: noteId, kind: "note" }, context)).rejects.toThrow(/requires at least one/);
 
     const before = await review.execute({ query: "prefers_editor" }, context) as { conflicts: unknown[] };
     expect(before.conflicts).toHaveLength(1);

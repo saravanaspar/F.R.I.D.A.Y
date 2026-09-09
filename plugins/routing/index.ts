@@ -102,7 +102,7 @@ function createMemorySearch(memory: MemoryService) {
     const stateDir = memory.globalStateDir(root);
     const databasePath = memory.statePath(stateDir);
     if (!existsSync(databasePath) || !query.trim()) return Object.freeze([]);
-    const store = memory.openStore({ stateDir, scope: "global", semanticSearch: false });
+    const store = memory.openStore({ stateDir, scope: "global", semanticSearch: false, readOnly: true });
     try {
       return Object.freeze(store.search(query, { kinds: ["memory"], limit: MEMORY_HINT_LIMIT }).map((result) => Object.freeze({
         id: result.entry.id,

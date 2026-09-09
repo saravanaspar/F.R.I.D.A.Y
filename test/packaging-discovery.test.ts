@@ -35,6 +35,8 @@ describe("workspace and binary packaging discovery", () => {
     expect(lock.packages?.[""]?.workspaces).toEqual(rootPackage.workspaces);
     expect(rootPackage.scripts?.["build:workspaces"]).toBe("node scripts/workspace-packages.mjs build");
     expect(rootPackage.scripts?.["presetup:execution-python"]).toBe("npm run build:workspaces");
+    expect(rootPackage.scripts?.["presetup:memory"]).toBe("npm run build:workspaces");
+    expect(rootPackage.scripts?.["setup:memory"]).toBe("tsx src/friday.ts setup memory");
     expect(rootPackage.scripts?.["presetup:whatsapp"]).toBe("npm run build:workspaces");
     expect(rootPackage.scripts?.preonboard).toBe("npm run build:workspaces");
     expect(rootPackage.scripts?.["test:workspaces"]).toContain("node scripts/workspace-packages.mjs test");
@@ -77,6 +79,7 @@ describe("workspace and binary packaging discovery", () => {
       expect.objectContaining({ target: "channels/email/email_bridge.py" }),
       expect.objectContaining({ target: "channels/whatsapp/bridge.mjs" }),
       expect.objectContaining({ target: "rlm/python/rlm/__init__.py" }),
+      expect.objectContaining({ target: "memory/bge_worker.py" }),
     ]));
     expect(assets.every((asset) => !asset.target.startsWith("plugins/") && !asset.target.startsWith("packages/"))).toBe(true);
     expect(new Set(assets.map((asset) => asset.target)).size).toBe(assets.length);

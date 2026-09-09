@@ -5,16 +5,21 @@ Notable user-facing changes to F.R.I.D.A.Y are tracked here.
 The project is in active development. GitHub Releases contain the authoritative
 published release artifacts and generated release notes.
 
-## [1.0.4] - Unreleased
+## [1.0.4] - 2026-09-09
 
 ### Memory correctness and retrieval
 
 - Made `memory.correct` a true patch operation: omitted note/relation fields are preserved, empty corrections are rejected, note corrections use optimistic version checks, and relation replacement now runs as one `BEGIN IMMEDIATE` SQLite transaction instead of delete/reinsert plus whole-state compensation. Failed replacements roll back without losing the original, while a correction that resolves to an already-known relation merges into that edge instead of creating a duplicate.
 - Changed graph identity to the semantic `(scope, subject, predicate, object)` edge rather than including observation context. Schema 4 migrates old context-split rows by merging occurrences, confidence, timestamps and bounded latest-preferred context, so repeated observations with different provenance reinforce one fact instead of fragmenting frequency across duplicate edges.
 - Restricted automatic Turn Loop and Routing note retrieval to actual `memory` entries so reusable prompt, skill, and subagent records cannot leak into human-memory context or influence destination selection.
-- Removed implicit embedding backfills from `MemoryStore.search()`. New/updated entries maintain their vectors during mutation, while stale/missing vectors from older state are backfilled only through explicit `refreshEmbeddings()` maintenance; deterministic lexical-only callers remain supported.
-- Changed Memory-owned recall/write stores to keep local embeddings enabled by default, so explicit `memory_recall` can use hybrid retrieval for entries whose vectors are current while Routing/Turn Loop continue to request deterministic lexical-only reads.
-- Bounded `memory.review` relation retrieval through the relation query API instead of snapshotting the entire relation table, while query-driven note review now uses ranked Memory search.
+- Made ordinary `MemoryStore.search()` deterministic and lexical-only, with neural retrieval exposed explicitly through async `hybridSearch()`. Search/recall never writes embeddings as a side effect, and stale vectors are excluded by exact entry version.
+- Made BGE-small-en-v1.5 INT8 ONNX the default semantic Memory backend (384 dimensions, CPU, CLS pooling, L2 normalization, query instruction). The model/runtime is provisioned explicitly with `friday setup memory`, runs offline from private FRIDAY tooling, and never silently falls back to or mixes with the legacy `local-subword-v1` embedding space.
+- Decoupled durable Memory writes from neural inference: note create/update succeeds even when BGE is missing or temporarily unhealthy, while explicit per-entry/batch maintenance attaches vectors afterward with a version check so an asynchronously computed stale vector cannot overwrite a newer entry. Added `memory.embeddings.status` and `memory.embeddings.refresh` System actions for bounded operator-visible health and maintenance.
+- Explicit `memory_recall` now uses hybrid lexical+BGE retrieval when the pinned local model is ready and degrades to lexical retrieval if semantic inference is unavailable. Routing and automatic Turn Loop context remain deterministic lexical-only reads.
+- Bounded `memory.review` relation retrieval through the relation query API instead of snapshotting the entire relation table, while query-driven note review now uses ranked Memory search and queryless review uses a newest-first bounded SQL query instead of listing the full note table.
+- Added true read-only file-backed Memory access for Routing, automatic Turn Loop recall, explicit recall/review/status paths, and other non-mutating consumers. Existing SQLite state opens read-only/query-only without migration or permission changes, and missing state is viewed as empty without creating directories or database files.
+- Reduced semantic idle RAM without coupling Memory to Voice environments: the shared BGE ONNX worker stays warm for bursty requests, automatically unloads after 90 seconds of inactivity by default, restarts lazily on the next semantic request, and is explicitly disposed with Memory plugin lifecycle shutdown.
+- Added a `memory` System status contribution so Doctor/Diagnostics can report whether the pinned BGE runtime is provisioned, whether the worker is currently active, and whether persistent global Memory stores have missing/stale vectors; Diagnostics points operators to `friday setup memory`, `memory.embeddings.status`, and explicit refresh instead of attempting hidden repair writes.
 
 ### Compatibility
 
@@ -24,6 +29,7 @@ published release artifacts and generated release notes.
 
 - Enforced Vault separation at Memory-owned persistence boundaries: durable `memory` entries, nested structured metadata, graph relations/context, refinement evidence, and bulk state replacement reject secret-shaped credential material even when a caller bypasses Agent-tool validation.
 - Hardened project Markdown indexing by opening candidate files with `O_NOFOLLOW`, validating the opened file descriptor as a regular bounded file before reading, skipping raced/unreadable candidates, and no longer persisting absolute workspace paths in project-memory metadata.
+- Further pinned project-knowledge traversal to the canonical workspace: directory recursion rejects symlink/identity changes and files are accepted only when the opened descriptor still matches the canonical in-workspace inode, closing ancestor-directory swap/path-escape races in addition to final-component symlink races.
 
 ## [1.0.3] - 2026-09-09
 

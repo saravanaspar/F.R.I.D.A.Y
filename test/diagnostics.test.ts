@@ -190,6 +190,12 @@ describe("diagnostics", () => {
         }),
       });
     }), { defer: true });
+    await friday.activatePlugin(definePlugin({ id: "test-memory-status" }, (ctx) => {
+      ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
+        id: "memory", label: "Memory",
+        snapshot: () => ({ ready: false, status: "unavailable", missingEntries: 3 }),
+      });
+    }), { defer: true });
     await friday.activatePlugin(hostDoctorPlugin, { defer: true });
     await friday.activatePlugin(diagnosticsPlugin, { defer: true });
     await friday.completePluginBootstrap();
@@ -203,12 +209,16 @@ describe("diagnostics", () => {
     expect(doctor.find((check) => check.id === "host-privileges")).toMatchObject({ level: "ok", message: "disabled by local policy" });
     expect(doctor.find((check) => check.id === "sandbox")?.fix).toBe("install the test sandbox");
 
+    expect(doctor.find((check) => check.id === "memory")).toMatchObject({
+      level: "warn", fix: expect.stringMatching(/friday setup memory/),
+    });
     const review = await diagnostics.review({ component: "voice", limit: 20 });
     expect(review.runtime).toMatchObject({ routerOnly: true, mainModelConfigured: false, hostPrivilegeMode: "none" });
     const serialized = JSON.stringify(review);
     expect(serialized).not.toContain(secret);
     expect(review.statuses["unsafe-status"]).toContain("[REDACTED]");
     expect(review.statuses["unsafe-status"]!.length).toBeLessThanOrEqual(2_000);
+    expect(review.suggestedActions).toContain("memory.embeddings.status");
     expect(review.logs).toHaveLength(1);
     expect(review.spans).toHaveLength(1);
     expect(JSON.stringify(review.logs)).not.toContain(secret);

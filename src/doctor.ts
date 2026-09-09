@@ -10,6 +10,7 @@ import { getFridayHome, readRuntimeSettings } from "../plugins/runtime-settings/
 import { selectSandboxProvider } from "../plugins/sandbox/providers/index.js";
 import { voiceCredentialVaultRef } from "../plugins/voice/credential-ref.js";
 import { readVoiceSettings } from "../plugins/voice/settings.js";
+import { memoryEmbeddingHealth } from "../plugins/memory/health.js";
 import { runSetupCli } from "./setup-cli.js";
 import { FRIDAY_VERSION } from "./version.js";
 
@@ -79,7 +80,10 @@ const CLI_DOCTOR_SOURCES: DoctorSources = Object.freeze({
 });
 
 export function collectDoctorChecks(environment: NodeJS.ProcessEnv = process.env): Promise<readonly DoctorCheck[]> {
-  return collectCanonicalDoctorChecks(environment, CLI_DOCTOR_SOURCES);
+  return collectCanonicalDoctorChecks(environment, {
+    ...CLI_DOCTOR_SOURCES,
+    memory: async () => memoryEmbeddingHealth(environment),
+  });
 }
 
 const SECTION_ORDER: readonly DoctorSection[] = Object.freeze(["Installation", "Configuration", "Security", "Tooling", "Recovery"]);

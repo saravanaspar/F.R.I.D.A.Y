@@ -1,3 +1,4 @@
+export * from "./bge.js";
 export * from "./embedding.js";
 export * from "./overview.js";
 export * from "./relation.js";

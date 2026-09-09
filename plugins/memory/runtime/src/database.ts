@@ -23,6 +23,7 @@ export const LEGACY_MEMORY_STATE_FILE_NAME = "memory_state.json";
 const DATABASE_SCHEMA_VERSION = 4;
 const DEFAULT_SEARCH_LIMIT = 8;
 const MAX_SEARCH_LIMIT = 100;
+const MAX_LIST_LIMIT = 200;
 
 
 export interface MemoryEmbeddingRecord {
@@ -38,11 +39,20 @@ export interface MemorySemanticResult {
   semanticScore: number;
 }
 
+export interface MemoryEmbeddingDatabaseStatus {
+  totalEntries: number;
+  readyEntries: number;
+  staleEntries: number;
+  missingEntries: number;
+}
+
 interface MemoryDatabaseOptions {
   stateDir?: string;
   scope: MemoryScope;
   inMemory?: boolean;
   migrateLegacy?: boolean;
+  /** Open existing file-backed state without schema migration or filesystem mutation. */
+  readOnly?: boolean;
 }
 
 function emptyState(): MemoryState {
@@ -286,7 +296,7 @@ function migrateRelationIdentityV4(db: DatabaseSync): void {
   }
 }
 
-function initializeSchema(db: DatabaseSync): void {
+function databaseSchemaVersion(db: DatabaseSync): number {
   const versionRow = db.prepare("PRAGMA user_version").get() as Record<string, unknown> | undefined;
   const version = Number(versionRow?.user_version ?? 0);
   if (!Number.isInteger(version) || version < 0) {
@@ -297,6 +307,11 @@ function initializeSchema(db: DatabaseSync): void {
       `memory database schema ${version} is newer than supported schema ${DATABASE_SCHEMA_VERSION}`,
     );
   }
+  return version;
+}
+
+function initializeSchema(db: DatabaseSync): void {
+  const version = databaseSchemaVersion(db);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS memory_entries (
@@ -408,6 +423,20 @@ function configureDatabase(db: DatabaseSync, diskBacked: boolean): void {
   initializeSchema(db);
 }
 
+function configureReadOnlyDatabase(db: DatabaseSync): void {
+  db.exec("PRAGMA foreign_keys = ON");
+  db.exec("PRAGMA busy_timeout = 5000");
+  db.exec("PRAGMA query_only = ON");
+  const version = databaseSchemaVersion(db);
+  // Schema 3 has every table required for read paths. Schema 4 only changes
+  // relation identity semantics, so it can be read safely without migrating.
+  if (version < 3) {
+    throw new Error(
+      `memory database schema ${version} requires a writable migration before read-only access`,
+    );
+  }
+}
+
 function escapeLikePrefix(value: string): string {
   return value.replace(/[\\%_]/g, (character) => `\\${character}`);
 }
@@ -441,11 +470,13 @@ const SEMANTIC_CANDIDATE_MAX = 4096;
 export class MemoryDatabase {
   readonly path: string | undefined;
   readonly scope: MemoryScope;
+  readonly readOnly: boolean;
   #db: DatabaseSync;
   #closed = false;
 
   constructor(options: MemoryDatabaseOptions) {
     this.scope = options.scope;
+    this.readOnly = options.readOnly === true;
     const inMemory = options.inMemory === true;
     if (!inMemory && !options.stateDir) {
       throw new Error("file-backed memory requires a stateDir");
@@ -454,7 +485,7 @@ export class MemoryDatabase {
     let legacyState: MemoryState | undefined;
     let databaseExisted = false;
     if (!inMemory && options.stateDir) {
-      mkdirSync(options.stateDir, { recursive: true, mode: 0o700 });
+      if (!this.readOnly) mkdirSync(options.stateDir, { recursive: true, mode: 0o700 });
       this.path = join(options.stateDir, MEMORY_DATABASE_FILE_NAME);
       databaseExisted = existsSync(this.path);
       if (!databaseExisted && options.migrateLegacy !== false) {
@@ -465,22 +496,29 @@ export class MemoryDatabase {
       }
     }
 
-    const databasePath = this.path ?? ":memory:";
+    const useReadOnlyFile = this.readOnly && this.path !== undefined && databaseExisted;
+    // A missing read-only store is represented by a private in-memory empty DB
+    // (or a read-only view of legacy JSON) so recall never creates directories.
+    const databasePath = useReadOnlyFile ? this.path! : (this.readOnly ? ":memory:" : (this.path ?? ":memory:"));
     const previousMode = this.path && databaseExisted ? statSync(this.path).mode & 0o777 : undefined;
-    this.#db = new DatabaseSync(databasePath);
+    this.#db = useReadOnlyFile
+      ? new DatabaseSync(databasePath, { readOnly: true })
+      : new DatabaseSync(databasePath);
 
     try {
-      configureDatabase(this.#db, this.path !== undefined);
+      if (useReadOnlyFile) configureReadOnlyDatabase(this.#db);
+      else configureDatabase(this.#db, !this.readOnly && this.path !== undefined);
       this.#db.function("memory_relation_search_text", { deterministic: true }, (subject, predicate, object, context) =>
         `${subject} ${String(predicate).replaceAll("_", " ")} ${object} ${context}`.toLowerCase());
-      if (this.path) chmodSync(this.path, previousMode ?? 0o600);
-      if (legacyState) this.replaceState(legacyState);
+      if (!this.readOnly && this.path) chmodSync(this.path, previousMode ?? 0o600);
+      if (legacyState && !useReadOnlyFile) this.replaceState(legacyState);
+      if (this.readOnly && !useReadOnlyFile) this.#db.exec("PRAGMA query_only = ON");
     } catch (error) {
       try { this.#db.close(); } catch (closeError) {
         reportOperationalError({ component: "memory", operation: "close database after initialization failure", error: closeError });
       }
       this.#closed = true;
-      if (this.path && !databaseExisted) {
+      if (!this.readOnly && this.path && !databaseExisted) {
         rmSync(this.path, { force: true });
         rmSync(`${this.path}-wal`, { force: true });
         rmSync(`${this.path}-shm`, { force: true });
@@ -583,7 +621,73 @@ export class MemoryDatabase {
     return rows.map(rowToEntry);
   }
 
-  listEntriesNeedingEmbedding(providerId: string, dimensions: number): MemoryEntry[] {
+  listEntriesRecent(kind: MemoryEntryKind, limit: number): MemoryEntry[] {
+    this.#assertOpen();
+    assertKind(kind);
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIST_LIMIT) {
+      throw new Error(`memory list limit must be an integer between 1 and ${MAX_LIST_LIMIT}`);
+    }
+    const rows = this.#db
+      .prepare(`
+        SELECT kind, id, title, content, path, scope,
+               reference_json, arguments_json, metadata_json,
+               source, created_at, updated_at, version
+        FROM memory_entries
+        WHERE kind = ?
+        ORDER BY updated_at DESC, id ASC
+        LIMIT ?
+      `)
+      .all(kind, limit) as Record<string, unknown>[];
+    return rows.map(rowToEntry);
+  }
+
+  countEntries(): number {
+    this.#assertOpen();
+    const row = this.#db.prepare("SELECT COUNT(*) AS count FROM memory_entries").get() as Record<string, unknown> | undefined;
+    const count = row?.count;
+    if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) {
+      throw new Error("memory database returned an invalid entry count");
+    }
+    return count;
+  }
+
+  embeddingStatus(providerId: string, dimensions: number): MemoryEmbeddingDatabaseStatus {
+    this.#assertOpen();
+    if (!providerId.trim()) throw new Error("memory embedding provider id is required");
+    if (!Number.isInteger(dimensions) || dimensions < 1 || dimensions > 4096) {
+      throw new Error("memory embedding dimensions must be between 1 and 4096");
+    }
+    const row = this.#db.prepare(`
+      SELECT
+        COUNT(*) AS total_entries,
+        COALESCE(SUM(CASE
+          WHEN m.entry_rowid IS NOT NULL
+            AND m.dimensions = ?
+            AND m.entry_version = e.version THEN 1 ELSE 0 END), 0) AS ready_entries,
+        COALESCE(SUM(CASE
+          WHEN m.entry_rowid IS NOT NULL
+            AND (m.dimensions <> ? OR m.entry_version <> e.version) THEN 1 ELSE 0 END), 0) AS stale_entries,
+        COALESCE(SUM(CASE WHEN m.entry_rowid IS NULL THEN 1 ELSE 0 END), 0) AS missing_entries
+      FROM memory_entries AS e
+      LEFT JOIN memory_embeddings AS m
+        ON m.entry_rowid = e.rowid AND m.provider_id = ?
+    `).get(dimensions, dimensions, providerId) as Record<string, unknown> | undefined;
+    const readCount = (key: string): number => {
+      const value = row?.[key];
+      if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+        throw new Error(`memory database returned an invalid ${key}`);
+      }
+      return value;
+    };
+    return {
+      totalEntries: readCount("total_entries"),
+      readyEntries: readCount("ready_entries"),
+      staleEntries: readCount("stale_entries"),
+      missingEntries: readCount("missing_entries"),
+    };
+  }
+
+  listEntriesNeedingEmbedding(providerId: string, dimensions: number, after?: Pick<MemoryEntry, "kind" | "id">): MemoryEntry[] {
     this.#assertOpen();
     if (!providerId.trim()) throw new Error("memory embedding provider id is required");
     if (!Number.isInteger(dimensions) || dimensions < 1 || dimensions > 4096) {
@@ -597,14 +701,16 @@ export class MemoryDatabase {
         FROM memory_entries AS e
         LEFT JOIN memory_embeddings AS m
           ON m.entry_rowid = e.rowid AND m.provider_id = ?
-        WHERE m.entry_rowid IS NULL OR m.entry_version <> e.version OR m.dimensions <> ?
-        ORDER BY e.rowid
+        WHERE (m.entry_rowid IS NULL OR m.entry_version <> e.version OR m.dimensions <> ?)
+          AND (e.kind, e.id) > (?, ?)
+        ORDER BY e.kind, e.id
+        LIMIT 8
       `)
-      .all(providerId, dimensions) as Record<string, unknown>[];
+      .all(providerId, dimensions, after?.kind ?? "", after?.id ?? "") as Record<string, unknown>[];
     return rows.map(rowToEntry);
   }
 
-  upsertEmbedding(kind: MemoryEntryKind, id: string, embedding: MemoryEmbeddingRecord): void {
+  upsertEmbedding(kind: MemoryEntryKind, id: string, embedding: MemoryEmbeddingRecord): boolean {
     this.#assertOpen();
     assertKind(kind);
     if (!embedding.providerId.trim()) throw new Error("memory embedding provider id is required");
@@ -612,17 +718,23 @@ export class MemoryDatabase {
       throw new Error("memory embedding vector length does not match its dimensions");
     }
     const row = this.#db
-      .prepare("SELECT rowid FROM memory_entries WHERE kind = ? AND id = ?")
+      .prepare("SELECT rowid, version FROM memory_entries WHERE kind = ? AND id = ?")
       .get(kind, id) as Record<string, unknown> | undefined;
     const rowid = row?.rowid;
-    if (typeof rowid !== "number" || !Number.isInteger(rowid)) {
-      throw new Error(`${kind} entry ${JSON.stringify(id)} does not exist`);
+    if (typeof rowid !== "number" || !Number.isInteger(rowid)) return false;
+    const currentVersion = row?.version;
+    if (typeof currentVersion !== "number" || !Number.isInteger(currentVersion) || currentVersion < 1) {
+      throw new Error("memory database entry version is invalid");
     }
-    this.#db
+    // Neural inference runs outside the SQLite write transaction. Never attach
+    // a vector computed for an entry version that changed while inference ran.
+    if (currentVersion !== embedding.entryVersion) return false;
+    const result = this.#db
       .prepare(`
         INSERT INTO memory_embeddings (
           entry_rowid, provider_id, dimensions, vector, entry_version, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
+        ) SELECT rowid, ?, ?, ?, ?, ? FROM memory_entries
+          WHERE rowid = ? AND version = ?
         ON CONFLICT(entry_rowid, provider_id) DO UPDATE SET
           dimensions = excluded.dimensions,
           vector = excluded.vector,
@@ -630,13 +742,15 @@ export class MemoryDatabase {
           updated_at = excluded.updated_at
       `)
       .run(
-        rowid,
         embedding.providerId,
         embedding.dimensions,
         serializeVector(embedding.vector),
         embedding.entryVersion,
         embedding.updatedAt,
+        rowid,
+        embedding.entryVersion,
       );
+    return result.changes > 0;
   }
 
   insertEntryWithEmbedding(entry: MemoryEntry, embedding: MemoryEmbeddingRecord): void {
@@ -928,7 +1042,7 @@ export class MemoryDatabase {
       SEMANTIC_CANDIDATE_MAX,
       Math.max(SEMANTIC_CANDIDATE_MIN, limit * SEMANTIC_CANDIDATE_MULTIPLIER),
     );
-    const where = ["m.provider_id = ?", "m.dimensions = ?"];
+    const where = ["m.provider_id = ?", "m.dimensions = ?", "m.entry_version = e.version"];
     const params: Array<string | number> = [providerId, queryVector.length];
 
     if (options.scope !== undefined) {
@@ -976,6 +1090,11 @@ export class MemoryDatabase {
           semanticScore: cosineSimilarity(queryVector, parseVector(row.vector, dimensions)),
         };
       })
+      // A non-positive cosine carries no semantic evidence. Returning those rows
+      // would let an unrelated candidate enter reciprocal-rank fusion merely
+      // because it survived the SQL filters. Model-specific relevance cutoffs
+      // belong above this baseline; this guard is provider-agnostic.
+      .filter((result) => result.semanticScore > 0)
       .sort((left, right) =>
         right.semanticScore - left.semanticScore ||
         right.entry.updated_at.localeCompare(left.entry.updated_at) ||

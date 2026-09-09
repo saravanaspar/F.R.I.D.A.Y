@@ -6,6 +6,7 @@ import { RUNTIME_SETTINGS_CAPABILITY } from "../runtime-settings/contract.js";
 import { SANDBOX_HEALTH_CAPABILITY } from "../sandbox/contract.js";
 import { HOST_PRIVILEGES_CAPABILITY } from "../host-privileges/contract.js";
 import { VOICE_CAPABILITY } from "../voice/contract.js";
+import { SYSTEM_STATUS_CONTRIBUTION } from "../system/contract.js";
 import { collectDoctorChecks, type DoctorSources } from "./collector.js";
 import { HOST_DOCTOR_CAPABILITY, type HostDoctorService } from "./contract.js";
 
@@ -37,6 +38,9 @@ export function createHostDoctorPlugin(): FridayPlugin {
     const voice = ctx.services.require(VOICE_CAPABILITY);
 
     const sources: DoctorSources = Object.freeze({
+      async memory() {
+        return ctx.collect(SYSTEM_STATUS_CONTRIBUTION).find((item) => item.id === "memory")?.snapshot();
+      },
       runtimeSettings: () => runtime.read(),
       async channels() {
         return channels.access();

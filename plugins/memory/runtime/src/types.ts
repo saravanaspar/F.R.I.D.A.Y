@@ -120,6 +120,24 @@ export interface MemorySearchOptions {
   limit?: number;
 }
 
+export interface MemoryEmbeddingStatus {
+  /** Whether semantic retrieval is enabled for this store. */
+  enabled: boolean;
+  /** Configured embedding-space identifier. Different provider ids are never mixed. */
+  providerId?: string | undefined;
+  dimensions?: number | undefined;
+  /** Whether the configured provider runtime/model is ready for inference. */
+  ready: boolean;
+  /** Whether a provider-owned inference worker is currently warm. */
+  active?: boolean | undefined;
+  /** Bounded operator-facing explanation when semantic inference is unavailable. */
+  reason?: string | undefined;
+  totalEntries: number;
+  readyEntries: number;
+  staleEntries: number;
+  missingEntries: number;
+}
+
 export interface MemorySearchResult {
   entry: MemoryEntry;
   /** Combined hybrid relevance score; larger is more relevant. */

@@ -1,9 +1,28 @@
 import type { MemoryEntry } from "./types.js";
 
+export interface MemoryEmbeddingProviderState {
+  readonly ready: boolean;
+  /** Whether the provider currently has a warm inference worker/process. */
+  readonly active?: boolean | undefined;
+  readonly reason?: string | undefined;
+}
+
+export type MemoryEmbeddingVector = Float32Array | Promise<Float32Array>;
+export type MemoryEmbeddingBatch = readonly Float32Array[] | Promise<readonly Float32Array[]>;
+
 export interface MemoryEmbeddingProvider {
   readonly id: string;
   readonly dimensions: number;
-  embed(text: string): Float32Array;
+  /** Cheap readiness probe. Providers without one are treated as ready. */
+  status?(): MemoryEmbeddingProviderState;
+  /** Embed one persisted document/memory payload. */
+  embed(text: string): MemoryEmbeddingVector;
+  /** Optional retrieval-query embedding (for providers with query instructions). */
+  embedQuery?(text: string): MemoryEmbeddingVector;
+  /** Optional batched document inference for explicit maintenance. */
+  embedBatch?(texts: readonly string[]): MemoryEmbeddingBatch;
+  /** Release provider-owned runtime resources. Shared providers may defer this to plugin shutdown. */
+  dispose?(): void | Promise<void>;
 }
 
 export const LOCAL_SUBWORD_EMBEDDING_ID = "local-subword-v1";
@@ -91,9 +110,9 @@ export function memoryEntryEmbeddingText(entry: Pick<MemoryEntry, "title" | "con
 /**
  * Zero-dependency local embedding baseline.
  *
- * This is intentionally deterministic and synchronous so the existing MemoryStore
- * API stays stable. It uses hashed token/subword features; callers may inject a
- * stronger local neural provider later without changing SQLite or search callers.
+ * This is intentionally deterministic, synchronous, and zero-dependency. It is
+ * retained as an explicit bootstrap/test provider; production semantic Memory
+ * uses the BGE INT8 provider when that private tooling has been provisioned.
  */
 export class LocalSubwordEmbeddingProvider implements MemoryEmbeddingProvider {
   readonly id = LOCAL_SUBWORD_EMBEDDING_ID;

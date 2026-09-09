@@ -62,11 +62,20 @@ describe("self-improvement plugin contract catalog", () => {
       type: "SystemActionContribution",
       ids: [
         "memory.correct",
+        "memory.embeddings.refresh",
+        "memory.embeddings.status",
         "memory.preference.forget",
         "memory.preference.remember",
         "memory.preferences",
         "memory.review",
       ],
+      dynamic: 0,
+    });
+
+    expect(memory?.contributionInstances).toContainEqual({
+      surface: "system.status",
+      type: "SystemStatusContribution",
+      ids: ["memory"],
       dynamic: 0,
     });
 
