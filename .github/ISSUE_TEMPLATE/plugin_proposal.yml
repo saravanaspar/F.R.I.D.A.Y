@@ -1,0 +1,72 @@
+name: Plugin proposal
+description: Propose a new plugin or public extension boundary after checking existing capabilities
+title: "[Plugin]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Plugins are ownership boundaries, not feature folders. Before proposing a new plugin, run `npm run inspect:plugins` and check whether an existing plugin/capability/MCP integration already owns the behavior.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: What concrete user problem or missing capability are you trying to solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reuse
+    attributes:
+      label: Existing capability / MCP reuse check
+      description: Which existing plugins, capabilities, contribution instances, integrations, or MCP options did you inspect, and why are they insufficient?
+    validations:
+      required: true
+
+  - type: input
+    id: owner
+    attributes:
+      label: Proposed owner
+      description: Proposed plugin name, or "unsure" if you want help identifying the correct owner.
+      placeholder: e.g. calendar, channels, memory, unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: surface
+    attributes:
+      label: Proposed public surface
+      description: If known, describe the capability/contribution/hook other plugins would consume. Do not invent a new surface if the behavior can remain private to an existing owner.
+
+  - type: checkboxes
+    id: authority
+    attributes:
+      label: Authority / effects
+      options:
+        - label: Persists durable state
+        - label: Reads or writes credentials/secrets
+        - label: Performs external/network reads
+        - label: Performs external/network writes
+        - label: Executes code or processes
+        - label: Needs host privilege or lifecycle/restart authority
+        - label: None of the above
+
+  - type: textarea
+    id: testing
+    attributes:
+      label: Testing ideas
+      description: What behavior and failure boundaries should prove the plugin is safe and correct?
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and pull requests for a similar proposal.
+          required: true
+        - label: I checked the current plugin catalog with `npm run inspect:plugins` or the repository documentation.
+          required: true
+        - label: I described the user problem before proposing an implementation.
+          required: true
