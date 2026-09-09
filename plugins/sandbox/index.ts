@@ -8,6 +8,7 @@ import { OBSERVABILITY_CAPABILITY } from "../observability/contract.js";
 import { RUNTIME_SETTINGS_CAPABILITY } from "../runtime-settings/contract.js";
 import {
   SANDBOX_CAPABILITY,
+  SANDBOX_HEALTH_CAPABILITY,
   assertSandboxProviderSatisfiesContract,
   type SandboxNetworkMode,
   type SandboxProvider,
@@ -27,7 +28,7 @@ export interface SandboxPluginOptions {
 }
 
 export function createSandboxPlugin(options: SandboxPluginOptions = {}): FridayPlugin {
-  return definePlugin({ id: "sandbox", optional: [OBSERVABILITY_CAPABILITY, RUNTIME_SETTINGS_CAPABILITY], provides: [SANDBOX_CAPABILITY] }, (ctx) => {
+  return definePlugin({ id: "sandbox", optional: [OBSERVABILITY_CAPABILITY, RUNTIME_SETTINGS_CAPABILITY], provides: [SANDBOX_CAPABILITY, SANDBOX_HEALTH_CAPABILITY] }, (ctx) => {
     const observability = ctx.services.optional(OBSERVABILITY_CAPABILITY);
     const provider = selectSandboxProvider(options.providerId, options.providers ?? []);
     assertSandboxProviderSatisfiesContract(provider);
@@ -48,6 +49,17 @@ export function createSandboxPlugin(options: SandboxPluginOptions = {}): FridayP
     });
 
     ctx.services.provide(SANDBOX_CAPABILITY, service);
+    ctx.services.provide(SANDBOX_HEALTH_CAPABILITY, Object.freeze({
+      snapshot() {
+        const probe = provider.probe();
+        return Object.freeze({
+          provider: provider.descriptor,
+          probe,
+          ...(service.image ? { image: service.image } : {}),
+          repairHint: provider.repairHint(probe),
+        });
+      },
+    }));
     ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
       id: "sandbox",
       label: "Sandbox",

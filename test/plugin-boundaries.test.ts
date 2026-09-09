@@ -985,7 +985,14 @@ describe("plugin boundaries", () => {
     }
 
     const hostDoctorManifest = getPluginManifest(hostDoctorPlugin)!;
-    expect(hostDoctorManifest.requires ?? []).toEqual([]);
+    expect(hostDoctorManifest.requires.map((capability) => capability.id).sort()).toEqual([
+      "channels",
+      "host-privileges",
+      "model-credentials",
+      "runtime-settings",
+      "sandbox.health",
+      "voice",
+    ]);
     expect(hostDoctorManifest.provides.map((capability) => capability.id)).toEqual(["doctor.host"]);
     const hostDoctor = await readFile(resolve("plugins/host-doctor/index.ts"), "utf8");
     expect(hostDoctor).not.toContain("SYSTEM_ACTION_CONTRIBUTION");
@@ -1001,6 +1008,7 @@ describe("plugin boundaries", () => {
 
     const sandboxManifest = getPluginManifest(sandboxPlugin)!;
     expect(sandboxManifest.optional.map((capability) => capability.id).sort()).toEqual(["observability", "runtime-settings"]);
+    expect(sandboxManifest.provides.map((capability) => capability.id).sort()).toEqual(["sandbox", "sandbox.health"]);
 
     const skillsManifest = getPluginManifest(skillsPlugin)!;
     expect(skillsManifest.requires.map((capability) => capability.id).sort()).toEqual(["artifacts", "permissions"]);

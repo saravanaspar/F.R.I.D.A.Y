@@ -509,6 +509,14 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
     const safe: ChannelsService = Object.freeze({
       list: () => hub.list(),
       status: () => hub.status(),
+      access: () => {
+        const enabledEntries = Object.entries(saved.channels).filter(([, value]) => value?.enabled);
+        return Object.freeze({
+          enabled: Object.freeze(enabledEntries.map(([id]) => id).sort()),
+          allowAll: Object.freeze(enabledEntries.filter(([, value]) => value?.allowAll === true).map(([id]) => id).sort()),
+          whatsappEnabled: saved.channels.whatsapp?.enabled === true,
+        });
+      },
       subscribe: (listener: Parameters<ChannelsService["subscribe"]>[0]) => hub.subscribe(listener),
     });
     const trusted: ChannelsTrustedService = Object.freeze({

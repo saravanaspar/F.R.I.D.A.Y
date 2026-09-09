@@ -26,12 +26,12 @@ import { definePlugin } from "../capabilities/protocol.js";
 import { HOST_PRIVILEGES_CAPABILITY } from "../host-privileges/contract.js";
 import { OBSERVABILITY_CAPABILITY } from "../observability/contract.js";
 import { RUNTIME_SETTINGS_CAPABILITY } from "../runtime-settings/contract.js";
-import { getFridayHome } from "../runtime-settings/runtime-env.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION, type SystemActionExecutionContext, type SystemJsonObject } from "../system/contract.js";
 import { VAULT_CAPABILITY } from "../vault/contract.js";
 import { VAULT_TRUSTED_CAPABILITY } from "../vault/trusted-contract.js";
 import { voiceCredentialVaultRef } from "./credential-ref.js";
 import { VOICE_CAPABILITY, type VoiceService } from "./contract.js";
+import { voiceFridayHome } from "./paths.js";
 import { detectLocalVoiceGpu, localVoiceToolingRoot, missingLocalVoiceHostDependencies, provisionLocalVoice, stageLocalVoiceReference, stageLocalVoiceReferenceBytes } from "./local-setup.js";
 import { readVoiceSettings, saveVoiceSettings } from "./settings.js";
 
@@ -211,7 +211,7 @@ const voicePlugin: FridayPlugin = definePlugin({
 
   const runtime: VoiceRuntime = createVoiceRuntime({
     settings,
-    localRoot: join(getFridayHome(process.env), "tooling", "voice"),
+    localRoot: join(voiceFridayHome(process.env), "tooling", "voice"),
     credential: readCredential,
   });
 
@@ -303,7 +303,7 @@ const voicePlugin: FridayPlugin = definePlugin({
     }),
     permission() { return { id: "voice.setup", effect: "system-write", resource: "voice:setup", network: true }; },
     async execute(input, context) {
-      const home = getFridayHome(process.env);
+      const home = voiceFridayHome(process.env);
       const existing = await readVoiceSettings(home);
       const gpu = detectLocalVoiceGpu();
       const useAttachedReference = optionalBoolean(input, "useAttachedReference") ?? false;

@@ -31,6 +31,7 @@ import {
   type McpService,
 } from "./contract.js";
 import { searchMcpRegistry } from "./discovery.js";
+import { resolveMcpSelfRepository } from "./self-repository.js";
 import {
   MCP_TRUSTED_CAPABILITY,
   type McpOAuthLoginCallbacks,
@@ -603,9 +604,14 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
         if (!artifacts || !selfImprovement) {
           throw new Error("GitHub MCP installation requires Artifacts and Self-Improvement capabilities");
         }
+        const runtimeSettings = await bootstrap.services.optional(RUNTIME_SETTINGS_CAPABILITY)?.read();
+        const selfRepository = resolveMcpSelfRepository(runtimeSettings?.selfRepository);
+        if (!selfRepository) {
+          throw new Error("GitHub MCP capability extension requires a configured FRIDAY self-improvement source repository");
+        }
         await permissions.authorize({
           mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
-          workspace: process.cwd(),
+          workspace: selfRepository,
           access: "read",
           action: { id: "mcp.inspect-package", effect: "external-read", resource: url.toString(), network: true },
           reason: "inspect the user-provided MCP repository before presenting its installation/capability plan",
@@ -652,7 +658,7 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
         }
         const ensured = await selfImprovement.ensureCapability({
           objective: `Add secure installation and execution support for user-provided local/stdio MCP repository packages. Preserve the existing Streamable HTTP MCP path. After implementation the original request must be able to install ${url.toString()} (${packageHint}) through the MCP plugin, with sandboxed package setup, typed Permissions authorization, Vault-backed credentials, bounded output, and tests.`,
-          cwd: process.cwd(),
+          cwd: selfRepository,
           provider,
           model: modelId,
           permissionMode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
@@ -675,7 +681,7 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
           async authorize() {
             await permissions.authorize({
               mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
-              workspace: process.cwd(),
+              workspace: selfRepository,
               access: "write",
               action: { id: "mcp.install.extend", effect: "system-write", resource: `mcp-package:${url.toString()}`, network: false },
               reason: "build missing local/stdio MCP package support",

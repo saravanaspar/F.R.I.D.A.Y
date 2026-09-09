@@ -115,11 +115,14 @@ Implementation-only classes, registries, transports, persistence helpers, and te
 fixtures remain behind the owner boundary.
 
 This contract surface is also FRIDAY's reuse catalog for self-improvement. Feasibility
-review must inspect configured capability contracts before proposing code, and an
-autonomous candidate must prefer a declared capability call over duplicating behavior.
-When the needed semantic operation is absent, extend the closest owning contract only
-if that responsibility genuinely belongs there; otherwise use an existing contribution
-seam, MCP boundary, or pass the Plugin Admission Test for a distinct plugin.
+review must inspect every configured ordinary contract before proposing code. The
+catalog distinguishes callable capabilities from typed contributions and hooks, exposes
+bounded public type/API detail for relevant owners, and fails closed if configured
+contract discovery is incomplete. An autonomous candidate must prefer a declared
+capability call or existing contribution/hook seam over duplicating behavior. When the
+needed semantic operation or extension point is absent, extend the closest owning
+contract only if that responsibility genuinely belongs there; otherwise use the MCP
+boundary or pass the Plugin Admission Test for a distinct plugin.
 
 ### Plugin Admission Test
 

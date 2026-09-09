@@ -1,15 +1,76 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { lstat, readFile, readdir, realpath, statfs } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { readSavedChannels } from "../channels/config.js";
-import { readRuntimeSettings, getFridayHome, getFridayWorkspace, type RuntimeSettings } from "../runtime-settings/runtime-env.js";
-import { selectSandboxProvider } from "../sandbox/providers/index.js";
-import { modelCredentialVaultRef, modelOAuthCredentialVaultRef, modelProviderTypicallyNeedsApiKey } from "../auth/model-credential-ref.js";
-import { readVoiceSettings } from "../voice/settings.js";
-import { voiceCredentialVaultRef } from "../voice/credential-ref.js";
 
 import type { DoctorCheck, DoctorLevel, DoctorRepairId, DoctorSection } from "./contract.js";
+
+export interface DoctorRuntimeSettings {
+  readonly modelProvider?: string | undefined;
+  readonly modelId?: string | undefined;
+  readonly routingProvider?: string | undefined;
+  readonly routingModelId?: string | undefined;
+  readonly permissionMode: "ask" | "auto" | "full";
+  readonly hostPrivilegeMode?: "broker" | "none" | undefined;
+  readonly timezone: string;
+  readonly workspaceRoot?: string | undefined;
+  readonly selfRepository?: string | undefined;
+}
+
+export interface DoctorChannelSnapshot {
+  readonly enabled: readonly string[];
+  readonly allowAll: readonly string[];
+  readonly whatsappEnabled: boolean;
+}
+
+export interface DoctorModelCredentialSnapshot {
+  readonly apiKeyRef: string;
+  readonly oauthRef: string;
+  readonly hasApiKey: boolean;
+  readonly hasOAuth: boolean;
+  readonly typicallyNeedsApiKey: boolean;
+}
+
+export interface DoctorVoiceSnapshot {
+  readonly configured: boolean;
+  readonly detail?: string | undefined;
+  readonly missingCredentials: readonly string[];
+}
+
+export interface DoctorSandboxSnapshot {
+  readonly available: boolean;
+  readonly displayName: string;
+  readonly detail?: string | undefined;
+  readonly status?: string | undefined;
+  readonly imageMissing?: boolean | undefined;
+  readonly repairHint?: string | undefined;
+}
+
+export interface DoctorHostPrivilegeSnapshot {
+  readonly privilegeMode: "broker" | "none";
+  readonly privilegedHelperInstalled: boolean;
+  readonly ready: boolean;
+}
+
+export interface DoctorSources {
+  runtimeSettings(home: string): Promise<DoctorRuntimeSettings | undefined>;
+  channels(home: string): Promise<DoctorChannelSnapshot>;
+  modelCredential(provider: string, vaultRefs: ReadonlySet<string>): Promise<DoctorModelCredentialSnapshot>;
+  voice(home: string, vaultRefs: ReadonlySet<string>): Promise<DoctorVoiceSnapshot>;
+  hostPrivileges(home: string): Promise<DoctorHostPrivilegeSnapshot>;
+  sandbox(): Promise<DoctorSandboxSnapshot>;
+}
+
+function getFridayHome(environment: NodeJS.ProcessEnv = process.env): string {
+  const configured = environment.FRIDAY_HOME?.trim();
+  return resolve(configured || join(homedir(), ".friday"));
+}
+
+function getFridayWorkspace(environment: NodeJS.ProcessEnv = process.env): string {
+  const configured = environment.FRIDAY_WORKSPACE?.trim();
+  return resolve(configured || join(dirname(getFridayHome(environment)), "FRIDAY-workspace"));
+}
 function check(
   id: string,
   section: DoctorSection,
@@ -44,7 +105,7 @@ function inside(parent: string, child: string): boolean {
   return value === "" || (value !== ".." && !value.startsWith(`..${sep}`) && !isAbsolute(value));
 }
 
-async function workspaceCheck(environment: NodeJS.ProcessEnv, home: string, settings: RuntimeSettings | undefined): Promise<DoctorCheck> {
+async function workspaceCheck(environment: NodeJS.ProcessEnv, home: string, settings: DoctorRuntimeSettings | undefined): Promise<DoctorCheck> {
   const workspace = resolve(settings?.workspaceRoot ?? getFridayWorkspace({ ...environment, FRIDAY_HOME: home }));
   if (inside(home, workspace) || inside(workspace, home)) {
     return check("workspace", "Security", "error", "Workspace", "overlaps FRIDAY state", {
@@ -156,7 +217,7 @@ function platformCheck(environment: NodeJS.ProcessEnv): DoctorCheck {
   });
 }
 
-function permissionCheck(settings: RuntimeSettings | undefined): DoctorCheck {
+function permissionCheck(settings: DoctorRuntimeSettings | undefined): DoctorCheck {
   if (!settings) {
     return check("permission-mode", "Security", "info", "Permission mode", "not configured yet", {
       fix: "friday setup",
@@ -173,37 +234,26 @@ function permissionCheck(settings: RuntimeSettings | undefined): DoctorCheck {
   });
 }
 
-async function channelChecks(home: string): Promise<readonly DoctorCheck[]> {
-  try {
-    const saved = await readSavedChannels(home);
-    const enabledEntries = Object.entries(saved.channels).filter(([, value]) => value?.enabled);
-    const enabled = enabledEntries.map(([id]) => id);
-    const checks: DoctorCheck[] = [];
-    checks.push(enabled.length > 0
-      ? check("channels", "Configuration", "ok", "Ingress channels", `${enabled.length} enabled`, { detail: enabled.join(", ") })
-      : check("channels", "Configuration", "error", "Ingress channels", "none enabled", {
-          fix: "friday setup",
-          repair: "setup",
-        }));
+async function channelChecks(snapshot: DoctorChannelSnapshot): Promise<readonly DoctorCheck[]> {
+  const enabled = [...snapshot.enabled];
+  const checks: DoctorCheck[] = [];
+  checks.push(enabled.length > 0
+    ? check("channels", "Configuration", "ok", "Ingress channels", `${enabled.length} enabled`, { detail: enabled.join(", ") })
+    : check("channels", "Configuration", "error", "Ingress channels", "none enabled", {
+        fix: "friday setup",
+        repair: "setup",
+      }));
 
-    const open = enabledEntries.filter(([, value]) => value?.allowAll === true).map(([id]) => id);
-    checks.push(open.length === 0
-      ? check("channel-access", "Security", "ok", "Channel access", enabled.length === 0 ? "not applicable yet" : "restricted", {
-          detail: enabled.length === 0 ? "Configure ingress first." : "No enabled channel accepts every sender.",
-        })
-      : check("channel-access", "Security", "warn", "Channel access", `${open.length} channel(s) allow all senders`, {
-          detail: open.join(", "),
-          fix: "friday setup  # restrict allowed senders/conversations for public-facing channels",
-        }));
-    return Object.freeze(checks);
-  } catch (error) {
-    return Object.freeze([
-      check("channels", "Configuration", "error", "Ingress channels", "configuration is invalid", {
-        detail: error instanceof Error ? error.message : String(error),
-        fix: "Back up the channel config, correct its permissions/content, then rerun: friday setup",
-      }),
-    ]);
-  }
+  const open = [...snapshot.allowAll];
+  checks.push(open.length === 0
+    ? check("channel-access", "Security", "ok", "Channel access", enabled.length === 0 ? "not applicable yet" : "restricted", {
+        detail: enabled.length === 0 ? "Configure ingress first." : "No enabled channel accepts every sender.",
+      })
+    : check("channel-access", "Security", "warn", "Channel access", `${open.length} channel(s) allow all senders`, {
+        detail: open.join(", "),
+        fix: "friday setup  # restrict allowed senders/conversations for public-facing channels",
+      }));
+  return Object.freeze(checks);
 }
 
 interface DoctorVaultMetadata {
@@ -283,9 +333,15 @@ function configuredModelEnvKeys(provider: string, environment: NodeJS.ProcessEnv
   return Object.freeze([...(candidates[provider] ?? [])].filter((name) => Boolean(environment[name])));
 }
 
-async function vaultCheck(environment: NodeJS.ProcessEnv, home: string, settings: RuntimeSettings | undefined): Promise<DoctorCheck> {
+async function vaultCheck(
+  environment: NodeJS.ProcessEnv,
+  home: string,
+  settings: DoctorRuntimeSettings | undefined,
+  vault: DoctorVaultMetadata | undefined,
+  vaultError: unknown,
+): Promise<DoctorCheck> {
   try {
-    const vault = await doctorVaultMetadata(home);
+    if (!vault) throw vaultError instanceof Error ? vaultError : new Error("Vault metadata is unavailable");
     const workspaceRoot = getFridayWorkspace({
       ...environment,
       FRIDAY_HOME: home,
@@ -318,22 +374,27 @@ async function vaultCheck(environment: NodeJS.ProcessEnv, home: string, settings
 
 async function modelCredentialCheck(
   environment: NodeJS.ProcessEnv,
-  home: string,
-  settings: RuntimeSettings | undefined,
+  settings: DoctorRuntimeSettings | undefined,
+  vaultRefs: ReadonlySet<string> | undefined,
+  sources: DoctorSources,
 ): Promise<DoctorCheck> {
   if (!settings) return check("model-credential", "Configuration", "info", "Model credential", "not applicable yet");
+  if (!vaultRefs) {
+    return check("model-credential", "Configuration", "error", "Model credential", "could not be validated", {
+      detail: "Vault metadata is unavailable or invalid.",
+      fix: "Repair or restore Vault state before validating stored model credentials.",
+    });
+  }
   const provider = settings.modelProvider ?? settings.routingProvider;
   if (!provider) return check("model-credential", "Configuration", "error", "Model credential", "model provider is missing", { fix: "friday setup" });
   const role = settings.modelProvider ? "main" : "routing";
   try {
-    const vault = await doctorVaultMetadata(home);
-    const ref = modelCredentialVaultRef(provider);
-    const oauthRef = modelOAuthCredentialVaultRef(provider);
-    if (vault.refs.has(ref)) {
-      return check("model-credential", "Configuration", "ok", "Model credential", `${role} API-key credential stored in Vault`, { detail: ref });
+    const credential = await sources.modelCredential(provider, vaultRefs);
+    if (credential.hasApiKey) {
+      return check("model-credential", "Configuration", "ok", "Model credential", `${role} API-key credential stored in Vault`, { detail: credential.apiKeyRef });
     }
-    if (vault.refs.has(oauthRef)) {
-      return check("model-credential", "Configuration", "ok", "Model credential", `${role} OAuth credential stored in Vault`, { detail: oauthRef });
+    if (credential.hasOAuth) {
+      return check("model-credential", "Configuration", "ok", "Model credential", `${role} OAuth credential stored in Vault`, { detail: credential.oauthRef });
     }
     const envKeys = configuredModelEnvKeys(provider, environment);
     if (envKeys.length) {
@@ -342,9 +403,9 @@ async function modelCredentialCheck(
         fix: "Run `friday setup` and save the provider credential into Vault for unattended/systemd restarts.",
       });
     }
-    if (modelProviderTypicallyNeedsApiKey(provider)) {
+    if (credential.typicallyNeedsApiKey) {
       return check("model-credential", "Configuration", "error", "Model credential", "missing", {
-        detail: ref,
+        detail: credential.apiKeyRef,
         fix: "friday setup",
         repair: "setup",
       });
@@ -360,24 +421,24 @@ async function modelCredentialCheck(
   }
 }
 
-async function voiceCheck(environment: NodeJS.ProcessEnv, home: string, settings: RuntimeSettings | undefined): Promise<DoctorCheck> {
-  try {
-    const voice = await readVoiceSettings(home);
-    if (!voice?.stt && !voice?.tts) return check("voice", "Configuration", "info", "Voice", "not configured", { detail: "Optional capability." });
-    const vault = await doctorVaultMetadata(home);
-    const providers = [...new Set([voice.stt?.provider, voice.tts?.provider].filter((value): value is "openai" | "deepgram" | "elevenlabs" => Boolean(value)))];
-    const missing = providers.filter((provider) => {
-      const ref = provider === "openai" ? modelCredentialVaultRef("openai") : voiceCredentialVaultRef(provider);
-      return !vault.refs.has(ref);
+async function voiceCheck(home: string, vaultRefs: ReadonlySet<string> | undefined, sources: DoctorSources): Promise<DoctorCheck> {
+  if (!vaultRefs) {
+    return check("voice", "Configuration", "error", "Voice", "could not be validated", {
+      detail: "Vault metadata is unavailable or invalid.",
+      fix: "Repair or restore Vault state before validating Voice credentials.",
     });
-    if (missing.length > 0) {
+  }
+  try {
+    const voice = await sources.voice(home, vaultRefs);
+    if (!voice.configured) return check("voice", "Configuration", "info", "Voice", "not configured", { detail: "Optional capability." });
+    if (voice.missingCredentials.length > 0) {
       return check("voice", "Configuration", "error", "Voice", "credential is missing", {
-        detail: missing.join(", "),
+        detail: voice.missingCredentials.join(", "),
         fix: "friday setup voice",
       });
     }
     return check("voice", "Configuration", "ok", "Voice", "configured", {
-      detail: [voice.stt ? `STT=${voice.stt.provider}/${voice.stt.model}` : undefined, voice.tts ? `TTS=${voice.tts.provider}/${voice.tts.model}` : undefined].filter(Boolean).join(" · "),
+      ...(voice.detail ? { detail: voice.detail } : {}),
     });
   } catch (error) {
     return check("voice", "Configuration", "error", "Voice", "configuration is invalid", {
@@ -387,10 +448,9 @@ async function voiceCheck(environment: NodeJS.ProcessEnv, home: string, settings
   }
 }
 
-async function whatsappToolingCheck(environment: NodeJS.ProcessEnv, home: string): Promise<DoctorCheck> {
+async function whatsappToolingCheck(environment: NodeJS.ProcessEnv, home: string, channels: DoctorChannelSnapshot): Promise<DoctorCheck> {
   try {
-    const saved = await readSavedChannels(home);
-    if (!saved.channels.whatsapp?.enabled) return check("whatsapp-tooling", "Tooling", "info", "WhatsApp bridge", "not enabled");
+    if (!channels.whatsappEnabled) return check("whatsapp-tooling", "Tooling", "info", "WhatsApp bridge", "not enabled");
     const root = join(home, "tooling", "whatsapp");
     const manifestFiles = ["bridge.mjs", "package.json", "package-lock.json"] as const;
     const required = [...manifestFiles.map((name) => join(root, name)), join(root, "node_modules", "@whiskeysockets", "baileys", "package.json")];
@@ -666,20 +726,43 @@ function executionPythonCheck(environment: NodeJS.ProcessEnv): DoctorCheck {
   return check("execution-python", "Tooling", "ok", "Execution Python", `Python ${health.output ?? "3.11"}`, { detail: python });
 }
 
-function sandboxCheck(): DoctorCheck {
+async function hostPrivilegeCheck(home: string, sources: DoctorSources): Promise<DoctorCheck> {
   try {
-    const provider = selectSandboxProvider();
-    const service = provider.createService();
-    const status = provider.probe();
-    if (status.available) {
-      const detail = [provider.descriptor.id, provider.descriptor.isolationClass, service.image].filter(Boolean).join(" · ");
-      return check("sandbox", "Tooling", "ok", "Coding sandbox", `${provider.descriptor.displayName} ready`, { detail });
+    const status = await sources.hostPrivileges(home);
+    if (status.privilegeMode === "none") {
+      return check("host-privileges", "Security", "ok", "Host privileges", "disabled by local policy", {
+        detail: "FRIDAY will not invoke sudo; root-required maintenance must be performed manually on the host.",
+      });
     }
-    const detail = status.reason ?? status.status;
+    if (status.ready && status.privilegedHelperInstalled) {
+      return check("host-privileges", "Security", "ok", "Host privileges", "restricted broker ready", {
+        detail: "Root-owned helper and sudoers metadata passed integrity checks; no arbitrary root shell is exposed.",
+      });
+    }
+    return check("host-privileges", "Security", "error", "Host privileges", "restricted broker is missing or unsafe", {
+      detail: "Broker mode is configured, but the root-owned helper/sudoers integrity checks did not pass.",
+      fix: "Run `friday setup privileges broker` locally on the FRIDAY host and complete the OS sudo prompt.",
+    });
+  } catch (error) {
+    return check("host-privileges", "Security", "error", "Host privileges", "could not be validated", {
+      detail: error instanceof Error ? error.message : String(error),
+      fix: "Run `friday setup privileges` locally on the FRIDAY host.",
+    });
+  }
+}
+
+async function sandboxCheck(sources: DoctorSources): Promise<DoctorCheck> {
+  try {
+    const status = await sources.sandbox();
+    if (status.available) {
+      return check("sandbox", "Tooling", "ok", "Coding sandbox", `${status.displayName} ready`, {
+        ...(status.detail ? { detail: status.detail } : {}),
+      });
+    }
     return check("sandbox", "Tooling", status.status === "unsupported-platform" ? "warn" : "info", "Coding sandbox", "not ready", {
-      ...(detail ? { detail } : {}),
-      fix: provider.repairHint(status),
-      ...(status.status === "image-missing" ? { repair: "sandbox" as const } : {}),
+      ...(status.detail ? { detail: status.detail } : {}),
+      fix: status.repairHint ?? "friday setup sandbox",
+      ...(status.imageMissing ? { repair: "sandbox" as const } : {}),
     });
   } catch (error) {
     return check("sandbox", "Tooling", "warn", "Coding sandbox", "provider configuration is invalid", {
@@ -689,13 +772,16 @@ function sandboxCheck(): DoctorCheck {
   }
 }
 
-export async function collectDoctorChecks(environment: NodeJS.ProcessEnv = process.env): Promise<readonly DoctorCheck[]> {
+export async function collectDoctorChecks(
+  environment: NodeJS.ProcessEnv = process.env,
+  sources: DoctorSources,
+): Promise<readonly DoctorCheck[]> {
   const home = getFridayHome(environment);
   const checks: DoctorCheck[] = [platformCheck(environment), await homeCheck(home)];
 
-  let settings: RuntimeSettings | undefined;
+  let settings: DoctorRuntimeSettings | undefined;
   try {
-    settings = await readRuntimeSettings(home);
+    settings = await sources.runtimeSettings(home);
     checks.push(settings
       ? check("runtime-settings", "Configuration", "ok", "Runtime settings", settings.modelProvider && settings.modelId ? `${settings.modelProvider}/${settings.modelId}` : "router-only", {
           detail: `${settings.timezone} · permission=${settings.permissionMode} · host-privilege=${settings.hostPrivilegeMode ?? "none"}${settings.routingModelId ? ` · router=${settings.routingProvider}/${settings.routingModelId}` : ""}`,
@@ -711,19 +797,40 @@ export async function collectDoctorChecks(environment: NodeJS.ProcessEnv = proce
     }));
   }
 
+  let channels: DoctorChannelSnapshot = Object.freeze({ enabled: Object.freeze([]), allowAll: Object.freeze([]), whatsappEnabled: false });
+  try {
+    channels = await sources.channels(home);
+    checks.push(...await channelChecks(channels));
+  } catch (error) {
+    checks.push(check("channels", "Configuration", "error", "Ingress channels", "configuration is invalid", {
+      detail: error instanceof Error ? error.message : String(error),
+      fix: "Back up the channel config, correct its permissions/content, then rerun: friday setup",
+    }));
+    checks.push(check("channel-access", "Security", "info", "Channel access", "could not be assessed", { fix: "friday setup" }));
+  }
+
+  let vault: DoctorVaultMetadata | undefined;
+  let vaultError: unknown;
+  try {
+    vault = await doctorVaultMetadata(home);
+  } catch (error) {
+    vaultError = error;
+  }
+  const vaultRefs = vault?.refs;
+
   checks.push(await workspaceCheck(environment, home, settings));
-  checks.push(...await channelChecks(home));
-  checks.push(await modelCredentialCheck(environment, home, settings));
-  checks.push(await voiceCheck(environment, home, settings));
+  checks.push(await modelCredentialCheck(environment, settings, vaultRefs, sources));
+  checks.push(await voiceCheck(home, vaultRefs, sources));
   checks.push(await sourceRepositoryCheck(settings?.selfRepository ?? environment.FRIDAY_SELF_REPOSITORY));
   checks.push(permissionCheck(settings));
-  checks.push(await vaultCheck(environment, home, settings));
+  checks.push(await hostPrivilegeCheck(home, sources));
+  checks.push(await vaultCheck(environment, home, settings, vault, vaultError));
   checks.push(sandboxNetworkCheck(environment));
   checks.push(...toolChecks());
   checks.push(await nodeToolchainCheck(settings?.selfRepository ?? environment.FRIDAY_SELF_REPOSITORY));
   checks.push(executionPythonCheck(environment));
-  checks.push(await whatsappToolingCheck(environment, home));
-  checks.push(sandboxCheck());
+  checks.push(await whatsappToolingCheck(environment, home, channels));
+  checks.push(await sandboxCheck(sources));
   checks.push(await backupCheck(environment));
   checks.push(await latestCrash(home));
   checks.push(await diskCheck(home));

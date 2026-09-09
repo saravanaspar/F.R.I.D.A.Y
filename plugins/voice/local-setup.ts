@@ -4,14 +4,9 @@ import { createReadStream } from "node:fs";
 import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { homedir } from "node:os";
 import type { VoiceLocalCompute, VoiceSettings } from "@friday/voice";
 
-
-function getFridayHome(environment: NodeJS.ProcessEnv = process.env): string {
-  const configured = environment.FRIDAY_HOME?.trim();
-  return resolve(configured || join(homedir(), ".friday"));
-}
+import { voiceFridayHome } from "./paths.js";
 
 const WHISPER_CPP_VERSION = "v1.9.2";
 const WHISPER_MODEL_REVISION = "c521a4b02f422512d734391fdf08bb08c0862f68";
@@ -351,11 +346,11 @@ async function provisionTts(root: string, model: string, voice: string, compute:
   if (!existsSync(marker)) await writeFile(marker, `${new Date().toISOString()}\n`, { mode: 0o600 });
 }
 
-export function localVoiceToolingRoot(home = getFridayHome(process.env)): string {
+export function localVoiceToolingRoot(home = voiceFridayHome(process.env)): string {
   return join(home, "tooling", "voice");
 }
 
-export async function provisionLocalVoice(settings: VoiceSettings, home = getFridayHome(process.env)): Promise<void> {
+export async function provisionLocalVoice(settings: VoiceSettings, home = voiceFridayHome(process.env)): Promise<void> {
   const root = localVoiceToolingRoot(home);
   await mkdir(root, { recursive: true, mode: 0o700 });
   if (settings.stt?.provider === "local") await provisionWhisper(root, settings.stt.model);
@@ -375,7 +370,7 @@ const MAX_LOCAL_VOICE_REFERENCE_BYTES = 20 * 1024 * 1024;
 export async function stageLocalVoiceReferenceBytes(
   bytes: Uint8Array,
   fileName = "voice-reference.wav",
-  home = getFridayHome(process.env),
+  home = voiceFridayHome(process.env),
 ): Promise<string> {
   if (bytes.byteLength < 1) throw new Error("Voice cloning reference is empty");
   if (bytes.byteLength > MAX_LOCAL_VOICE_REFERENCE_BYTES) {
@@ -411,7 +406,7 @@ export function missingLocalVoiceHostDependencies(settings: VoiceSettings): read
   return Object.freeze([...required].filter((command) => command === "python>=3.10" || !commandAvailable(command)));
 }
 
-export async function stageLocalVoiceReference(path: string, home = getFridayHome(process.env)): Promise<string> {
+export async function stageLocalVoiceReference(path: string, home = voiceFridayHome(process.env)): Promise<string> {
   const source = resolve(path);
   const info = await lstat(source);
   if (info.isSymbolicLink() || !info.isFile()) throw new Error("Voice cloning reference must be a regular file, not a symlink");

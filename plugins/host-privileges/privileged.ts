@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
+import { createHash } from "node:crypto";
+import type { Stats } from "node:fs";
+import { lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -83,13 +84,50 @@ function currentUser(): string {
   return username;
 }
 
+export function fridaySudoersTarget(username: string): string {
+  if (!SAFE_USER.test(username)) throw new Error(`Username cannot be represented safely in sudoers: ${JSON.stringify(username)}`);
+  const digest = createHash("sha256").update(username, "utf8").digest("hex");
+  return `${FRIDAY_SUDOERS_PREFIX}user-${digest}`;
+}
+
+function legacyFridaySudoersTarget(username: string): string | undefined {
+  // @includedir skips filenames containing '.', so dotted usernames never had a valid legacy target.
+  return username.includes(".") ? undefined : `${FRIDAY_SUDOERS_PREFIX}${username}`;
+}
+
+type BrokerFileMetadata = Pick<Stats, "mode" | "uid" | "gid" | "isFile" | "isSymbolicLink">;
+
+export function privilegeBrokerMetadataIsSecure(helper: BrokerFileMetadata, sudoers: BrokerFileMetadata): boolean {
+  const helperMode = helper.mode & 0o777;
+  const sudoersMode = sudoers.mode & 0o777;
+  return !helper.isSymbolicLink()
+    && helper.isFile()
+    && helper.uid === 0
+    && helper.gid === 0
+    && (helperMode & 0o100) !== 0
+    && (helperMode & 0o022) === 0
+    && !sudoers.isSymbolicLink()
+    && sudoers.isFile()
+    && sudoers.uid === 0
+    && sudoers.gid === 0
+    && sudoersMode === 0o440;
+}
+
 export async function hasFridayPrivilegedHelper(): Promise<boolean> {
-  try {
-    await access(FRIDAY_PRIVILEGED_HELPER, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
+  if (process.platform !== "linux") return false;
+  const username = currentUser();
+  const targets = [fridaySudoersTarget(username), legacyFridaySudoersTarget(username)].filter(
+    (value): value is string => value !== undefined,
+  );
+  for (const sudoersTarget of targets) {
+    try {
+      const [helper, sudoers] = await Promise.all([lstat(FRIDAY_PRIVILEGED_HELPER), lstat(sudoersTarget)]);
+      if (privilegeBrokerMetadataIsSecure(helper, sudoers)) return true;
+    } catch {
+      continue;
+    }
   }
+  return false;
 }
 
 export async function installFridayPrivilegeBroker(): Promise<void> {
@@ -98,7 +136,7 @@ export async function installFridayPrivilegeBroker(): Promise<void> {
   const scratch = await mkdtemp(join(tmpdir(), "friday-privileged-"));
   const helperSource = join(scratch, "friday-privileged");
   const sudoersSource = join(scratch, "sudoers");
-  const sudoersTarget = `${FRIDAY_SUDOERS_PREFIX}${username}`;
+  const sudoersTarget = fridaySudoersTarget(username);
   const sudoers = `${username} ALL=(root) NOPASSWD: ${FRIDAY_PRIVILEGED_HELPER} voice-deps\n`;
   try {
     await writeFile(helperSource, HELPER, { mode: 0o700 });

@@ -1,14 +1,86 @@
 import { chmod } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { getFridayHome } from "../plugins/runtime-settings/runtime-env.js";
-import { collectDoctorChecks } from "../plugins/host-doctor/collector.js";
+import { readSavedChannels } from "../plugins/channels/config.js";
+import { modelCredentialVaultRef, modelOAuthCredentialVaultRef, modelProviderTypicallyNeedsApiKey } from "../plugins/auth/model-credential-ref.js";
+import { collectDoctorChecks as collectCanonicalDoctorChecks, type DoctorSources } from "../plugins/host-doctor/collector.js";
+import { hasFridayPrivilegedHelper } from "../plugins/host-privileges/privileged.js";
 import type { DoctorCheck, DoctorLevel, DoctorRepairId, DoctorSection } from "../plugins/host-doctor/contract.js";
+import { getFridayHome, readRuntimeSettings } from "../plugins/runtime-settings/runtime-env.js";
+import { selectSandboxProvider } from "../plugins/sandbox/providers/index.js";
+import { voiceCredentialVaultRef } from "../plugins/voice/credential-ref.js";
+import { readVoiceSettings } from "../plugins/voice/settings.js";
 import { runSetupCli } from "./setup-cli.js";
 import { FRIDAY_VERSION } from "./version.js";
 
-export { collectDoctorChecks } from "../plugins/host-doctor/collector.js";
 export type { DoctorCheck, DoctorLevel, DoctorRepairId, DoctorSection } from "../plugins/host-doctor/contract.js";
+
+const CLI_DOCTOR_SOURCES: DoctorSources = Object.freeze({
+  runtimeSettings: (home: string) => readRuntimeSettings(home),
+  async channels(home: string) {
+    const saved = await readSavedChannels(home);
+    const enabledEntries = Object.entries(saved.channels).filter(([, value]) => value?.enabled);
+    return Object.freeze({
+      enabled: Object.freeze(enabledEntries.map(([id]) => id).sort()),
+      allowAll: Object.freeze(enabledEntries.filter(([, value]) => value?.allowAll === true).map(([id]) => id).sort()),
+      whatsappEnabled: saved.channels.whatsapp?.enabled === true,
+    });
+  },
+  async modelCredential(provider: string, vaultRefs: ReadonlySet<string>) {
+    const apiKeyRef = modelCredentialVaultRef(provider);
+    const oauthRef = modelOAuthCredentialVaultRef(provider);
+    return Object.freeze({
+      apiKeyRef,
+      oauthRef,
+      hasApiKey: vaultRefs.has(apiKeyRef),
+      hasOAuth: vaultRefs.has(oauthRef),
+      typicallyNeedsApiKey: modelProviderTypicallyNeedsApiKey(provider),
+    });
+  },
+  async voice(home: string, vaultRefs: ReadonlySet<string>) {
+    const settings = await readVoiceSettings(home);
+    if (!settings?.stt && !settings?.tts) {
+      return Object.freeze({ configured: false, missingCredentials: Object.freeze([]) });
+    }
+    const providers = [...new Set([settings.stt?.provider, settings.tts?.provider].filter((value): value is "openai" | "deepgram" | "elevenlabs" => Boolean(value)))];
+    const missing = providers.filter((provider) => {
+      const ref = provider === "openai" ? modelCredentialVaultRef("openai") : voiceCredentialVaultRef(provider);
+      return !vaultRefs.has(ref);
+    });
+    return Object.freeze({
+      configured: true,
+      detail: [settings.stt ? `STT=${settings.stt.provider}/${settings.stt.model}` : undefined, settings.tts ? `TTS=${settings.tts.provider}/${settings.tts.model}` : undefined].filter(Boolean).join(" · "),
+      missingCredentials: Object.freeze(missing),
+    });
+  },
+  async hostPrivileges(home: string) {
+    const settings = await readRuntimeSettings(home);
+    const privilegeMode = settings?.hostPrivilegeMode ?? "none";
+    const privilegedHelperInstalled = await hasFridayPrivilegedHelper();
+    return Object.freeze({
+      privilegeMode,
+      privilegedHelperInstalled,
+      ready: privilegeMode === "none" || privilegedHelperInstalled,
+    });
+  },
+  async sandbox() {
+    const provider = selectSandboxProvider();
+    const service = provider.createService();
+    const status = provider.probe();
+    return Object.freeze({
+      available: status.available,
+      displayName: provider.descriptor.displayName,
+      detail: [provider.descriptor.id, provider.descriptor.isolationClass, service.image, status.reason ?? status.status].filter(Boolean).join(" · "),
+      status: status.status,
+      imageMissing: status.status === "image-missing",
+      repairHint: provider.repairHint(status),
+    });
+  },
+});
+
+export function collectDoctorChecks(environment: NodeJS.ProcessEnv = process.env): Promise<readonly DoctorCheck[]> {
+  return collectCanonicalDoctorChecks(environment, CLI_DOCTOR_SOURCES);
+}
 
 const SECTION_ORDER: readonly DoctorSection[] = Object.freeze(["Installation", "Configuration", "Security", "Tooling", "Recovery"]);
 

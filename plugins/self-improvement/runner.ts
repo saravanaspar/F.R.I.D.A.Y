@@ -28,7 +28,7 @@ const DEFAULT_RESTART_TIMEOUT_MS = 30_000;
 const DEFAULT_TAKEOVER_TIMEOUT_MS = 30 * 60_000;
 const SELF_IMPROVEMENT_AGENT_PROMPT = [
   "You are implementing a self-improvement candidate in an isolated Git worktree. Modify only this worktree. Do not edit .git metadata and do not commit; the host finalizes a verified commit after strict gates pass.",
-  "Obey the objective's explicit placement decision. Before editing, search plugins/*/contract.ts and the relevant plugin manifests. Treat those typed contracts as FRIDAY's public reusable API catalog: if a required operation already exists, declare that capability in requires/optional and call it through ctx.services.require/optional instead of duplicating logic or importing sibling runtime implementation. Extend the closest owner's semantic contract only when the operation is genuinely absent. Use an MCP integration for externally supplied tool protocols. Create a new plugin only for a genuinely distinct durable domain boundary. Put code in src/ only for framework-neutral boot, orchestration, lifecycle, or security invariants. Never weaken architecture tests.",
+  "Obey the objective's explicit placement decision. Before editing, search plugins/*/contract.ts and the relevant plugin manifests. Treat those typed contracts as FRIDAY's public reusable API and extension catalog: if a required operation already exists, declare that capability in requires/optional and call it through ctx.services.require/optional; if an existing contribution or hook is the intended extension point, contribute/register through that contract. Do not duplicate logic or import sibling runtime implementation. Extend the closest owner's semantic contract only when the operation or extension point is genuinely absent. Use an MCP integration for externally supplied tool protocols. Create a new plugin only for a genuinely distinct durable domain boundary. Put code in src/ only for framework-neutral boot, orchestration, lifecycle, or security invariants. Never weaken architecture tests.",
   "For a new connector or integration, define an explicit capability/contribution boundary, lifecycle ownership, configuration/status surface, least-privilege authorization, secret handling through trusted credential/Vault mechanisms, and deterministic tests. The plugin must boot safely while unconfigured and expose an explicit unconfigured/auth-required status; credentials or OAuth/pairing are acquired only after the verified successor is running. Add a test proving unconfigured startup does not crash activation. Never embed credentials or make model-visible chat carry secrets.",
   "Preserve compatibility with existing plugin boundaries. Add tests that prove the new feature, its failure/security cases, and lifecycle cleanup. Do not weaken, skip, delete, or rewrite unrelated tests merely to make gates pass.",
   "Use bash and edit to inspect, implement, test, and repair the objective. Continue until the configured host gates pass.",
@@ -44,8 +44,9 @@ export interface SelfImprovementRunnerDependencies {
   readonly worktrees: WorktreesService;
 }
 
-export function getSelfImprovementStateRoot(input?: string): string {
-  return resolve(input ?? process.env.FRIDAY_STATE_DIR ?? join(homedir(), ".friday"));
+export function getSelfImprovementStateRoot(input?: string, environment: NodeJS.ProcessEnv = process.env): string {
+  const configured = input?.trim() || environment.FRIDAY_STATE_DIR?.trim() || environment.FRIDAY_HOME?.trim();
+  return resolve(configured || join(homedir(), ".friday"));
 }
 
 export function getSelfImprovementMissionDir(root: string): string {

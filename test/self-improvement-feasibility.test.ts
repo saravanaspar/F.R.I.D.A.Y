@@ -144,14 +144,34 @@ describe("self-improvement feasibility gate", () => {
     await service.assessFeasibility({ ...request, objective: "reuse durable memory search and storage" });
     expect(feasibilityMessages).toHaveLength(1);
     const payload = JSON.parse(feasibilityMessages[0]!) as {
-      capabilityContracts?: { source?: string; contracts?: Array<{ plugin?: string; capabilities?: string[]; services?: string[]; publicApi?: string }> };
+      capabilityContracts?: {
+        source?: string;
+        complete?: boolean;
+        issues?: string[];
+        contracts?: Array<{
+          plugin?: string;
+          capabilities?: string[];
+          contributions?: string[];
+          hooks?: string[];
+          services?: string[];
+          publicTypes?: string[];
+          publicApi?: string;
+        }>;
+      };
     };
     expect(payload.capabilityContracts?.source).toBe("configured-plugin-contracts");
+    expect(payload.capabilityContracts?.complete).toBe(true);
+    expect(payload.capabilityContracts?.issues).toEqual([]);
     const memory = payload.capabilityContracts?.contracts?.find((entry) => entry.plugin === "memory");
     expect(memory?.capabilities).toContain("memory");
     expect(memory?.services).toContain("MemoryService");
+    expect(memory?.publicTypes).toContain("MemoryStoreService");
     expect(memory?.publicApi).toContain("openStore");
     expect(memory?.publicApi).toContain("formatRelevant");
+    const system = payload.capabilityContracts?.contracts?.find((entry) => entry.plugin === "system");
+    expect(system?.capabilities).toEqual([]);
+    expect(system?.contributions).toEqual(expect.arrayContaining(["system.action", "system.status", "system.active-work"]));
+    expect(system?.publicTypes).toContain("SystemActionContribution");
   });
 
   it("stops before user messaging, authorization, or build when a code placement has a dirty baseline", async () => {

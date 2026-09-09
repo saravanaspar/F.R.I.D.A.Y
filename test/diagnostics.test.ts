@@ -5,9 +5,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { definePlugin, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import diagnosticsPlugin from "../plugins/diagnostics/index.js";
-import { collectDoctorChecks } from "../plugins/host-doctor/collector.js";
+import { collectDoctorChecks } from "../src/doctor.js";
 import hostDoctorPlugin from "../plugins/host-doctor/index.js";
 import { DIAGNOSTICS_CAPABILITY } from "../plugins/diagnostics/contract.js";
+import { CHANNELS_CAPABILITY } from "../plugins/channels/contract.js";
+import { MODEL_CREDENTIALS_CAPABILITY } from "../plugins/auth/contract.js";
+import { HOST_PRIVILEGES_CAPABILITY } from "../plugins/host-privileges/contract.js";
+import { SANDBOX_HEALTH_CAPABILITY } from "../plugins/sandbox/contract.js";
+import { VOICE_CAPABILITY } from "../plugins/voice/contract.js";
 import { OBSERVABILITY_CAPABILITY, type ObservabilityService } from "../plugins/observability/contract.js";
 import { RUNTIME_SETTINGS_CAPABILITY } from "../plugins/runtime-settings/contract.js";
 import { saveRuntimeSettings } from "../plugins/runtime-settings/runtime-env.js";
@@ -93,6 +98,68 @@ describe("diagnostics", () => {
       } as unknown as ObservabilityService;
       ctx.services.provide(OBSERVABILITY_CAPABILITY, observability);
     }), { defer: true });
+    await friday.activatePlugin(definePlugin({ id: "test-diagnostics-channels", provides: [CHANNELS_CAPABILITY] }, (ctx) => {
+      ctx.services.provide(CHANNELS_CAPABILITY, {
+        list: () => [],
+        status: () => ({ health: "unconfigured", configured: 0, up: 0, degraded: 0, down: 0, retryCount: 0, inboundFailures: 0, outboundFailures: 0, authFailures: 0, networkFailures: 0, backlog: 0, pending: { credentialCaptures: 0, approvals: 0, prompts: 0 } }) as never,
+        access: () => ({ enabled: [], allowAll: [], whatsappEnabled: false }),
+        subscribe: () => () => undefined,
+      });
+    }), { defer: true });
+    await friday.activatePlugin(definePlugin({ id: "test-diagnostics-credentials", provides: [MODEL_CREDENTIALS_CAPABILITY] }, (ctx) => {
+      ctx.services.provide(MODEL_CREDENTIALS_CAPABILITY, {
+        ref: (provider: string) => `vault://models/${provider}/api-key`,
+        oauthRef: (provider: string) => `vault://models/${provider}/oauth`,
+        has: () => false,
+        hasOAuth: () => false,
+        supportsOAuth: () => false,
+        typicallyNeedsApiKey: () => false,
+        getApiKey: async () => undefined,
+        requestApiKeyCapture: async () => ({ id: "unused" }),
+        captureApiKey: async () => ({ id: "unused" }),
+        captureOAuth: async () => ({ id: "unused" }),
+      });
+    }), { defer: true });
+    await friday.activatePlugin(definePlugin({ id: "test-diagnostics-host-privileges", provides: [HOST_PRIVILEGES_CAPABILITY] }, (ctx) => {
+      ctx.services.provide(HOST_PRIVILEGES_CAPABILITY, {
+        status: async () => ({ privilegeMode: "none", privilegedHelperInstalled: false, ready: true }),
+        installApprovedVoiceDependencies: async () => { throw new Error("not used"); },
+      });
+    }), { defer: true });
+    await friday.activatePlugin(definePlugin({ id: "test-diagnostics-sandbox", provides: [SANDBOX_HEALTH_CAPABILITY] }, (ctx) => {
+      ctx.services.provide(SANDBOX_HEALTH_CAPABILITY, {
+        snapshot: () => ({
+          provider: {
+            id: "test",
+            displayName: "Test sandbox",
+            isolationClass: "userspace-kernel",
+            capabilities: {
+              filesystemIsolation: true,
+              processIsolation: true,
+              networkIsolation: true,
+              resourceLimits: true,
+              writableWorkspace: true,
+              trustedReadOnlyMounts: true,
+              persistentProcesses: true,
+              rootless: true,
+              daemonless: true,
+              sharesHostKernel: false,
+            },
+          },
+          probe: { available: false, status: "binary-unavailable", reason: "test sandbox unavailable" },
+          repairHint: "install the test sandbox",
+        }),
+      });
+    }), { defer: true });
+    await friday.activatePlugin(definePlugin({ id: "test-diagnostics-voice", provides: [VOICE_CAPABILITY] }, (ctx) => {
+      ctx.services.provide(VOICE_CAPABILITY, {
+        settings: undefined,
+        credentialConfigured: () => false,
+        status: () => ({ sttCredentialConfigured: false, ttsCredentialConfigured: false }),
+        transcribe: async () => { throw new Error("not used"); },
+        synthesize: async () => { throw new Error("not used"); },
+      } as never);
+    }), { defer: true });
     await friday.activatePlugin(definePlugin({ id: "test-diagnostics-runtime", provides: [RUNTIME_SETTINGS_CAPABILITY] }, (ctx) => {
       ctx.services.provide(RUNTIME_SETTINGS_CAPABILITY, {
         async read() {
@@ -129,9 +196,12 @@ describe("diagnostics", () => {
 
     const diagnostics = requireCapability(DIAGNOSTICS_CAPABILITY);
     const doctor = await diagnostics.doctor();
-    expect(doctor).toEqual(await collectDoctorChecks(process.env));
+    const cliDoctor = await collectDoctorChecks(process.env);
+    expect(doctor.map((check) => check.id)).toEqual(cliDoctor.map((check) => check.id));
     expect(doctor.find((check) => check.id === "runtime-settings")).toMatchObject({ level: "ok", message: "router-only" });
     expect(doctor.find((check) => check.id === "model-credential")?.message).not.toBe("main model is required");
+    expect(doctor.find((check) => check.id === "host-privileges")).toMatchObject({ level: "ok", message: "disabled by local policy" });
+    expect(doctor.find((check) => check.id === "sandbox")?.fix).toBe("install the test sandbox");
 
     const review = await diagnostics.review({ component: "voice", limit: 20 });
     expect(review.runtime).toMatchObject({ routerOnly: true, mainModelConfigured: false, hostPrivilegeMode: "none" });
