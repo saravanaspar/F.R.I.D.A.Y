@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "assets": [
+    {
+      "source": "tooling/bge_worker.py",
+      "target": "memory/bge_worker.py"
+    }
+  ]
+}

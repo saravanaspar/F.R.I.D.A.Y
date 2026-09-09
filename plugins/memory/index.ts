@@ -1,13 +1,15 @@
 import * as memory from "@friday/memory";
+import { memoryEmbeddingHealth } from "./health.js";
+import { reportOperationalError } from "@friday/operational-errors";
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readdirSync } from "node:fs";
-import { basename, join, relative, resolve } from "node:path";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync, type Dirent } from "node:fs";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { FridayPlugin } from "../../src/plugin.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { AGENT_TOOL_CONTRIBUTION, type AgentExtensionJsonValue } from "../turn-loop/contract.js";
 import { PERMISSIONS_CAPABILITY } from "../permissions/contract.js";
 import { ownerStateRoot, principalScope } from "../principal-scope.js";
-import { SYSTEM_ACTION_CONTRIBUTION, type SystemJsonObject } from "../system/contract.js";
+import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION, type SystemJsonObject } from "../system/contract.js";
 import { MEMORY_CAPABILITY, type MemoryOpenOptions, type MemoryService } from "./contract.js";
 import { homedir } from "node:os";
 
@@ -31,10 +33,53 @@ function withGlobalStore<T>(ownerScope: string | undefined, operation: (store: I
   const store = new memory.MemoryStore({
     stateDir: memory.getGlobalMemoryStateDir(ownerStateRoot(rootDir(), ownerScope)),
     scope: "global",
-    embeddingProvider: null,
   });
   try {
     return operation(store);
+  } finally {
+    store.close();
+  }
+}
+
+async function withGlobalStoreAsync<T>(
+  ownerScope: string | undefined,
+  operation: (store: InstanceType<typeof memory.MemoryStore>) => Promise<T>,
+): Promise<T> {
+  const store = new memory.MemoryStore({
+    stateDir: memory.getGlobalMemoryStateDir(ownerStateRoot(rootDir(), ownerScope)),
+    scope: "global",
+  });
+  try {
+    return await operation(store);
+  } finally {
+    store.close();
+  }
+}
+
+function withGlobalReadStore<T>(ownerScope: string | undefined, operation: (store: InstanceType<typeof memory.MemoryStore>) => T): T {
+  const store = new memory.MemoryStore({
+    stateDir: memory.getGlobalMemoryStateDir(ownerStateRoot(rootDir(), ownerScope)),
+    scope: "global",
+    readOnly: true,
+  });
+  try {
+    return operation(store);
+  } finally {
+    store.close();
+  }
+}
+
+async function withGlobalReadStoreAsync<T>(
+  ownerScope: string | undefined,
+  operation: (store: InstanceType<typeof memory.MemoryStore>) => Promise<T>,
+): Promise<T> {
+  const store = new memory.MemoryStore({
+    stateDir: memory.getGlobalMemoryStateDir(ownerStateRoot(rootDir(), ownerScope)),
+    scope: "global",
+    readOnly: true,
+  });
+  try {
+    return await operation(store);
   } finally {
     store.close();
   }
@@ -50,14 +95,49 @@ function withScopedStore<T>(
     ? memory.getGlobalMemoryStateDir(ownerStateRoot(rootDir(), ownerScope))
     : memory.getLocalMemoryStateDir(sessionArtifactDir);
   if (!stateDir) throw new Error("Local memory requires a persistent session");
-  const store = new memory.MemoryStore({ stateDir, scope, embeddingProvider: null });
+  const store = new memory.MemoryStore({ stateDir, scope });
   try { return operation(store); } finally { store.close(); }
 }
 
-const SECRET_TEXT = /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password|passwd|authorization)\b\s*[:=]\s*[^\s]{8,}|\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}))+/i;
+async function withScopedStoreAsync<T>(
+  scope: "global" | "local",
+  sessionArtifactDir: string | undefined,
+  ownerScope: string | undefined,
+  operation: (store: InstanceType<typeof memory.MemoryStore>) => Promise<T>,
+): Promise<T> {
+  const stateDir = scope === "global"
+    ? memory.getGlobalMemoryStateDir(ownerStateRoot(rootDir(), ownerScope))
+    : memory.getLocalMemoryStateDir(sessionArtifactDir);
+  if (!stateDir) throw new Error("Local memory requires a persistent session");
+  const store = new memory.MemoryStore({ stateDir, scope });
+  try { return await operation(store); } finally { store.close(); }
+}
 
-function assertNonSecretMemory(value: string, label: string): void {
-  if (SECRET_TEXT.test(value)) throw new Error(`${label} appears to contain authentication material; secrets belong in Vault, not Memory`);
+async function withScopedReadStoreAsync<T>(
+  scope: "global" | "local",
+  sessionArtifactDir: string | undefined,
+  ownerScope: string | undefined,
+  operation: (store: InstanceType<typeof memory.MemoryStore>) => Promise<T>,
+): Promise<T> {
+  const stateDir = scope === "global"
+    ? memory.getGlobalMemoryStateDir(ownerStateRoot(rootDir(), ownerScope))
+    : memory.getLocalMemoryStateDir(sessionArtifactDir);
+  if (!stateDir) throw new Error("Local memory requires a persistent session");
+  const store = new memory.MemoryStore({ stateDir, scope, readOnly: true });
+  try { return await operation(store); } finally { store.close(); }
+}
+
+async function bestEffortRefreshEntry(
+  store: InstanceType<typeof memory.MemoryStore>,
+  kind: memory.MemoryEntryKind,
+  id: string,
+  operation: string,
+): Promise<void> {
+  try {
+    await store.refreshEmbedding(kind, id);
+  } catch (error) {
+    reportOperationalError({ component: "memory", operation, error, severity: "warn", outcome: "degraded" });
+  }
 }
 
 function safeMemoryContext(value: unknown): Record<string, unknown> | undefined {
@@ -66,7 +146,7 @@ function safeMemoryContext(value: unknown): Record<string, unknown> | undefined 
   let serialized: string;
   try { serialized = JSON.stringify(context); } catch { throw new Error("memory relation context must be JSON-serializable"); }
   if (serialized.length > 8_000) throw new Error("memory relation context exceeds 8000 characters");
-  assertNonSecretMemory(serialized, "memory relation context");
+  memory.assertMemoryTextHasNoSecrets(serialized, "memory relation context");
   return context;
 }
 
@@ -74,7 +154,7 @@ function memoryText(value: unknown, label: string, maximum = 24_000): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must be a non-empty string`);
   const normalized = value.replaceAll("\u0000", "\ufffd").trim();
   if (normalized.length > maximum) throw new Error(`${label} exceeds ${maximum} characters`);
-  assertNonSecretMemory(normalized, label);
+  memory.assertMemoryTextHasNoSecrets(normalized, label);
   return normalized;
 }
 
@@ -84,37 +164,101 @@ function memoryScope(value: unknown): "global" | "local" {
   throw new Error("scope must be global or local");
 }
 
+function canonicalProjectRoot(cwd: string): string {
+  const root = realpathSync.native(resolve(cwd));
+  const info = statSync(root);
+  if (!info.isDirectory()) throw new Error("Project memory indexing requires a workspace directory");
+  return root;
+}
+
+function pathInside(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function sameFileIdentity(left: { readonly dev: number | bigint; readonly ino: number | bigint }, right: { readonly dev: number | bigint; readonly ino: number | bigint }): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
 function projectKey(cwd: string): string {
-  const name = basename(resolve(cwd)).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project";
-  const suffix = createHash("sha256").update(resolve(cwd)).digest("hex").slice(0, 8);
+  // Preserve the pre-v1.0.4 logical workspace key so hardening traversal does
+  // not duplicate an existing project's indexed Memory when cwd is a symlink.
+  const root = resolve(cwd);
+  const name = basename(root).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project";
+  const suffix = createHash("sha256").update(root).digest("hex").slice(0, 8);
   return `${name}-${suffix}`;
 }
 
 interface ProjectDoc { readonly path: string; readonly content: string; readonly headings: readonly string[]; }
 
 function projectDocs(cwd: string): readonly ProjectDoc[] {
-  const root = resolve(cwd);
+  const root = canonicalProjectRoot(cwd);
   const results: ProjectDoc[] = [];
   let totalBytes = 0;
   const visit = (dir: string, depth: number): void => {
     if (depth > 4 || results.length >= 64 || totalBytes >= 2 * 1024 * 1024) return;
-    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    let canonicalDir: string;
+    try {
+      canonicalDir = realpathSync.native(dir);
+      if (!pathInside(root, canonicalDir) || !statSync(canonicalDir).isDirectory()) return;
+    } catch {
+      return;
+    }
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(canonicalDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
       if (results.length >= 64 || totalBytes >= 2 * 1024 * 1024) break;
       if ([".git", "node_modules", "vendor", "dist", "build", ".next", ".venv", "venv"].includes(entry.name)) continue;
-      const path = join(dir, entry.name);
-      const info = lstatSync(path);
-      if (info.isSymbolicLink()) continue;
-      const rel = relative(root, path).replaceAll("\\", "/");
-      if (entry.isDirectory()) {
-        if (depth === 0 && entry.name !== "docs" && entry.name !== ".github") continue;
-        visit(path, depth + 1);
+      const path = join(canonicalDir, entry.name);
+      let info: ReturnType<typeof lstatSync>;
+      try {
+        info = lstatSync(path);
+      } catch {
         continue;
       }
-      if (!entry.isFile() || !/\.md(?:own)?$/i.test(entry.name)) continue;
+      if (info.isSymbolicLink()) continue;
+
+      if (info.isDirectory()) {
+        if (depth === 0 && entry.name !== "docs" && entry.name !== ".github") continue;
+        try {
+          const child = realpathSync.native(path);
+          const childInfo = statSync(child);
+          if (!pathInside(root, child) || !childInfo.isDirectory() || !sameFileIdentity(info, childInfo)) continue;
+          visit(child, depth + 1);
+        } catch {
+          continue;
+        }
+        continue;
+      }
+      if (!info.isFile() || !/\.md(?:own)?$/i.test(entry.name)) continue;
       if (depth === 0 && !/^(README|AGENTS|CONTRIBUTING|ARCHITECTURE|DESIGN|ROADMAP|SECURITY)(?:\.[^.]+)?\.md$/i.test(entry.name) && !/^(README|AGENTS)\.md$/i.test(entry.name)) continue;
-      if (info.size > 128 * 1024 || totalBytes + info.size > 2 * 1024 * 1024) continue;
-      const raw = readFileSync(path, "utf8").replaceAll("\u0000", "\ufffd");
-      if (SECRET_TEXT.test(raw)) continue;
+
+      // Pin the final file descriptor and verify that its canonical target is
+      // still the same inode inside the canonical workspace. This rejects both
+      // final-component symlinks and ancestor-directory swap races.
+      let descriptor: number | undefined;
+      let raw: string | undefined;
+      let rel: string | undefined;
+      try {
+        descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        const opened = fstatSync(descriptor);
+        if (!opened.isFile()) continue;
+        const canonicalFile = realpathSync.native(path);
+        const canonicalInfo = statSync(canonicalFile);
+        if (!pathInside(root, canonicalFile) || !canonicalInfo.isFile() || !sameFileIdentity(opened, canonicalInfo)) continue;
+        if (opened.size > 128 * 1024 || totalBytes + opened.size > 2 * 1024 * 1024) continue;
+        rel = relative(root, canonicalFile).replaceAll("\\", "/");
+        raw = readFileSync(descriptor, "utf8").replaceAll("\u0000", "\ufffd");
+      } catch {
+        continue;
+      } finally {
+        if (descriptor !== undefined) closeSync(descriptor);
+      }
+      if (raw === undefined || rel === undefined || memory.containsMemorySecretMaterial(raw)) continue;
       totalBytes += Buffer.byteLength(raw);
       const content = raw.slice(0, 48_000);
       const headings = content.split(/\r?\n/).flatMap((line) => {
@@ -139,6 +283,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
         ...(options.stateDir === undefined ? {} : { stateDir: options.stateDir }),
         ...(options.scope === undefined ? {} : { scope: options.scope }),
         ...(options.inMemory === undefined ? {} : { inMemory: options.inMemory }),
+        ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
         ...(options.semanticSearch === false ? { embeddingProvider: null } : {}),
       });
     },
@@ -149,6 +294,13 @@ const memoryPlugin: FridayPlugin = definePlugin({
     mergeStates: memory.mergeMemoryStates,
   });
   ctx.services.provide(MEMORY_CAPABILITY, service);
+  ctx.effect(() => memory.disposeDefaultMemoryEmbeddingProvider());
+
+  ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
+    id: "memory",
+    label: "Memory",
+    snapshot: () => memoryEmbeddingHealth(),
+  });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
     id: "memory-recall",
@@ -167,16 +319,18 @@ const memoryPlugin: FridayPlugin = definePlugin({
     async execute(input, _signal, executionContext) {
       const query = stringValue(input.query, "query")!;
       const limit = typeof input.limit === "number" ? input.limit : 8;
-      const global = withGlobalStore(executionContext?.ownerScope, (store) => ({
-        notes: store.search(query, { kinds: ["memory"], limit }),
-        relations: store.queryRelations({ query, limit }),
-      }));
-      const local = executionContext?.sessionArtifactDir
-        ? withScopedStore("local", executionContext.sessionArtifactDir, executionContext.ownerScope, (store) => ({
-            notes: store.search(query, { kinds: ["memory"], limit: Math.min(limit, 6) }),
-            relations: store.queryRelations({ query, limit: Math.min(limit, 6) }),
-          }))
-        : { notes: [], relations: [] };
+      const [global, local] = await Promise.all([
+        withGlobalReadStoreAsync(executionContext?.ownerScope, async (store) => ({
+          notes: await store.hybridSearch(query, { kinds: ["memory"], limit }),
+          relations: store.queryRelations({ query, limit }),
+        })),
+        executionContext?.sessionArtifactDir
+          ? withScopedReadStoreAsync("local", executionContext.sessionArtifactDir, executionContext.ownerScope, async (store) => ({
+              notes: await store.hybridSearch(query, { kinds: ["memory"], limit: Math.min(limit, 6) }),
+              relations: store.queryRelations({ query, limit: Math.min(limit, 6) }),
+            }))
+          : Promise.resolve({ notes: [], relations: [] }),
+      ]);
       return { output: { global, local } as unknown as AgentExtensionJsonValue };
     },
   });
@@ -210,13 +364,17 @@ const memoryPlugin: FridayPlugin = definePlugin({
         action: { id: "memory.remember", effect: "system-write", resource: `memory:${scope}:${path}`, network: false },
         reason: `remember durable ${scope} note: ${title}`,
       });
-      const entry = withScopedStore(scope, executionContext?.sessionArtifactDir, executionContext?.ownerScope, (store) => store.upsert("memory", {
-        title,
-        content,
-        path,
-        source: "agent-explicit-memory",
-        metadata: { rememberedBy: "agent", explicit: true },
-      }));
+      const entry = await withScopedStoreAsync(scope, executionContext?.sessionArtifactDir, executionContext?.ownerScope, async (store) => {
+        const persisted = store.upsert("memory", {
+          title,
+          content,
+          path,
+          source: "agent-explicit-memory",
+          metadata: { rememberedBy: "agent", explicit: true },
+        });
+        await bestEffortRefreshEntry(store, "memory", persisted.id, "refresh embedding after explicit remember");
+        return persisted;
+      });
       return { output: entry as unknown as AgentExtensionJsonValue };
     },
   });
@@ -363,7 +521,6 @@ const memoryPlugin: FridayPlugin = definePlugin({
             metadata: {
               project: key,
               relativePath: doc.path,
-              cwd: executionContext.cwd,
               contentSha256: digest,
               indexedAt: new Date().toISOString(),
             },
@@ -394,7 +551,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
           content: `Bounded documentation index for ${basename(executionContext.cwd)}.`,
           path: `projects/${key}/index`,
           source: "project-documentation-manifest",
-          metadata: { project: key, cwd: executionContext.cwd, files: currentFiles, indexedAt: new Date().toISOString() },
+          metadata: { project: key, files: currentFiles, indexedAt: new Date().toISOString() },
         });
         return {
           project: key,
@@ -406,7 +563,42 @@ const memoryPlugin: FridayPlugin = definePlugin({
           paths: docs.map((doc) => doc.path),
         };
       });
+      try {
+        await withGlobalStoreAsync(executionContext.ownerScope, async (store) => { await store.refreshEmbeddings(); });
+      } catch (error) {
+        reportOperationalError({ component: "memory", operation: "refresh project-document embeddings", error, severity: "warn", outcome: "degraded" });
+      }
       return { output: result as unknown as AgentExtensionJsonValue };
+    },
+  });
+
+  ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+    id: "memory.embeddings.status",
+    label: "Memory semantic index status",
+    description: "Report the configured semantic Memory provider and counts of ready, missing, or stale entry embeddings.",
+    parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+    permission() {
+      return { id: "memory.embeddings.status", effect: "private-read", resource: "memory:embeddings", network: false };
+    },
+    execute(_input, context) {
+      return withGlobalReadStore(principalScope(context.turn.principal), (store) => store.embeddingStatus());
+    },
+  });
+
+  ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+    id: "memory.embeddings.refresh",
+    label: "Refresh Memory semantic index",
+    description: "Explicitly backfill missing or stale BGE embeddings for durable Memory entries. This never downloads models; run `friday setup memory` first if BGE is not ready.",
+    parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+    permission() {
+      return { id: "memory.embeddings.refresh", effect: "system-write", resource: "memory:embeddings", network: false };
+    },
+    async execute(_input, context) {
+      return withGlobalStoreAsync(principalScope(context.turn.principal), async (store) => {
+        const before = store.embeddingStatus();
+        const refreshed = await store.refreshEmbeddings();
+        return { refreshed, before, after: store.embeddingStatus() };
+      });
     },
   });
 
@@ -425,7 +617,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
     execute(input, context) {
       const query = stringValue(input.query, "query", false);
       const limit = typeof input.limit === "number" ? input.limit : 20;
-      return withGlobalStore(principalScope(context.turn.principal), (store) => store.queryRelations({ ...(query === undefined ? {} : { query }), limit }));
+      return withGlobalReadStore(principalScope(context.turn.principal), (store) => store.queryRelations({ ...(query === undefined ? {} : { query }), limit }));
     },
   });
 
@@ -444,24 +636,23 @@ const memoryPlugin: FridayPlugin = definePlugin({
     execute(input, context) {
       const query = stringValue(input.query, "query", false)?.toLocaleLowerCase();
       const limit = typeof input.limit === "number" ? Math.max(1, Math.min(200, Math.trunc(input.limit))) : 100;
-      return withGlobalStore(principalScope(context.turn.principal), (store) => {
-        const notes = store.list("memory")
-          .filter((entry) => !query || `${entry.title} ${entry.content} ${entry.path} ${entry.source}`.toLocaleLowerCase().includes(query))
-          .slice(0, limit)
-          .map((entry) => ({
-            id: entry.id,
-            title: entry.title,
-            content: entry.content,
-            path: entry.path,
-            scope: entry.scope,
-            source: entry.source,
-            createdAt: entry.created_at,
-            updatedAt: entry.updated_at,
-            version: entry.version,
-          }));
-        const relations = (store.snapshot().relations ?? [])
-          .filter((relation) => !query || `${relation.subject} ${relation.predicate} ${relation.object} ${relation.source}`.toLocaleLowerCase().includes(query))
-          .slice(0, limit);
+      return withGlobalReadStore(principalScope(context.turn.principal), (store) => {
+        const noteEntries = query
+          ? store.search(query, { kinds: ["memory"], limit }).map((result) => result.entry)
+          : store.listRecent("memory", limit);
+        const notes = noteEntries.map((entry) => ({
+          id: entry.id,
+          title: entry.title,
+          content: entry.content,
+          path: entry.path,
+          scope: entry.scope,
+          source: entry.source,
+          createdAt: entry.created_at,
+          updatedAt: entry.updated_at,
+          version: entry.version,
+        }));
+        const relations = store.queryRelations({ ...(query ? { query } : {}), limit })
+          .map((result) => result.relation);
         const groups = new Map<string, typeof relations>();
         for (const relation of relations) {
           const key = `${relation.subject.trim().toLocaleLowerCase()}\u0000${relation.predicate.trim().toLocaleLowerCase()}`;
@@ -503,42 +694,47 @@ const memoryPlugin: FridayPlugin = definePlugin({
       const id = stringValue(input.id, "id")!;
       return { id: "memory.correct", effect: "system-write", resource: `memory:correction:${id}`, network: false };
     },
-    execute(input, context) {
+    async execute(input, context) {
       const id = memoryText(input.id, "memory id", 160);
       if (input.kind !== "note" && input.kind !== "relation") throw new Error("kind must be note or relation");
-      return withGlobalStore(principalScope(context.turn.principal), (store) => {
+      return withGlobalStoreAsync(principalScope(context.turn.principal), async (store) => {
         if (input.kind === "note") {
           const existing = store.get("memory", id);
           if (!existing) throw new Error(`Memory note not found: ${id}`);
+          if (input.title === undefined && input.content === undefined && input.path === undefined) {
+            throw new Error("Memory note correction requires at least one of title, content, or path");
+          }
           const corrected = store.update("memory", id, {
-            title: memoryText(input.title, "title", 240),
-            content: memoryText(input.content, "content"),
-            path: input.path === undefined ? existing.path : memoryText(input.path, "path", 240),
-            reference: existing.reference,
-            arguments: existing.arguments,
+            ...(input.title === undefined ? {} : { title: memoryText(input.title, "title", 240) }),
+            ...(input.content === undefined ? {} : { content: memoryText(input.content, "content") }),
+            ...(input.path === undefined ? {} : { path: memoryText(input.path, "path", 240) }),
             metadata: { ...existing.metadata, correctedAt: new Date().toISOString(), correctedFromSource: existing.source },
             source: "operator-correction",
+            expectedVersion: existing.version,
           });
+          await bestEffortRefreshEntry(store, "memory", id, "refresh embedding after operator correction");
           return { kind: "note", replacedId: id, memory: corrected };
         }
-        const previous = store.snapshot();
-        const existing = (previous.relations ?? []).find((relation) => relation.id === id);
+        const existing = store.getRelation(id);
         if (!existing) throw new Error(`Memory relation not found: ${id}`);
-        const relationContext = safeMemoryContext(input.context) ?? existing.context;
-        try {
-          if (!store.deleteRelation(id)) throw new Error(`Memory relation changed before correction: ${id}`);
-          const corrected = store.observeRelation({
-            subject: input.subject === undefined ? existing.subject : memoryText(input.subject, "subject", 512),
-            predicate: input.predicate === undefined ? existing.predicate : memoryText(input.predicate, "predicate", 128),
-            object: memoryText(input.object, "object", 512),
-            context: { ...relationContext, correctedAt: new Date().toISOString(), correctedFromId: id, correctedFromSource: existing.source },
-            source: "operator-correction",
-          });
-          return { kind: "relation", replacedId: id, memory: corrected };
-        } catch (error) {
-          store.replaceState(previous);
-          throw error;
+        if (input.subject === undefined && input.predicate === undefined && input.object === undefined && input.context === undefined) {
+          throw new Error("Memory relation correction requires at least one of subject, predicate, object, or context");
         }
+        const relationContext = safeMemoryContext(input.context) ?? existing.context;
+        const corrected = store.replaceRelation(id, {
+          ...(input.subject === undefined ? {} : { subject: memoryText(input.subject, "subject", 512) }),
+          ...(input.predicate === undefined ? {} : { predicate: memoryText(input.predicate, "predicate", 128) }),
+          ...(input.object === undefined ? {} : { object: memoryText(input.object, "object", 512) }),
+          context: {
+            ...relationContext,
+            correctedAt: new Date().toISOString(),
+            correctedFromId: id,
+            correctedFromSource: existing.source,
+          },
+          source: "operator-correction",
+          expectedUpdatedAt: existing.updated_at,
+        });
+        return { kind: "relation", replacedId: id, memory: corrected };
       });
     },
   });

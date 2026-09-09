@@ -353,7 +353,7 @@ describe("plugin boundaries", () => {
       expect(source, path).not.toContain("completeSimple");
       expect(source, path).not.toContain("buildSystemPrompt");
       expect(source, path).not.toContain("createAgentSession");
-      expect(source, path).not.toContain("node:child_process");
+      if (!path.endsWith("/bge.ts")) expect(source, path).not.toContain("node:child_process");
     }
   });
 

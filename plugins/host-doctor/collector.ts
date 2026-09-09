@@ -60,6 +60,7 @@ export interface DoctorSources {
   voice(home: string, vaultRefs: ReadonlySet<string>): Promise<DoctorVoiceSnapshot>;
   hostPrivileges(home: string): Promise<DoctorHostPrivilegeSnapshot>;
   sandbox(): Promise<DoctorSandboxSnapshot>;
+  memory?(): Promise<unknown>;
 }
 
 function getFridayHome(environment: NodeJS.ProcessEnv = process.env): string {
@@ -831,6 +832,23 @@ export async function collectDoctorChecks(
   checks.push(executionPythonCheck(environment));
   checks.push(await whatsappToolingCheck(environment, home, channels));
   checks.push(await sandboxCheck(sources));
+  try {
+    const snapshot = await sources.memory?.();
+    const status = snapshot && typeof snapshot === "object" ? snapshot as Record<string, unknown> : {};
+    const level = status.healthy === false || status.status === "error" ? "error"
+      : status.ready !== true || status.status === "degraded" ? "warn" : "ok";
+    const counts = ["globalStores", "readyEntries", "missingEntries", "staleEntries", "databaseErrors"]
+      .flatMap((key) => typeof status[key] === "number" && Number.isSafeInteger(status[key]) ? [`${key}=${status[key]}`] : []);
+    checks.push(check("memory", "Tooling", level, "Memory embeddings",
+      level === "ok" ? "ready" : "needs attention", {
+        detail: [`BGE=${status.ready === true ? "provisioned" : "unavailable"}`, `worker=${status.active === true ? "warm" : "unloaded"}`, ...counts].join(" · "),
+        ...(level === "ok" ? {} : { fix: "Run `friday setup memory` if BGE is unavailable, then use `memory.embeddings.refresh` for missing/stale vectors." }),
+      }));
+  } catch {
+    checks.push(check("memory", "Tooling", "error", "Memory embeddings", "could not be inspected", {
+      fix: "Inspect `memory.embeddings.status`; use `friday setup memory` to provision BGE. No repair was attempted.",
+    }));
+  }
   checks.push(await backupCheck(environment));
   checks.push(await latestCrash(home));
   checks.push(await diskCheck(home));

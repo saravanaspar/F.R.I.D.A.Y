@@ -1,5 +1,6 @@
 import type {
   MemoryEntry,
+  MemoryEmbeddingStatus,
   MemoryEntryKind,
   MemoryEntryUpdate,
   MemoryEntryWrite,
@@ -7,6 +8,7 @@ import type {
   MemoryRelation,
   MemoryRelationQuery,
   MemoryRelationResult,
+  MemoryRelationUpdate,
   MemoryRelationWrite,
   MemoryScope,
   MemorySearchOptions,
@@ -21,6 +23,8 @@ export interface MemoryOpenOptions {
   readonly stateDir?: string | undefined;
   readonly scope?: MemoryScope | undefined;
   readonly inMemory?: boolean | undefined;
+  /** Open the store through a non-mutating SQLite/read path. */
+  readonly readOnly?: boolean | undefined;
   /** Disable semantic/vector retrieval while preserving lexical memory behavior. */
   readonly semanticSearch?: boolean | undefined;
 }
@@ -32,13 +36,23 @@ export interface MemoryOpenOptions {
 export interface MemoryStoreService {
   readonly stateDir: string | undefined;
   readonly scope: MemoryScope;
+  readonly readOnly: boolean;
   readonly statePath: string | undefined;
   close(): void;
   snapshot(): MemoryState;
   replaceState(state: MemoryState): void;
   get(kind: MemoryEntryKind, id: string): MemoryEntry | undefined;
   list(kind?: MemoryEntryKind): MemoryEntry[];
+  /** Bounded newest-first listing for operator review. */
+  listRecent(kind: MemoryEntryKind, limit?: number): MemoryEntry[];
+  /** Deterministic lexical-only retrieval for routing and automatic context. */
   search(query: string, options?: MemorySearchOptions): MemorySearchResult[];
+  /** Explicit semantic recall; degrades to lexical when the configured model is unavailable. */
+  hybridSearch(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]>;
+  embeddingStatus(): MemoryEmbeddingStatus;
+  /** Explicit maintenance; search/recall never backfills vectors as a side effect. */
+  refreshEmbeddings(): Promise<number>;
+  refreshEmbedding(kind: MemoryEntryKind, id: string): Promise<boolean>;
   create(kind: MemoryEntryKind, input: MemoryEntryWrite): MemoryEntry;
   update(kind: MemoryEntryKind, id: string, input: MemoryEntryUpdate): MemoryEntry;
   upsert(kind: MemoryEntryKind, input: MemoryEntryWrite): MemoryEntry;
@@ -49,6 +63,8 @@ export interface MemoryStoreService {
     options?: { id?: string; evidence?: string; outcome?: string },
   ): MemoryRefinementEvent;
   observeRelation(input: MemoryRelationWrite): MemoryRelation;
+  getRelation(id: string): MemoryRelation | undefined;
+  replaceRelation(id: string, input: MemoryRelationUpdate): MemoryRelation;
   queryRelations(options?: MemoryRelationQuery): MemoryRelationResult[];
   deleteRelation(id: string): boolean;
 }
@@ -73,6 +89,7 @@ export const MEMORY_CAPABILITY: Capability<MemoryService> =
 
 export type {
   MemoryEntry,
+  MemoryEmbeddingStatus,
   MemoryEntryKind,
   MemoryEntryUpdate,
   MemoryEntryWrite,
@@ -80,6 +97,7 @@ export type {
   MemoryRelation,
   MemoryRelationQuery,
   MemoryRelationResult,
+  MemoryRelationUpdate,
   MemoryRelationWrite,
   MemoryScope,
   MemorySearchOptions,

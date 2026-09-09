@@ -7,6 +7,7 @@ import { runVoiceSetup } from "./voice-setup.js";
 import { installFridayPrivilegeBroker } from "../plugins/host-privileges/privileged.js";
 import { setupExecutionPython } from "../plugins/execution/setup.js";
 import { setupWhatsApp } from "../plugins/channels/tooling.js";
+import { setupMemoryEmbeddings } from "../plugins/memory/tooling.js";
 import { createTerminalOnboardingIO } from "./terminal-setup-ui.js";
 import { initializeOnboardingState, updateOnboardingStep, type OnboardingStepId } from "../plugins/runtime-settings/onboarding-state.js";
 import type { HostPrivilegeMode } from "../plugins/runtime-settings/runtime-env.js";
@@ -40,6 +41,7 @@ function setupHelp(): void {
     "  friday setup                    First run: Quick or Custom; router + trusted operator channel + privilege policy are mandatory",
     "  friday setup [model options]    Scriptable model/routing/permission configuration",
     "  friday setup execution-python   Provision the private IPython kernel environment",
+    "  friday setup memory             Provision BGE-small-en-v1.5 INT8 semantic Memory",
     "  friday setup sandbox            Prepare the configured sandbox provider and its approved image",
     "  friday setup whatsapp           Install the optional WhatsApp bridge dependencies",
     "  friday setup voice              Configure hosted/local STT + TTS and automatically provision selected local models",
@@ -260,6 +262,7 @@ async function runSetupCliInternal(args: readonly string[]): Promise<void> {
   }
   if (rest.length > 0) throw new Error(`Unexpected setup arguments: ${rest.join(" ")}`);
   if (component === "execution-python") { await setupExecutionPython(); return; }
+  if (component === "memory") { await setupMemoryEmbeddings(); return; }
   if (component === "whatsapp") { await setupWhatsApp(); return; }
   if (component === "voice") return runVoiceSetup({ home: getFridayHome(process.env) }).then(() => undefined);
   if (component === "sandbox") return setupSandbox();

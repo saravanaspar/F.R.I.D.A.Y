@@ -175,6 +175,7 @@ function suggestedActions(checks: readonly DiagnosticDoctorCheck[]): readonly st
     if (check.repair === "sandbox") result.add("sandbox.setup");
     if (check.repair === "setup") result.add("onboarding.continue");
     if (check.id === "voice") result.add("voice.setup");
+    if (check.id === "memory") result.add("memory.embeddings.status");
   }
   return Object.freeze([...result]);
 }
