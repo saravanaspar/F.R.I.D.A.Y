@@ -6,9 +6,19 @@ This project is a stateful personal-agent runtime with trusted channels, credent
 
 ## Before you start
 
+You do **not** need to understand the entire runtime before contributing. Prefer a small, owned boundary and let the repository's architecture checks tell you when a change crosses one.
+
 - Search existing issues and pull requests before opening a duplicate.
 - For security vulnerabilities, do **not** open a public issue. Follow `SECURITY.md`.
 - For large architectural changes, open an issue first and describe the problem, desired behavior, and affected plugin boundaries.
+
+### Good ways to make a first contribution
+
+- Pick a [`good first issue`](https://github.com/saravanaspar/F.R.I.D.A.Y/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22).
+- Browse [`help wanted`](https://github.com/saravanaspar/F.R.I.D.A.Y/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22help%20wanted%22) issues for larger scoped work.
+- Start with [`docs/plugins/README.md`](docs/plugins/README.md) if you want to add a plugin, Agent tool, System action, hook, or provider.
+- Use the Plugin Proposal issue form when the capability does not already have an obvious owner.
+- Check [`docs/ROADMAP.md`](docs/ROADMAP.md) for areas where maintainers actively want help.
 
 ## Development setup
 
@@ -37,7 +47,8 @@ Before changing architecture, read:
 - `docs/architecture/ARCHITECTURE_CONTRACT.md`
 - relevant ADRs under `docs/architecture/adr/`
 - `scripts/check-plugin-boundaries.mjs`
-- `docs/PLUGIN_DEVELOPMENT.md` for the minimal plugin-authoring workflow
+- `docs/PLUGIN_DEVELOPMENT.md` for the authoritative plugin-authoring and discoverability rules
+- `docs/plugins/README.md` for the contributor-oriented plugin entry point
 
 Important expectations:
 
@@ -50,6 +61,18 @@ Important expectations:
 7. Security-sensitive filesystem code should fail closed on malformed permissions, unsafe symlinks, or unexpected identities.
 8. Reusable sibling behavior should come from the owner's typed `contract.ts`; trusted companion contracts are authority boundaries, not convenience APIs.
 9. Sandbox backends belong behind `SandboxProvider`; add in-repo providers in `plugins/sandbox/providers/` and register them only in `plugins/sandbox/providers/index.ts`.
+
+### Plugin contribution quick path
+
+Before adding a new plugin or public extension point:
+
+1. Run `npm run inspect:plugins` and search the existing capability/contribution/hook catalog.
+2. Reuse an existing owner when the behavior belongs to an existing domain plugin.
+3. Declare the real public surface once in `contract.ts` with a typed capability, contribution, or hook. Do not maintain a second discovery list.
+4. Register concrete contribution instances through the normal plugin context; ownership and static instance IDs are discovered automatically.
+5. Add focused tests and run `npm run check:architecture`. Hidden surfaces, duplicate static contribution IDs, orphaned semantic service/contribution/hook types, and sibling implementation bypasses are expected to fail the gate.
+
+See [`docs/plugins/README.md`](docs/plugins/README.md) for examples to study and [`docs/PLUGIN_DEVELOPMENT.md`](docs/PLUGIN_DEVELOPMENT.md) for the complete rules.
 
 ## Making a change
 

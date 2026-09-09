@@ -5,8 +5,10 @@
 <h1 align="center">F.R.I.D.A.Y</h1>
 
 <p align="center">
-  <strong>A self-hosted personal AI assistant that can remember, plan, automate, code, communicate, schedule, use tools and integrations, recover from interruptions, and extend its capabilities over time.</strong>
+  <strong>The secure self-improving personal AI agent — local-first, self-hosted, with persistent memory, tools, voice, MCP, automation, and verified self-extension.</strong>
 </p>
+
+<p align="center"><em>Built to work for you. Built to get better.</em></p>
 
 <p align="center">
   <a href="https://github.com/saravanaspar/F.R.I.D.A.Y/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/saravanaspar/F.R.I.D.A.Y/actions/workflows/ci.yml/badge.svg" /></a>
@@ -22,21 +24,31 @@
   <a href="#how-it-fits-together">Architecture</a> &middot;
   <a href="#channels">Channels</a> &middot;
   <a href="#durability-and-recovery">Recovery</a> &middot;
-  <a href="#development">Development</a>
+  <a href="#development">Development</a> &middot;
+  <a href="#contributing">Contribute</a>
 </p>
 
 ---
 
 ## Meet F.R.I.D.A.Y
 
-F.R.I.D.A.Y is designed to behave less like a one-shot chatbot and more like a long-lived assistant that stays useful across projects, devices, sessions, and restarts.
+F.R.I.D.A.Y is a local-first, self-hosted personal AI agent designed to behave less like a one-shot chatbot and more like a long-lived assistant that stays useful across projects, devices, sessions, and restarts.
 
 It combines a plugin-first agent runtime with durable sessions and background jobs, persistent memory, scheduling, multi-channel messaging, secure tool execution, MCP integrations, encrypted secrets, observability, and a verified self-improvement/restart path.
 
-You can talk to the same assistant from a configured messaging channel, give it work that takes time, continue doing something else, come back later, schedule future work in your own timezone, or ask it to extend a missing capability when the runtime can safely build and verify one.
+The self-improvement path is reuse-first: F.R.I.D.A.Y inspects existing tools, actions, typed plugin capabilities, contribution instances, and MCP options before deciding new code is necessary. When code is required, changes are isolated, evaluated, verified, promoted, and handed off through explicit lifecycle boundaries instead of treating the running system as an unrestricted rewrite target.
+
+You can talk to the same agent from a configured messaging channel, give it work that takes time, continue doing something else, come back later, schedule future work in your own timezone, or ask it to extend a missing capability when the runtime can safely build and verify one.
 
 > [!IMPORTANT]
 > F.R.I.D.A.Y can execute code, invoke tools, communicate with external services, and mutate files when permitted. Treat it like powerful local automation software: review permissions, use sandboxing where appropriate, protect credentials, and do not expose trusted channels to untrusted users.
+
+## Why F.R.I.D.A.Y is different
+
+- **Self-improving, not self-rewriting by default.** Reuse and capability discovery come first; verified self-extension is a bounded fallback when an explicitly requested capability is actually missing.
+- **Plugin-native and machine-discoverable.** Typed capabilities, contributions, hooks, and concrete contribution instances are discoverable from the real plugin contracts/registrations rather than a manually maintained feature catalog.
+- **Local-first and self-hosted.** Runtime state, durable sessions, memory, tools, and operator controls live under your installation rather than requiring a hosted assistant service.
+- **Security is part of the architecture.** Vault, permissions, sandboxing, trusted channel principals, typed authority boundaries, verification, rollback, and authenticated lifecycle handoff are designed into the runtime.
 
 ## What F.R.I.D.A.Y can do
 
@@ -472,21 +484,25 @@ The root verification gate checks architecture boundaries, packaging discovery, 
 
 ### Contributing
 
-Contributions are welcome. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md), follow the [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md), and use the issue/PR templates so changes arrive with enough context to review safely.
+Contributions are welcome, and you do **not** need to understand the entire runtime before making a useful contribution. Start with a scoped [`good first issue`](https://github.com/saravanaspar/F.R.I.D.A.Y/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22), a [`help wanted`](https://github.com/saravanaspar/F.R.I.D.A.Y/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22help%20wanted%22) task, or propose a plugin through the issue templates.
+
+Plugins are the easiest way to extend F.R.I.D.A.Y without changing the core. The contributor path is: read the small plugin guide, inspect the current machine-derived plugin catalog, implement behind typed contracts, add focused tests, and let the architecture gate verify the boundaries.
 
 Useful project documents:
 
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) - development workflow and architecture expectations.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) - development workflow, first-contribution path, and architecture expectations.
+- [`docs/plugins/README.md`](docs/plugins/README.md) - contributor-oriented plugin entry point and examples to study.
+- [`docs/PLUGIN_DEVELOPMENT.md`](docs/PLUGIN_DEVELOPMENT.md) - authoritative plugin contract, discoverability, capability, permission, secret, lifecycle, and testing rules.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) - current direction, next-release focus, research items, and areas open for contributors.
 - [`SECURITY.md`](SECURITY.md) - private vulnerability reporting and security scope.
 - [`SUPPORT.md`](SUPPORT.md) - where to ask for help or report bugs.
 - [`CHANGELOG.md`](CHANGELOG.md) - notable user-facing changes.
 - [`ACKNOWLEDGEMENTS.md`](ACKNOWLEDGEMENTS.md) - upstream inspiration, adapted components, and license provenance.
 - [`docs/architecture/`](docs/architecture/) - architecture contracts and ADRs.
-- [`docs/PLUGIN_DEVELOPMENT.md`](docs/PLUGIN_DEVELOPMENT.md) - minimal plugin-authoring path, capability boundaries, permissions, secrets, lifecycle, and tests.
 
 ## Project status
 
-F.R.I.D.A.Y is under active development. Interfaces, setup flows, plugin contracts, and state formats may evolve while the project matures. Back up important state before upgrading and read release notes before deploying a new generation to an always-on installation.
+F.R.I.D.A.Y is under active development. Interfaces, setup flows, plugin contracts, and state formats may evolve while the project matures. Back up important state before upgrading and read release notes before deploying a new generation to an always-on installation. See the public [`ROADMAP`](docs/ROADMAP.md) for current direction and contributor-friendly areas.
 
 ## License
 

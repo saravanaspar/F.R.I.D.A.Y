@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Questions and ideas
+    url: https://github.com/saravanaspar/F.R.I.D.A.Y/discussions
+    about: Use Discussions for setup questions, architecture discussion, plugin ideas, and show-and-tell once Discussions are enabled.
   - name: Security vulnerability
     url: https://github.com/saravanaspar/F.R.I.D.A.Y/security
     about: Please use private vulnerability reporting instead of a public issue when available.
