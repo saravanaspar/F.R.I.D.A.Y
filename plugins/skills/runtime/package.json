@@ -1,6 +1,6 @@
 {
   "name": "@friday/skills",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "FRIDAY skill discovery, validation, metadata, and explicit invocation",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,7 +20,7 @@
     "test": "vitest run --config vitest.config.ts --configLoader runner --no-cache"
   },
   "dependencies": {
-    "@friday/operational-errors": "1.0.2",
+    "@friday/operational-errors": "1.0.3",
     "ignore": "^7.0.5",
     "yaml": "^2.9.0"
   },
