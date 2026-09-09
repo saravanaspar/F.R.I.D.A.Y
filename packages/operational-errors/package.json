@@ -1,6 +1,6 @@
 {
   "name": "@friday/operational-errors",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Dependency-free, redacted operational failure reporting for FRIDAY runtimes",
   "type": "module",
   "main": "./dist/index.js",

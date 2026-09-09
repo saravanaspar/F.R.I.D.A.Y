@@ -1,6 +1,6 @@
 {
   "name": "@friday/self-improvement",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "FRIDAY candidate lifecycle, promotion, and restart-safe generation continuation orchestration",
   "type": "module",
   "main": "./dist/index.js",

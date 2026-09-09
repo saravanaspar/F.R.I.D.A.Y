@@ -1,6 +1,6 @@
 {
   "name": "@friday/autonomy",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "FRIDAY autonomous continuation budgets and quality gates",
   "type": "module",
   "main": "./dist/index.js",
