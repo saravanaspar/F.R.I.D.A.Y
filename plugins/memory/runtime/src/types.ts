@@ -61,6 +61,19 @@ export interface MemoryRelationWrite {
   observedAt?: string | undefined;
 }
 
+/** Atomic replacement patch for one existing relation. Omitted fields are preserved. */
+export interface MemoryRelationUpdate {
+  subject?: string | undefined;
+  predicate?: string | undefined;
+  object?: string | undefined;
+  context?: Record<string, unknown> | undefined;
+  source?: string | undefined;
+  confidence?: number | undefined;
+  observedAt?: string | undefined;
+  /** Fail rather than replacing a relation that changed after it was reviewed. */
+  expectedUpdatedAt?: string | undefined;
+}
+
 export interface MemoryRelationQuery {
   query?: string | undefined;
   subject?: string | undefined;
@@ -88,13 +101,16 @@ export interface MemoryEntryWrite {
 }
 
 export interface MemoryEntryUpdate {
-  title: string;
-  content: string;
+  /** Omitted fields preserve the current persisted value. */
+  title?: string;
+  content?: string;
   path?: string;
   reference?: Record<string, unknown>;
   arguments?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   source?: string;
+  /** Fail rather than overwriting when the caller corrected a stale snapshot. */
+  expectedVersion?: number;
 }
 
 export interface MemorySearchOptions {

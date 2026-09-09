@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { MemoryDatabase } from "../src/database.js";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   MemoryStore,
@@ -204,6 +205,9 @@ describe("memory SQLite persistence and migration", () => {
     database.close();
 
     const upgraded = new MemoryStore({ stateDir: dir, embeddingProvider: semanticTestProvider });
+    expect(upgraded.search("adaptive sequence")).toEqual([]);
+    expect(upgraded.refreshEmbeddings()).toBe(1);
+    expect(upgraded.refreshEmbeddings()).toBe(0);
     expect(upgraded.search("adaptive sequence")[0]).toMatchObject({
       entry: { id: "pscls" },
       matchedBy: "semantic",
@@ -213,7 +217,67 @@ describe("memory SQLite persistence and migration", () => {
     const reopened = new DatabaseSync(getMemoryStatePath(dir), { readOnly: true });
     const version = reopened.prepare("PRAGMA user_version").get() as { user_version: number };
     reopened.close();
-    expect(version.user_version).toBe(3);
+    expect(version.user_version).toBe(4);
+  });
+
+  it("migrates context-split relation identities into one semantic edge", () => {
+    const dir = makeTempDir();
+    const initialized = new MemoryStore({ stateDir: dir, scope: "global", embeddingProvider: null });
+    initialized.snapshot();
+    initialized.close();
+
+    const database = new DatabaseSync(getMemoryStatePath(dir));
+    database.exec("PRAGMA user_version = 3");
+    const insert = database.prepare(`
+      INSERT INTO memory_relations(
+        id, scope, subject, predicate, object, context_json, source,
+        confidence, occurrences, first_observed_at, last_observed_at, updated_at
+      ) VALUES (?, 'global', 'user', 'usually_orders', 'biryani', ?, ?, ?, ?, ?, ?, ?)
+    `);
+    insert.run(
+      "rel_legacy_a",
+      JSON.stringify({ integration: "swiggy", item: "chicken" }),
+      "legacy-a",
+      0.7,
+      2,
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-02T00:00:00.000Z",
+      "2026-01-02T00:00:00.000Z",
+    );
+    insert.run(
+      "rel_legacy_b",
+      JSON.stringify({ integration: "swiggy", coupon: "SAVE" }),
+      "legacy-b",
+      0.9,
+      3,
+      "2026-01-03T00:00:00.000Z",
+      "2026-01-04T00:00:00.000Z",
+      "2026-01-04T00:00:00.000Z",
+    );
+    database.close();
+
+    const upgraded = new MemoryStore({ stateDir: dir, scope: "global", embeddingProvider: null });
+    const relations = upgraded.snapshot().relations ?? [];
+    expect(relations).toHaveLength(1);
+    expect(relations[0]).toMatchObject({
+      subject: "user",
+      predicate: "usually_orders",
+      object: "biryani",
+      source: "legacy-b",
+      confidence: 0.9,
+      occurrences: 5,
+      first_observed_at: "2026-01-01T00:00:00.000Z",
+      last_observed_at: "2026-01-04T00:00:00.000Z",
+      context: { integration: "swiggy", item: "chicken", coupon: "SAVE" },
+    });
+    expect(relations[0]?.id).not.toBe("rel_legacy_a");
+    expect(relations[0]?.id).not.toBe("rel_legacy_b");
+    upgraded.close();
+
+    const reopened = new DatabaseSync(getMemoryStatePath(dir), { readOnly: true });
+    const version = reopened.prepare("PRAGMA user_version").get() as { user_version: number };
+    reopened.close();
+    expect(version.user_version).toBe(4);
   });
 
   it("fails before creating SQLite state when legacy JSON is corrupt", () => {
@@ -291,6 +355,79 @@ describe("MemoryStore", () => {
       metadata: { source: "test" },
       version: 2,
     });
+  });
+
+  it("supports partial updates and rejects stale optimistic corrections", () => {
+    const store = new MemoryStore({ stateDir: makeTempDir(), embeddingProvider: null });
+    const created = store.create("memory", {
+      id: "patchable",
+      title: "Original title",
+      content: "Original content",
+      path: "notes/original",
+      metadata: { stable: true },
+    });
+
+    const updated = store.update("memory", "patchable", {
+      content: "Corrected content",
+      expectedVersion: created.version,
+    });
+    expect(updated).toMatchObject({
+      title: "Original title",
+      content: "Corrected content",
+      path: "notes/original",
+      metadata: { stable: true },
+      version: 2,
+    });
+
+    expect(() => store.update("memory", "patchable", {
+      path: "notes/stale",
+      expectedVersion: created.version,
+    })).toThrow(/changed concurrently/);
+    expect(store.get("memory", "patchable")?.path).toBe("notes/original");
+  });
+
+  it("rejects secret-shaped durable notes at the Memory storage boundary", () => {
+    const store = new MemoryStore({ stateDir: makeTempDir(), embeddingProvider: null });
+    expect(() => store.create("memory", {
+      id: "secret",
+      title: "Credential",
+      content: "api_key=sk-abcdefghijklmnopqrstuvwxyz123456",
+    })).toThrow(/secrets belong in Vault/);
+    expect(store.get("memory", "secret")).toBeUndefined();
+
+    store.create("memory", { id: "safe", title: "Safe", content: "ordinary durable note" });
+    expect(() => store.update("memory", "safe", {
+      metadata: { access_token: "ghp_abcdefghijklmnopqrstuvwxyz123456" },
+    })).toThrow(/secrets belong in Vault/);
+    expect(() => store.update("memory", "safe", {
+      metadata: { nested: [["api_key=sk-abcdefghijklmnopqrstuvwxyz123456"]] },
+    })).toThrow(/secrets belong in Vault/);
+    expect(store.get("memory", "safe")?.metadata).toEqual({});
+  });
+
+  it("keeps secret rejection intact across bulk replacement and refinement records", () => {
+    const store = new MemoryStore({ stateDir: makeTempDir(), scope: "global", embeddingProvider: null });
+    const clean = store.snapshot();
+    clean.entries.memory.leak = {
+      id: "leak",
+      kind: "memory",
+      title: "Credential",
+      content: "password=super-secret-value",
+      path: "notes",
+      scope: "global",
+      reference: {},
+      arguments: {},
+      metadata: {},
+      source: "test",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      version: 1,
+    };
+    expect(() => store.replaceState(clean)).toThrow(/secrets belong in Vault/);
+    expect(() => store.recordRefinement("review", ["changed memory"], {
+      evidence: "api_key=sk-abcdefghijklmnopqrstuvwxyz123456",
+    })).toThrow(/secrets belong in Vault/);
+    expect(store.snapshot().refinements).toEqual([]);
   });
 
   it("upserts without resetting omitted fields", () => {
@@ -577,7 +714,11 @@ describe("graph preferences and habits", () => {
       observedAt: "2026-08-20T12:00:00.000Z",
     };
     const first = store.observeRelation(observation);
-    const second = store.observeRelation({ ...observation, observedAt: "2026-08-21T12:00:00.000Z" });
+    const second = store.observeRelation({
+      ...observation,
+      context: { integration: "swiggy", occasion: "weekend" },
+      observedAt: "2026-08-21T12:00:00.000Z",
+    });
     expect(second.id).toBe(first.id);
     expect(second.occurrences).toBe(2);
     expect(store.queryRelations({ query: "order the usual stuff" })[0]).toMatchObject({
@@ -585,6 +726,7 @@ describe("graph preferences and habits", () => {
     });
     expect(store.queryRelations({ query: "same biryani" })[0]?.relation.context).toEqual({
       integration: "swiggy",
+      occasion: "weekend",
       item: "chicken biryani",
     });
     store.close();
@@ -592,6 +734,78 @@ describe("graph preferences and habits", () => {
     const reopened = new MemoryStore({ stateDir: directory, scope: "global", embeddingProvider: null });
     expect(reopened.snapshot().relations).toHaveLength(1);
     expect(reopened.queryRelations({ minimumOccurrences: 2 })[0]?.relation.occurrences).toBe(2);
+  });
+
+  it("replaces relations atomically and merges into an already-known corrected edge", () => {
+    const store = new MemoryStore({ stateDir: makeTempDir(), scope: "global", embeddingProvider: null });
+    const old = store.observeRelation({
+      subject: "user",
+      predicate: "prefers_editor",
+      object: "vim",
+      context: { evidence: "old" },
+    });
+    const corrected = store.replaceRelation(old.id, {
+      object: "helix",
+      expectedUpdatedAt: old.updated_at,
+    });
+    expect(corrected).toMatchObject({ subject: "user", predicate: "prefers_editor", object: "helix" });
+    expect(store.getRelation(old.id)).toBeUndefined();
+    expect(store.getRelation(corrected.id)?.object).toBe("helix");
+
+    const first = store.observeRelation({
+      subject: "project", predicate: "uses", object: "sqlite", context: { evidence: "old" },
+    });
+    const second = store.observeRelation({
+      subject: "project", predicate: "uses", object: "postgres", context: { evidence: "confirmed" },
+    });
+    const merged = store.replaceRelation(first.id, {
+      subject: second.subject,
+      predicate: second.predicate,
+      object: second.object,
+      context: { corrected: true },
+      expectedUpdatedAt: first.updated_at,
+    });
+    expect(store.getRelation(first.id)).toBeUndefined();
+    expect(merged.id).toBe(second.id);
+    expect(merged).toMatchObject({ object: "postgres", occurrences: 2 });
+    expect(merged.context).toMatchObject({ evidence: "confirmed", corrected: true });
+  });
+
+  it("rolls back a relation replacement when insertion fails after deletion", () => {
+    const database = new MemoryDatabase({ scope: "global", inMemory: true });
+    const original = {
+      id: "rel_original",
+      scope: "global" as const,
+      subject: "user",
+      predicate: "uses",
+      object: "sqlite",
+      context: {},
+      source: "test",
+      confidence: 1,
+      occurrences: 1,
+      first_observed_at: "2026-01-01T00:00:00.000Z",
+      last_observed_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    };
+    database.insertRelation(original);
+    expect(() => database.replaceRelation(original.id, (existing) => ({
+      ...existing,
+      id: "rel_broken",
+      context: { invalid: 1n } as unknown as Record<string, unknown>,
+    }))).toThrow();
+    expect(database.getRelation(original.id)).toEqual(original);
+    expect(database.getRelation("rel_broken")).toBeUndefined();
+    database.close();
+  });
+
+  it("rejects replacing a relation reviewed at a stale timestamp", () => {
+    const store = new MemoryStore({ stateDir: makeTempDir(), scope: "global", embeddingProvider: null });
+    const relation = store.observeRelation({ subject: "user", predicate: "uses", object: "zed" });
+    expect(() => store.replaceRelation(relation.id, {
+      object: "helix",
+      expectedUpdatedAt: "1970-01-01T00:00:00.000Z",
+    })).toThrow(/changed concurrently/);
+    expect(store.getRelation(relation.id)?.object).toBe("zed");
   });
 
   it("rejects secret-shaped graph context", () => {
@@ -602,6 +816,12 @@ describe("graph preferences and habits", () => {
       object: "service",
       context: { access_token: "must-not-persist" },
     })).toThrow(/secret/);
+    expect(() => store.observeRelation({
+      subject: "user",
+      predicate: "uses",
+      object: "service",
+      context: { note: "api_key=sk-abcdefghijklmnopqrstuvwxyz123456" },
+    })).toThrow(/secrets belong in Vault/);
   });
 });
 

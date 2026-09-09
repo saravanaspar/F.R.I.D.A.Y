@@ -1,6 +1,6 @@
 import * as memory from "@friday/memory";
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join, relative, resolve } from "node:path";
 import type { FridayPlugin } from "../../src/plugin.js";
 import { definePlugin } from "../capabilities/protocol.js";
@@ -31,7 +31,6 @@ function withGlobalStore<T>(ownerScope: string | undefined, operation: (store: I
   const store = new memory.MemoryStore({
     stateDir: memory.getGlobalMemoryStateDir(ownerStateRoot(rootDir(), ownerScope)),
     scope: "global",
-    embeddingProvider: null,
   });
   try {
     return operation(store);
@@ -50,14 +49,8 @@ function withScopedStore<T>(
     ? memory.getGlobalMemoryStateDir(ownerStateRoot(rootDir(), ownerScope))
     : memory.getLocalMemoryStateDir(sessionArtifactDir);
   if (!stateDir) throw new Error("Local memory requires a persistent session");
-  const store = new memory.MemoryStore({ stateDir, scope, embeddingProvider: null });
+  const store = new memory.MemoryStore({ stateDir, scope });
   try { return operation(store); } finally { store.close(); }
-}
-
-const SECRET_TEXT = /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password|passwd|authorization)\b\s*[:=]\s*[^\s]{8,}|\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}))+/i;
-
-function assertNonSecretMemory(value: string, label: string): void {
-  if (SECRET_TEXT.test(value)) throw new Error(`${label} appears to contain authentication material; secrets belong in Vault, not Memory`);
 }
 
 function safeMemoryContext(value: unknown): Record<string, unknown> | undefined {
@@ -66,7 +59,7 @@ function safeMemoryContext(value: unknown): Record<string, unknown> | undefined 
   let serialized: string;
   try { serialized = JSON.stringify(context); } catch { throw new Error("memory relation context must be JSON-serializable"); }
   if (serialized.length > 8_000) throw new Error("memory relation context exceeds 8000 characters");
-  assertNonSecretMemory(serialized, "memory relation context");
+  memory.assertMemoryTextHasNoSecrets(serialized, "memory relation context");
   return context;
 }
 
@@ -74,7 +67,7 @@ function memoryText(value: unknown, label: string, maximum = 24_000): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must be a non-empty string`);
   const normalized = value.replaceAll("\u0000", "\ufffd").trim();
   if (normalized.length > maximum) throw new Error(`${label} exceeds ${maximum} characters`);
-  assertNonSecretMemory(normalized, label);
+  memory.assertMemoryTextHasNoSecrets(normalized, label);
   return normalized;
 }
 
@@ -102,7 +95,12 @@ function projectDocs(cwd: string): readonly ProjectDoc[] {
       if (results.length >= 64 || totalBytes >= 2 * 1024 * 1024) break;
       if ([".git", "node_modules", "vendor", "dist", "build", ".next", ".venv", "venv"].includes(entry.name)) continue;
       const path = join(dir, entry.name);
-      const info = lstatSync(path);
+      let info: ReturnType<typeof lstatSync>;
+      try {
+        info = lstatSync(path);
+      } catch {
+        continue;
+      }
       if (info.isSymbolicLink()) continue;
       const rel = relative(root, path).replaceAll("\\", "/");
       if (entry.isDirectory()) {
@@ -112,9 +110,23 @@ function projectDocs(cwd: string): readonly ProjectDoc[] {
       }
       if (!entry.isFile() || !/\.md(?:own)?$/i.test(entry.name)) continue;
       if (depth === 0 && !/^(README|AGENTS|CONTRIBUTING|ARCHITECTURE|DESIGN|ROADMAP|SECURITY)(?:\.[^.]+)?\.md$/i.test(entry.name) && !/^(README|AGENTS)\.md$/i.test(entry.name)) continue;
-      if (info.size > 128 * 1024 || totalBytes + info.size > 2 * 1024 * 1024) continue;
-      const raw = readFileSync(path, "utf8").replaceAll("\u0000", "\ufffd");
-      if (SECRET_TEXT.test(raw)) continue;
+
+      // Validate the opened descriptor itself so a workspace process cannot swap
+      // a checked Markdown file for a symlink or other file between lstat/read.
+      let descriptor: number | undefined;
+      let raw: string | undefined;
+      try {
+        descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        const opened = fstatSync(descriptor);
+        if (!opened.isFile()) continue;
+        if (opened.size > 128 * 1024 || totalBytes + opened.size > 2 * 1024 * 1024) continue;
+        raw = readFileSync(descriptor, "utf8").replaceAll("\u0000", "\ufffd");
+      } catch {
+        continue;
+      } finally {
+        if (descriptor !== undefined) closeSync(descriptor);
+      }
+      if (raw === undefined || memory.containsMemorySecretMaterial(raw)) continue;
       totalBytes += Buffer.byteLength(raw);
       const content = raw.slice(0, 48_000);
       const headings = content.split(/\r?\n/).flatMap((line) => {
@@ -363,7 +375,6 @@ const memoryPlugin: FridayPlugin = definePlugin({
             metadata: {
               project: key,
               relativePath: doc.path,
-              cwd: executionContext.cwd,
               contentSha256: digest,
               indexedAt: new Date().toISOString(),
             },
@@ -394,7 +405,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
           content: `Bounded documentation index for ${basename(executionContext.cwd)}.`,
           path: `projects/${key}/index`,
           source: "project-documentation-manifest",
-          metadata: { project: key, cwd: executionContext.cwd, files: currentFiles, indexedAt: new Date().toISOString() },
+          metadata: { project: key, files: currentFiles, indexedAt: new Date().toISOString() },
         });
         return {
           project: key,
@@ -445,23 +456,22 @@ const memoryPlugin: FridayPlugin = definePlugin({
       const query = stringValue(input.query, "query", false)?.toLocaleLowerCase();
       const limit = typeof input.limit === "number" ? Math.max(1, Math.min(200, Math.trunc(input.limit))) : 100;
       return withGlobalStore(principalScope(context.turn.principal), (store) => {
-        const notes = store.list("memory")
-          .filter((entry) => !query || `${entry.title} ${entry.content} ${entry.path} ${entry.source}`.toLocaleLowerCase().includes(query))
-          .slice(0, limit)
-          .map((entry) => ({
-            id: entry.id,
-            title: entry.title,
-            content: entry.content,
-            path: entry.path,
-            scope: entry.scope,
-            source: entry.source,
-            createdAt: entry.created_at,
-            updatedAt: entry.updated_at,
-            version: entry.version,
-          }));
-        const relations = (store.snapshot().relations ?? [])
-          .filter((relation) => !query || `${relation.subject} ${relation.predicate} ${relation.object} ${relation.source}`.toLocaleLowerCase().includes(query))
-          .slice(0, limit);
+        const noteEntries = query
+          ? store.search(query, { kinds: ["memory"], limit }).map((result) => result.entry)
+          : store.list("memory").slice(0, limit);
+        const notes = noteEntries.map((entry) => ({
+          id: entry.id,
+          title: entry.title,
+          content: entry.content,
+          path: entry.path,
+          scope: entry.scope,
+          source: entry.source,
+          createdAt: entry.created_at,
+          updatedAt: entry.updated_at,
+          version: entry.version,
+        }));
+        const relations = store.queryRelations({ ...(query ? { query } : {}), limit })
+          .map((result) => result.relation);
         const groups = new Map<string, typeof relations>();
         for (const relation of relations) {
           const key = `${relation.subject.trim().toLocaleLowerCase()}\u0000${relation.predicate.trim().toLocaleLowerCase()}`;
@@ -510,35 +520,39 @@ const memoryPlugin: FridayPlugin = definePlugin({
         if (input.kind === "note") {
           const existing = store.get("memory", id);
           if (!existing) throw new Error(`Memory note not found: ${id}`);
+          if (input.title === undefined && input.content === undefined && input.path === undefined) {
+            throw new Error("Memory note correction requires at least one of title, content, or path");
+          }
           const corrected = store.update("memory", id, {
-            title: memoryText(input.title, "title", 240),
-            content: memoryText(input.content, "content"),
-            path: input.path === undefined ? existing.path : memoryText(input.path, "path", 240),
-            reference: existing.reference,
-            arguments: existing.arguments,
+            ...(input.title === undefined ? {} : { title: memoryText(input.title, "title", 240) }),
+            ...(input.content === undefined ? {} : { content: memoryText(input.content, "content") }),
+            ...(input.path === undefined ? {} : { path: memoryText(input.path, "path", 240) }),
             metadata: { ...existing.metadata, correctedAt: new Date().toISOString(), correctedFromSource: existing.source },
             source: "operator-correction",
+            expectedVersion: existing.version,
           });
           return { kind: "note", replacedId: id, memory: corrected };
         }
-        const previous = store.snapshot();
-        const existing = (previous.relations ?? []).find((relation) => relation.id === id);
+        const existing = store.getRelation(id);
         if (!existing) throw new Error(`Memory relation not found: ${id}`);
-        const relationContext = safeMemoryContext(input.context) ?? existing.context;
-        try {
-          if (!store.deleteRelation(id)) throw new Error(`Memory relation changed before correction: ${id}`);
-          const corrected = store.observeRelation({
-            subject: input.subject === undefined ? existing.subject : memoryText(input.subject, "subject", 512),
-            predicate: input.predicate === undefined ? existing.predicate : memoryText(input.predicate, "predicate", 128),
-            object: memoryText(input.object, "object", 512),
-            context: { ...relationContext, correctedAt: new Date().toISOString(), correctedFromId: id, correctedFromSource: existing.source },
-            source: "operator-correction",
-          });
-          return { kind: "relation", replacedId: id, memory: corrected };
-        } catch (error) {
-          store.replaceState(previous);
-          throw error;
+        if (input.subject === undefined && input.predicate === undefined && input.object === undefined && input.context === undefined) {
+          throw new Error("Memory relation correction requires at least one of subject, predicate, object, or context");
         }
+        const relationContext = safeMemoryContext(input.context) ?? existing.context;
+        const corrected = store.replaceRelation(id, {
+          ...(input.subject === undefined ? {} : { subject: memoryText(input.subject, "subject", 512) }),
+          ...(input.predicate === undefined ? {} : { predicate: memoryText(input.predicate, "predicate", 128) }),
+          ...(input.object === undefined ? {} : { object: memoryText(input.object, "object", 512) }),
+          context: {
+            ...relationContext,
+            correctedAt: new Date().toISOString(),
+            correctedFromId: id,
+            correctedFromSource: existing.source,
+          },
+          source: "operator-correction",
+          expectedUpdatedAt: existing.updated_at,
+        });
+        return { kind: "relation", replacedId: id, memory: corrected };
       });
     },
   });

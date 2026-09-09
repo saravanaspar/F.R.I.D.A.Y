@@ -328,6 +328,7 @@ describe("Turn Loop agent executor", () => {
       semanticSearch: false,
     });
     aliceMemory.create("memory", { id: "launch", title: "Private launch phrase", content: "Alice-only nebula launch phrase." });
+    aliceMemory.create("prompt", { id: "prompt-shadow", title: "Private launch phrase helper", content: "PROMPT-SHOULD-NOT-BE-INJECTED" });
     aliceMemory.close();
     const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
     const contexts: string[] = [];
@@ -352,6 +353,7 @@ describe("Turn Loop agent executor", () => {
         decision: decision("session:new"),
       });
       expect(contexts[0]).toContain("Alice-only nebula launch phrase");
+      expect(contexts[0]).not.toContain("PROMPT-SHOULD-NOT-BE-INJECTED");
       expect(contexts[1]).not.toContain("Alice-only nebula launch phrase");
     } finally {
       await executor.dispose();

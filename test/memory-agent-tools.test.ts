@@ -128,8 +128,10 @@ describe("agent memory tools", () => {
     expect(refreshed.output).toMatchObject({ documents: 1, updated: 1, unchanged: 0, removed: 1 });
 
     const found = await recall.execute({ query: "event sourcing PostgreSQL Demo Decisions" });
-    expect(JSON.stringify(found.output)).toContain("README.md");
-    expect(JSON.stringify(found.output)).not.toContain("Workers communicate through a queue");
+    const serialized = JSON.stringify(found.output);
+    expect(serialized).toContain("README.md");
+    expect(serialized).not.toContain("Workers communicate through a queue");
+    expect(serialized).not.toContain(project);
   });
 
   it("rejects credentials in note bodies and relation context", async () => {
@@ -148,9 +150,15 @@ describe("agent memory tools", () => {
     })).rejects.toThrow(/secrets belong in Vault/);
   });
 
-  it("reviews sources/conflicts and replaces an outdated relation by exact id", async () => {
+  it("reviews sources/conflicts and applies atomic patch corrections by exact id", async () => {
     const { tools } = await assemble();
+    const remember = tools.find((tool) => tool.name === "memory_remember")!;
     const relation = tools.find((tool) => tool.name === "memory_remember_relation")!;
+    const note = await remember.execute({
+      title: "Deployment preference",
+      content: "Use the blue window.",
+      path: "preferences/deploy",
+    });
     const old = await relation.execute({ subject: "user", predicate: "prefers_editor", object: "vim" });
     await relation.execute({ subject: "user", predicate: "prefers_editor", object: "zed" });
     const actions = collectContributions(SYSTEM_ACTION_CONTRIBUTION);
@@ -160,11 +168,31 @@ describe("agent memory tools", () => {
       turn: { id: "turn-memory", principal: { authority: "local" as const, channel: "local", accountId: "local", conversationId: "terminal", senderId: "operator" }, text: "review memory", timestamp: Date.now(), reply: async () => undefined },
       deferAfterReply() {},
     };
+
+    const noteId = (note.output as { id: string }).id;
+    const correctedNote = await correct.execute({
+      id: noteId,
+      kind: "note",
+      content: "Use the green window.",
+    }, context) as { memory: { title: string; content: string; path: string; source: string } };
+    expect(correctedNote.memory).toMatchObject({
+      title: "Deployment preference",
+      content: "Use the green window.",
+      path: "preferences/deploy",
+      source: "operator-correction",
+    });
+    expect(() => correct.execute({ id: noteId, kind: "note" }, context)).toThrow(/requires at least one/);
+
     const before = await review.execute({ query: "prefers_editor" }, context) as { conflicts: unknown[] };
     expect(before.conflicts).toHaveLength(1);
     const oldId = (old.output as { id: string }).id;
-    const replaced = await correct.execute({ id: oldId, kind: "relation", object: "helix" }, context) as { memory: { source: string; object: string } };
-    expect(replaced.memory).toMatchObject({ source: "operator-correction", object: "helix" });
+    const replaced = await correct.execute({ id: oldId, kind: "relation", object: "helix" }, context) as { memory: { source: string; subject: string; predicate: string; object: string } };
+    expect(replaced.memory).toMatchObject({
+      source: "operator-correction",
+      subject: "user",
+      predicate: "prefers_editor",
+      object: "helix",
+    });
     const after = await review.execute({ query: "prefers_editor" }, context) as { relations: Array<{ id: string; source: string }> };
     expect(after.relations.some((entry) => entry.id === oldId)).toBe(false);
     expect(after.relations.some((entry) => entry.source === "operator-correction")).toBe(true);

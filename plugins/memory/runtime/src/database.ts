@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { cosineSimilarity } from "./embedding.js";
 import { loadLegacyMemoryState } from "./legacy.js";
+import { memoryRelationIdentity, mergeMemoryRelationObservations } from "./relation.js";
 import {
   MEMORY_ENTRY_KINDS,
   type MemoryEntry,
@@ -19,7 +20,7 @@ import {
 
 export const MEMORY_DATABASE_FILE_NAME = "memory.sqlite";
 export const LEGACY_MEMORY_STATE_FILE_NAME = "memory_state.json";
-const DATABASE_SCHEMA_VERSION = 3;
+const DATABASE_SCHEMA_VERSION = 4;
 const DEFAULT_SEARCH_LIMIT = 8;
 const MAX_SEARCH_LIMIT = 100;
 
@@ -209,6 +210,82 @@ function parseVector(value: unknown, dimensions: number): Float32Array {
   return vector;
 }
 
+function insertRelationRow(db: DatabaseSync, relation: MemoryRelation): void {
+  db.prepare(`
+    INSERT INTO memory_relations(
+      id, scope, subject, predicate, object, context_json, source,
+      confidence, occurrences, first_observed_at, last_observed_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    relation.id,
+    relation.scope,
+    relation.subject,
+    relation.predicate,
+    relation.object,
+    JSON.stringify(relation.context),
+    relation.source,
+    relation.confidence,
+    relation.occurrences,
+    relation.first_observed_at,
+    relation.last_observed_at,
+    relation.updated_at,
+  );
+}
+
+function updateRelationRow(db: DatabaseSync, relation: MemoryRelation): void {
+  const result = db.prepare(`
+    UPDATE memory_relations
+    SET context_json = ?, source = ?, confidence = ?, occurrences = ?,
+        first_observed_at = ?, last_observed_at = ?, updated_at = ?
+    WHERE id = ? AND scope = ?
+  `).run(
+    JSON.stringify(relation.context),
+    relation.source,
+    relation.confidence,
+    relation.occurrences,
+    relation.first_observed_at,
+    relation.last_observed_at,
+    relation.updated_at,
+    relation.id,
+    relation.scope,
+  );
+  if (Number(result.changes) !== 1) throw new Error(`memory relation ${JSON.stringify(relation.id)} disappeared during update`);
+}
+
+function migrateRelationIdentityV4(db: DatabaseSync): void {
+  const rows = db.prepare(`
+    SELECT id, scope, subject, predicate, object, context_json, source,
+           confidence, occurrences, first_observed_at, last_observed_at, updated_at
+    FROM memory_relations
+    ORDER BY first_observed_at ASC, id ASC
+  `).all() as Record<string, unknown>[];
+  if (rows.length === 0) return;
+
+  const merged = new Map<string, MemoryRelation>();
+  for (const row of rows) {
+    const relation = rowToRelation(row);
+    const id = memoryRelationIdentity(relation.scope, relation.subject, relation.predicate, relation.object);
+    const normalized = { ...relation, id };
+    const existing = merged.get(id);
+    merged.set(id, existing ? mergeMemoryRelationObservations(existing, normalized) : normalized);
+  }
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec("DELETE FROM memory_relations");
+    for (const relation of merged.values()) insertRelationRow(db, relation);
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch (rollbackError) {
+      reportOperationalError({ component: "memory", operation: "rollback relation identity migration", error: rollbackError });
+      throw new AggregateError([error, rollbackError], "Memory relation identity migration failed and rollback also failed");
+    }
+    throw error;
+  }
+}
+
 function initializeSchema(db: DatabaseSync): void {
   const versionRow = db.prepare("PRAGMA user_version").get() as Record<string, unknown> | undefined;
   const version = Number(versionRow?.user_version ?? 0);
@@ -319,6 +396,7 @@ function initializeSchema(db: DatabaseSync): void {
     END;
   `);
 
+  if (version < 4) migrateRelationIdentityV4(db);
   if (version < DATABASE_SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
 }
 
@@ -687,27 +765,20 @@ export class MemoryDatabase {
     });
   }
 
+  getRelation(id: string): MemoryRelation | undefined {
+    this.#assertOpen();
+    const row = this.#db.prepare(`
+      SELECT id, scope, subject, predicate, object, context_json, source,
+             confidence, occurrences, first_observed_at, last_observed_at, updated_at
+      FROM memory_relations
+      WHERE id = ? AND scope = ?
+    `).get(id, this.scope) as Record<string, unknown> | undefined;
+    return row ? rowToRelation(row) : undefined;
+  }
+
   insertRelation(relation: MemoryRelation): void {
     this.#assertOpen();
-    this.#db.prepare(`
-      INSERT INTO memory_relations(
-        id, scope, subject, predicate, object, context_json, source,
-        confidence, occurrences, first_observed_at, last_observed_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      relation.id,
-      relation.scope,
-      relation.subject,
-      relation.predicate,
-      relation.object,
-      JSON.stringify(relation.context),
-      relation.source,
-      relation.confidence,
-      relation.occurrences,
-      relation.first_observed_at,
-      relation.last_observed_at,
-      relation.updated_at,
-    );
+    insertRelationRow(this.#db, relation);
   }
 
   observeRelation(relation: MemoryRelation): MemoryRelation {
@@ -723,31 +794,38 @@ export class MemoryDatabase {
         return structuredClone(relation);
       }
       const existing = rowToRelation(existingRow);
-      if (
-        existing.scope !== relation.scope
-        || existing.subject !== relation.subject
-        || existing.predicate !== relation.predicate
-        || existing.object !== relation.object
-        || JSON.stringify(existing.context) !== JSON.stringify(relation.context)
-      ) {
-        throw new Error(`memory relation identity collision: ${relation.id}`);
-      }
-      const next: MemoryRelation = {
-        ...existing,
-        source: relation.source,
-        confidence: Math.max(existing.confidence, relation.confidence),
-        occurrences: existing.occurrences + 1,
-        last_observed_at: existing.last_observed_at.localeCompare(relation.last_observed_at) >= 0
-          ? existing.last_observed_at
-          : relation.last_observed_at,
-        updated_at: relation.updated_at,
-      };
-      this.#db.prepare(`
-        UPDATE memory_relations
-        SET source = ?, confidence = ?, occurrences = ?, last_observed_at = ?, updated_at = ?
-        WHERE id = ?
-      `).run(next.source, next.confidence, next.occurrences, next.last_observed_at, next.updated_at, next.id);
+      const next = mergeMemoryRelationObservations(existing, relation);
+      updateRelationRow(this.#db, next);
       return next;
+    });
+  }
+
+  replaceRelation(
+    id: string,
+    replacement: (existing: MemoryRelation) => MemoryRelation,
+    expectedUpdatedAt?: string,
+  ): MemoryRelation {
+    this.#assertOpen();
+    return this.#transaction(() => {
+      const existing = this.getRelation(id);
+      if (!existing) throw new Error(`memory relation ${JSON.stringify(id)} does not exist`);
+      if (expectedUpdatedAt !== undefined && existing.updated_at !== expectedUpdatedAt) {
+        throw new Error(`memory relation ${JSON.stringify(id)} changed concurrently; retry the update`);
+      }
+      const next = replacement(structuredClone(existing));
+      if (next.scope !== this.scope) throw new Error("memory relation replacement scope mismatch");
+      const target = next.id === id ? undefined : this.getRelation(next.id);
+      const deleted = this.#db.prepare("DELETE FROM memory_relations WHERE id = ? AND scope = ?").run(id, this.scope);
+      if (Number(deleted.changes) !== 1) {
+        throw new Error(`memory relation ${JSON.stringify(id)} changed concurrently; retry the update`);
+      }
+      if (target) {
+        const merged = mergeMemoryRelationObservations(target, next);
+        updateRelationRow(this.#db, merged);
+        return structuredClone(merged);
+      }
+      this.insertRelation(next);
+      return structuredClone(next);
     });
   }
 

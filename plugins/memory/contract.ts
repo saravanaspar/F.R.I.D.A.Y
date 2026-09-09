@@ -7,6 +7,7 @@ import type {
   MemoryRelation,
   MemoryRelationQuery,
   MemoryRelationResult,
+  MemoryRelationUpdate,
   MemoryRelationWrite,
   MemoryScope,
   MemorySearchOptions,
@@ -39,6 +40,8 @@ export interface MemoryStoreService {
   get(kind: MemoryEntryKind, id: string): MemoryEntry | undefined;
   list(kind?: MemoryEntryKind): MemoryEntry[];
   search(query: string, options?: MemorySearchOptions): MemorySearchResult[];
+  /** Explicit maintenance; search/recall never backfills vectors as a side effect. */
+  refreshEmbeddings(): number;
   create(kind: MemoryEntryKind, input: MemoryEntryWrite): MemoryEntry;
   update(kind: MemoryEntryKind, id: string, input: MemoryEntryUpdate): MemoryEntry;
   upsert(kind: MemoryEntryKind, input: MemoryEntryWrite): MemoryEntry;
@@ -49,6 +52,8 @@ export interface MemoryStoreService {
     options?: { id?: string; evidence?: string; outcome?: string },
   ): MemoryRefinementEvent;
   observeRelation(input: MemoryRelationWrite): MemoryRelation;
+  getRelation(id: string): MemoryRelation | undefined;
+  replaceRelation(id: string, input: MemoryRelationUpdate): MemoryRelation;
   queryRelations(options?: MemoryRelationQuery): MemoryRelationResult[];
   deleteRelation(id: string): boolean;
 }
@@ -80,6 +85,7 @@ export type {
   MemoryRelation,
   MemoryRelationQuery,
   MemoryRelationResult,
+  MemoryRelationUpdate,
   MemoryRelationWrite,
   MemoryScope,
   MemorySearchOptions,

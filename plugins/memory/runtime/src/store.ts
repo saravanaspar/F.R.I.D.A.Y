@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { MemoryDatabase, type MemoryEmbeddingRecord } from "./database.js";
 import {
   createLocalEmbeddingProvider,
@@ -6,6 +5,8 @@ import {
   normalizeEmbedding,
   type MemoryEmbeddingProvider,
 } from "./embedding.js";
+import { memoryRelationIdentity } from "./relation.js";
+import { assertMemoryTextHasNoSecrets, memoryFieldMayContainSecret } from "./security.js";
 import { getMemoryStatePath } from "./state.js";
 import {
   MEMORY_ENTRY_KINDS,
@@ -17,6 +18,7 @@ import {
   type MemoryRelation,
   type MemoryRelationQuery,
   type MemoryRelationResult,
+  type MemoryRelationUpdate,
   type MemoryRelationWrite,
   type MemoryScope,
   type MemorySearchOptions,
@@ -77,12 +79,42 @@ const MAX_SEARCH_LIMIT = 100;
 const MIN_SEMANTIC_SCORE = 0.2;
 const MAX_RELATION_TEXT = 512;
 const MAX_RELATION_CONTEXT_JSON = 8_192;
-const SECRET_CONTEXT_KEY = /(?:authorization|cookie|password|passwd|secret|token|api[-_]?key|credential|private[-_]?key|client[-_]?secret)/i;
+function assertNoSecretStructuredValue(value: unknown, label: string, depth = 0): void {
+  if (depth > 8) throw new Error(`${label} is too deeply nested`);
+  if (typeof value === "string") {
+    assertMemoryTextHasNoSecrets(value, label);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      assertNoSecretStructuredValue(value[index], `${label}[${index}]`, depth + 1);
+    }
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (memoryFieldMayContainSecret(key)) {
+      throw new Error(`${label}.${key} may contain authentication material; secrets belong in Vault, not Memory`);
+    }
+    assertNoSecretStructuredValue(item, `${label}.${key}`, depth + 1);
+  }
+}
+
+function assertSafeMemoryEntry(entry: MemoryEntry): void {
+  if (entry.kind !== "memory") return;
+  assertMemoryTextHasNoSecrets(entry.title, "memory title");
+  assertMemoryTextHasNoSecrets(entry.content, "memory content");
+  assertMemoryTextHasNoSecrets(entry.path, "memory path");
+  assertNoSecretStructuredValue(entry.reference, "memory reference");
+  assertNoSecretStructuredValue(entry.arguments, "memory arguments");
+  assertNoSecretStructuredValue(entry.metadata, "memory metadata");
+}
 
 function relationText(value: string, label: string, maximum = MAX_RELATION_TEXT): string {
   const normalized = value.normalize("NFKC").replaceAll("\u0000", "\ufffd").replace(/\s+/g, " ").trim();
   if (!normalized) throw new Error(`${label} is required`);
   if (normalized.length > maximum) throw new Error(`${label} exceeds ${maximum} characters`);
+  assertMemoryTextHasNoSecrets(normalized, label);
   return normalized;
 }
 
@@ -103,7 +135,7 @@ function safeRelationContext(value: Record<string, unknown> | undefined, depth =
   if (entries.length > 32) throw new Error("memory relation context has too many fields");
   for (const [key, item] of entries.sort(([left], [right]) => left.localeCompare(right))) {
     if (!key.trim() || key.length > 128) throw new Error("memory relation context contains an invalid field name");
-    if (SECRET_CONTEXT_KEY.test(key)) throw new Error(`memory relation context field ${key} may contain a secret`);
+    if (memoryFieldMayContainSecret(key)) throw new Error(`memory relation context field ${key} may contain a secret`);
     if (item === null || typeof item === "string" || typeof item === "boolean") {
       setOwnContextField(
         output,
@@ -130,12 +162,12 @@ function safeRelationContext(value: Record<string, unknown> | undefined, depth =
   return output;
 }
 
-function relationIdentity(scope: MemoryScope, subject: string, predicate: string, object: string, context: Record<string, unknown>): string {
-  const hash = createHash("sha256")
-    .update(JSON.stringify({ scope, subject, predicate, object, context }))
-    .digest("hex")
-    .slice(0, 32);
-  return `rel_${hash}`;
+function assertSafeMemoryRelation(relation: MemoryRelation): void {
+  relationText(relation.subject, "memory relation subject");
+  relationText(relation.predicate, "memory relation predicate", 128);
+  relationText(relation.object, "memory relation object");
+  relationText(relation.source, "memory relation source", 128);
+  safeRelationContext(relation.context);
 }
 
 function relationTerms(value: string): string[] {
@@ -182,7 +214,10 @@ export class MemoryStore {
 
   /** Replace the complete scope in one database transaction (used for host-owned compensation). */
   replaceState(state: MemoryState): void {
-    this.#withDatabase((database) => database.replaceState(structuredClone(state)));
+    const replacement = structuredClone(state);
+    for (const entry of Object.values(replacement.entries.memory)) assertSafeMemoryEntry(entry);
+    for (const relation of replacement.relations ?? []) assertSafeMemoryRelation(relation);
+    this.#withDatabase((database) => database.replaceState(replacement));
   }
 
   get(kind: MemoryEntryKind, id: string): MemoryEntry | undefined {
@@ -223,7 +258,8 @@ export class MemoryStore {
       }
       if (!query.trim()) return [];
 
-      this.#ensureEmbeddings(database, provider);
+      // Search never backfills or persists embeddings as a retrieval side effect.
+      // Missing/stale vectors are maintained by mutations or explicit maintenance.
       const candidateLimit = Math.min(
         MAX_SEARCH_LIMIT,
         Math.max(HYBRID_CANDIDATE_FLOOR, requestedLimit * 4),
@@ -279,6 +315,16 @@ export class MemoryStore {
     });
   }
 
+  /**
+   * Explicitly backfill stale/missing embeddings for this store. Search never
+   * performs embedding maintenance implicitly.
+   */
+  refreshEmbeddings(): number {
+    const provider = this.#embeddingProvider;
+    if (!provider) return 0;
+    return this.#withDatabase((database) => this.#refreshEmbeddings(database, provider));
+  }
+
   create(kind: MemoryEntryKind, input: MemoryEntryWrite): MemoryEntry {
     assertKind(kind);
     return this.#withDatabase((database) => this.#create(database, kind, input));
@@ -317,10 +363,17 @@ export class MemoryStore {
     changes: readonly string[] | string,
     options: { id?: string; evidence?: string; outcome?: string } = {},
   ): MemoryRefinementEvent {
+    assertMemoryTextHasNoSecrets(trigger, "memory refinement trigger");
+    const changeList = typeof changes === "string" ? [changes] : [...changes];
+    for (const [index, change] of changeList.entries()) {
+      assertMemoryTextHasNoSecrets(change, `memory refinement change[${index}]`);
+    }
+    if (options.evidence !== undefined) assertMemoryTextHasNoSecrets(options.evidence, "memory refinement evidence");
+    if (options.outcome !== undefined) assertMemoryTextHasNoSecrets(options.outcome, "memory refinement outcome");
     return this.#withDatabase((database) => {
       const event = database.recordRefinement(
         trigger,
-        typeof changes === "string" ? [changes] : changes,
+        changeList,
         {
           ...options,
           createdAt: now(),
@@ -344,7 +397,7 @@ export class MemoryStore {
       const observedAt = input.observedAt ?? now();
       if (Number.isNaN(Date.parse(observedAt))) throw new Error("memory relation observedAt must be an ISO timestamp");
       const relation: MemoryRelation = {
-        id: relationIdentity(this.scope, subject, predicate, object, context),
+        id: memoryRelationIdentity(this.scope, subject, predicate, object),
         scope: this.scope,
         subject,
         predicate,
@@ -359,6 +412,80 @@ export class MemoryStore {
       };
       return structuredClone(database.observeRelation(relation));
     });
+  }
+
+  getRelation(id: string): MemoryRelation | undefined {
+    const normalized = relationText(id, "memory relation id", 128);
+    return this.#withDatabase((database) => {
+      const relation = database.getRelation(normalized);
+      return relation ? structuredClone(relation) : undefined;
+    });
+  }
+
+  /**
+   * Replace one relation atomically. The old row is restored automatically if
+   * validation/insertion fails, and an optional reviewed timestamp prevents
+   * overwriting a relation changed by another process.
+   */
+  replaceRelation(id: string, input: MemoryRelationUpdate): MemoryRelation {
+    const normalized = relationText(id, "memory relation id", 128);
+    if (
+      input.subject === undefined
+      && input.predicate === undefined
+      && input.object === undefined
+      && input.context === undefined
+      && input.source === undefined
+      && input.confidence === undefined
+      && input.observedAt === undefined
+    ) {
+      throw new Error("memory relation replacement requires at least one changed field");
+    }
+    return this.#withDatabase((database) => database.replaceRelation(
+      normalized,
+      (existing) => {
+        const subject = input.subject === undefined
+          ? existing.subject
+          : relationText(input.subject, "memory relation subject");
+        const predicate = input.predicate === undefined
+          ? existing.predicate
+          : relationText(input.predicate, "memory relation predicate", 128).toLowerCase().replace(/\s+/g, "_");
+        const object = input.object === undefined
+          ? existing.object
+          : relationText(input.object, "memory relation object");
+        const context = input.context === undefined
+          ? structuredClone(existing.context)
+          : safeRelationContext(input.context);
+        const source = input.source === undefined
+          ? existing.source
+          : relationText(input.source, "memory relation source", 128);
+        const confidence = input.confidence ?? existing.confidence;
+        if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+          throw new Error("memory relation confidence must be between 0 and 1");
+        }
+        const nextId = memoryRelationIdentity(this.scope, subject, predicate, object);
+        const sameSemanticEdge = nextId === existing.id;
+        const observedAt = input.observedAt ?? (sameSemanticEdge ? existing.last_observed_at : now());
+        if (Number.isNaN(Date.parse(observedAt))) throw new Error("memory relation observedAt must be an ISO timestamp");
+        const updatedAt = now();
+        return {
+          id: nextId,
+          scope: this.scope,
+          subject,
+          predicate,
+          object,
+          context,
+          source,
+          confidence,
+          occurrences: sameSemanticEdge ? existing.occurrences : 1,
+          first_observed_at: sameSemanticEdge ? existing.first_observed_at : observedAt,
+          last_observed_at: sameSemanticEdge
+            ? (existing.last_observed_at.localeCompare(observedAt) >= 0 ? existing.last_observed_at : observedAt)
+            : observedAt,
+          updated_at: updatedAt,
+        };
+      },
+      input.expectedUpdatedAt,
+    ));
   }
 
   queryRelations(options: MemoryRelationQuery = {}): MemoryRelationResult[] {
@@ -410,6 +537,7 @@ export class MemoryStore {
       updated_at: timestamp,
       version: 1,
     };
+    assertSafeMemoryEntry(entry);
     try {
       const provider = this.#embeddingProvider;
       if (provider) database.insertEntryWithEmbedding(entry, this.#embeddingRecord(provider, entry));
@@ -432,10 +560,30 @@ export class MemoryStore {
     const existing = database.getEntry(kind, id);
     if (!existing) throw new Error(`${kind} entry ${JSON.stringify(id)} does not exist`);
     if (kind === "skill" && input.reference !== undefined) validateSkillReference(input.reference);
+    if (
+      input.title === undefined
+      && input.content === undefined
+      && input.path === undefined
+      && input.reference === undefined
+      && input.arguments === undefined
+      && input.metadata === undefined
+      && input.source === undefined
+    ) {
+      throw new Error("memory update requires at least one changed field");
+    }
+
+    if (input.expectedVersion !== undefined) {
+      if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 1) {
+        throw new Error("memory expectedVersion must be a positive integer");
+      }
+      if (existing.version !== input.expectedVersion) {
+        throw new Error(`${kind} entry ${JSON.stringify(id)} changed concurrently; retry the update`);
+      }
+    }
 
     const expectedVersion = existing.version;
-    existing.title = input.title;
-    existing.content = input.content;
+    if (input.title !== undefined) existing.title = input.title;
+    if (input.content !== undefined) existing.content = input.content;
     if (input.path !== undefined) existing.path = input.path;
     if (input.reference !== undefined) existing.reference = structuredClone(input.reference);
     if (input.arguments !== undefined) existing.arguments = structuredClone(input.arguments);
@@ -443,6 +591,7 @@ export class MemoryStore {
     existing.source = input.source ?? existing.source;
     existing.updated_at = now();
     existing.version += 1;
+    assertSafeMemoryEntry(existing);
 
     const provider = this.#embeddingProvider;
     const updated = provider
@@ -482,10 +631,12 @@ export class MemoryStore {
     };
   }
 
-  #ensureEmbeddings(database: MemoryDatabase, provider: MemoryEmbeddingProvider): void {
-    for (const entry of database.listEntriesNeedingEmbedding(provider.id, provider.dimensions)) {
+  #refreshEmbeddings(database: MemoryDatabase, provider: MemoryEmbeddingProvider): number {
+    const entries = database.listEntriesNeedingEmbedding(provider.id, provider.dimensions);
+    for (const entry of entries) {
       database.upsertEmbedding(entry.kind, entry.id, this.#embeddingRecord(provider, entry));
     }
+    return entries.length;
   }
 
   #withDatabase<T>(operation: (database: MemoryDatabase) => T): T {

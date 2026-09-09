@@ -5,6 +5,26 @@ Notable user-facing changes to F.R.I.D.A.Y are tracked here.
 The project is in active development. GitHub Releases contain the authoritative
 published release artifacts and generated release notes.
 
+## [1.0.4] - Unreleased
+
+### Memory correctness and retrieval
+
+- Made `memory.correct` a true patch operation: omitted note/relation fields are preserved, empty corrections are rejected, note corrections use optimistic version checks, and relation replacement now runs as one `BEGIN IMMEDIATE` SQLite transaction instead of delete/reinsert plus whole-state compensation. Failed replacements roll back without losing the original, while a correction that resolves to an already-known relation merges into that edge instead of creating a duplicate.
+- Changed graph identity to the semantic `(scope, subject, predicate, object)` edge rather than including observation context. Schema 4 migrates old context-split rows by merging occurrences, confidence, timestamps and bounded latest-preferred context, so repeated observations with different provenance reinforce one fact instead of fragmenting frequency across duplicate edges.
+- Restricted automatic Turn Loop and Routing note retrieval to actual `memory` entries so reusable prompt, skill, and subagent records cannot leak into human-memory context or influence destination selection.
+- Removed implicit embedding backfills from `MemoryStore.search()`. New/updated entries maintain their vectors during mutation, while stale/missing vectors from older state are backfilled only through explicit `refreshEmbeddings()` maintenance; deterministic lexical-only callers remain supported.
+- Changed Memory-owned recall/write stores to keep local embeddings enabled by default, so explicit `memory_recall` can use hybrid retrieval for entries whose vectors are current while Routing/Turn Loop continue to request deterministic lexical-only reads.
+- Bounded `memory.review` relation retrieval through the relation query API instead of snapshotting the entire relation table, while query-driven note review now uses ranked Memory search.
+
+### Compatibility
+
+- Memory relation state upgrades to SQLite schema 4 when a writable Memory store opens it. Runtimes that only understand schema 3 (including v1.0.3) cannot open that upgraded Memory database; take a stopped-runtime state backup before testing v1.0.4 if you need binary rollback.
+
+### Memory security and project knowledge
+
+- Enforced Vault separation at Memory-owned persistence boundaries: durable `memory` entries, nested structured metadata, graph relations/context, refinement evidence, and bulk state replacement reject secret-shaped credential material even when a caller bypasses Agent-tool validation.
+- Hardened project Markdown indexing by opening candidate files with `O_NOFOLLOW`, validating the opened file descriptor as a regular bounded file before reading, skipping raced/unreadable candidates, and no longer persisting absolute workspace paths in project-memory metadata.
+
 ## [1.0.3] - 2026-09-09
 
 ### Remote-first onboarding and administration

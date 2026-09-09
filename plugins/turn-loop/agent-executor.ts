@@ -266,7 +266,7 @@ function relevantMemory(
   if (existsSync(globalPath)) {
     const store = memory.openStore({ stateDir: globalDir, scope: "global", semanticSearch: false });
     try {
-      entries.push(...store.search(query, { limit: 4 }));
+      entries.push(...store.search(query, { kinds: ["memory"], limit: 4 }));
       relations.push(...store.queryRelations({ query, limit: 6 }));
     } finally {
       store.close();
@@ -275,7 +275,7 @@ function relevantMemory(
   if (localDir && localPath && existsSync(localPath)) {
     const store = memory.openStore({ stateDir: localDir, scope: "local", semanticSearch: false });
     try {
-      entries.push(...store.search(query, { limit: 3 }));
+      entries.push(...store.search(query, { kinds: ["memory"], limit: 3 }));
       relations.push(...store.queryRelations({ query, limit: 4 }));
     } finally {
       store.close();
