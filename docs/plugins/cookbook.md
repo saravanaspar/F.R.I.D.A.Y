@@ -145,9 +145,9 @@ Key points:
 - `ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {...})`: registers one concrete,
   statically named system action. `inspect:plugins` will discover it
   automatically from this registration call — there is no extra inventory list.
-- `permission()` is mandatory for every mutable or externally meaningful
-  action. Pick the narrowest `effect`, a `resource` that describes the affected
-  object, and declare `network` truthfully. Model prose never grants authority.
+- Every System action must declare `permission()` metadata. Use the narrowest
+  `effect`, `resource`, and `network` authority appropriate for the action.
+  Model prose never grants authority.
 - The contribution id (`greetings.list`) must be unique on its surface —
   duplicate static ids on the same contribution kind fail `check:architecture`.
 
@@ -161,16 +161,18 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PluginTestHost } from "./helpers/plugin-host.js";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import {
+  collectContributions,
   requireCapability,
   uninstallCapabilityRegistry,
 } from "../plugins/capabilities/protocol.js";
+import { SYSTEM_ACTION_CONTRIBUTION } from "../plugins/system/contract.js";
 import { GREETINGS_CAPABILITY } from "../plugins/greetings/contract.js";
 import greetingsPlugin from "../plugins/greetings/index.js";
 
 afterEach(() => uninstallCapabilityRegistry());
 
 describe("greetings plugin", () => {
-  it("activates cleanly and contributes a list action", async () => {
+  it("activates cleanly and contributes a greetings.list system action", async () => {
     const host = new PluginTestHost();
     // The capabilities plugin implements the plugin protocol itself and is a
     // deliberate exception to the "no sibling implementation imports" rule.
@@ -180,50 +182,33 @@ describe("greetings plugin", () => {
 
     const service = requireCapability(GREETINGS_CAPABILITY);
     expect(service.list()).toEqual([]);
+
+    // The contributed System action must be reachable on the real
+    // contribution registry, keyed by its id on the system.action surface.
+    const listAction = collectContributions(SYSTEM_ACTION_CONTRIBUTION).find(
+      (action) => action.id === "greetings.list",
+    );
+    expect(listAction).toBeDefined();
+    expect(listAction!.permission({})).toMatchObject({
+      id: "greetings.list",
+      effect: "private-read",
+      network: false,
+    });
+
     await host.dispose();
   });
 });
 ```
 
 Zoom out: the entire goal of this test is to prove the plugin activates while
-unconfigured (no secrets, no external assumptions) and exposes its capability.
+unconfigured (no secrets, no external assumptions), exposes its capability, and
+contributes the expected System action with its permission metadata.
 Production plugins also test the configured happy path, permission/effect
 metadata, malformed persisted state, lifecycle cleanup, and
 retry/restart/idempotency — see the test expectations in
 [`PLUGIN_DEVELOPMENT.md`](../PLUGIN_DEVELOPMENT.md) section 9.
 
-## 4. Verify
-
-From the repository root:
-
-```bash
-npm run inspect:plugins
-npm run check:architecture
-```
-
-`inspect:plugins` prints the generated capability/contribution/hook inventory
-derived from the real `contract.ts` declarations and actual `.contribute(...)`
-registrations. Your plugin's rows appear automatically:
-
-- a `greetings` capability row bound to `GreetingsService`, and
-- a `greetings.list` `system.action` row attributed to
-  `plugins/greetings/index.ts`.
-
-`check:architecture` runs the plugin boundary check plus the builtin-plugin
-registry check. If you forget to expose the capability or register a duplicate
-contribution id, this fails with a precise message.
-
-To run only the focused test described above:
-
-```bash
-npx vitest run test/greetings.test.ts
-```
-
-For a plugin with its own runtime workspace, tests live under
-`plugins/<id>/runtime/test/` and run through the workspace runner
-(`npm run test:workspaces`).
-
-## 5. Registering the plugin
+## 4. Registering the plugin
 
 A folder under `plugins/` is **not** discovered automatically. The installed
 built-in plugin list lives in `friday.config.json`. To add `greetings` as a
@@ -238,6 +223,44 @@ Then you can read the plugin's capabilities from the output of:
 ```bash
 npm --silent run inspect:plugins:json
 ```
+
+This step matters for what `inspect:plugins` reports below: the focused test
+from section 3 runs before registration, but `inspect:plugins` and the
+configured plugin inventory only include `greetings` **after** it has been
+registered in `friday.config.json` and the builtin list has been regenerated.
+
+## 5. Verify
+
+Run the focused test first; it proves the plugin activates cleanly even before
+registration:
+
+```bash
+npx vitest run test/greetings.test.ts
+```
+
+Then, from the repository root, run the configured inventory checks (after the
+registration step from section 4):
+
+```bash
+npm run inspect:plugins
+npm run check:architecture
+```
+
+`inspect:plugins` prints the generated capability/contribution/hook inventory
+derived from the real `contract.ts` declarations and actual `.contribute(...)`
+registrations. Once the plugin is registered, its rows appear automatically:
+
+- a `greetings` capability row bound to `GreetingsService`, and
+- a `greetings.list` `system.action` row attributed to
+  `plugins/greetings/index.ts`.
+
+`check:architecture` runs the plugin boundary check plus the builtin-plugin
+registry check. If you forget to expose the capability or register a duplicate
+contribution id, this fails with a precise message.
+
+For a plugin with its own runtime workspace, tests live under
+`plugins/<id>/runtime/test/` and run through the workspace runner
+(`npm run test:workspaces`).
 
 ## Next steps
 
