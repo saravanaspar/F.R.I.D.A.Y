@@ -17,6 +17,7 @@ You do **not** need to understand the entire runtime before contributing. Prefer
 - Pick a [`good first issue`](https://github.com/saravanaspar/F.R.I.D.A.Y/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22).
 - Browse [`help wanted`](https://github.com/saravanaspar/F.R.I.D.A.Y/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22help%20wanted%22) issues for larger scoped work.
 - Start with [`docs/plugins/README.md`](docs/plugins/README.md) if you want to add a plugin, Agent tool, System action, hook, or provider.
+- Follow the [first-plugin cookbook](docs/plugins/cookbook.md) for a copyable end-to-end example.
 - Use the Plugin Proposal issue form when the capability does not already have an obvious owner.
 - Check [`docs/ROADMAP.md`](docs/ROADMAP.md) for areas where maintainers actively want help.
 

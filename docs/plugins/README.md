@@ -2,7 +2,7 @@
 
 Plugins are the preferred extension boundary for F.R.I.D.A.Y. You do not need to understand the entire runtime to add useful behavior; start with the domain that owns the capability and let the architecture checks enforce the boundaries around it.
 
-This page is the contributor entry point. The authoritative rules live in [`../PLUGIN_DEVELOPMENT.md`](../PLUGIN_DEVELOPMENT.md).
+This page is the contributor entry point. If you want a small copy-and-paste walkthrough of a first plugin, start with the [`plugin cookbook`](./cookbook.md). The authoritative rules live in [`../PLUGIN_DEVELOPMENT.md`](../PLUGIN_DEVELOPMENT.md).
 
 ## Before writing code
 
