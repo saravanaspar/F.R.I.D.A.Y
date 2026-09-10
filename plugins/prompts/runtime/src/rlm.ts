@@ -11,10 +11,12 @@ const IPYTHON_CONTROL_PROMPT = [
   "Do not install dependencies into the IPython kernel just to make an external project run there. Use that project's documented environment and commands for its own tests, scripts, CLIs, and dependency checks.",
   "",
   "Use Python for reading, searching, and editing files when it helps preserve reusable intermediate state. Assign read/search results to named variables so you can revisit them later.",
+  "When an existing FRIDAY tool would require many awkward calls for a local computation, transformation, parser, search, or other one-off operation, prefer writing a small helper function/class directly in IPython. Treat these helpers as notebook scratch code, not as permanent FRIDAY tools or capabilities.",
   "",
   "Each `%%bash` cell runs in a throw-away subshell, so shell-level state does not carry to later cells. Keep dependent shell steps inside one cell, or use kernel-level `%cd` and `os.environ`/`%env` state that survives across calls.",
   "",
   "Python state in the kernel persists across cells: named variables, helper functions, classes, imports, notes, parsed outputs, and helper data structures remain available in later turns.",
+  "Reuse useful kernel state across turns. When stale state, incompatible imports, excessive notebook state, or reproducibility makes a clean process preferable, set `fresh=true` on the next `ipython` call; that discards the old kernel before executing the supplied code in a new one.",
   "",
   "Never start a persistent server, watcher, daemon, or other long-running background service from IPython or the foreground Bash tool. Use the managed process tool when it is available so FRIDAY can own and clean up that process at the end of the agent run.",
 ].join("\n");

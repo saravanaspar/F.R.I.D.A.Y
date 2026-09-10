@@ -15,6 +15,10 @@ const ipythonSchema = Type.Object({
     description:
       "Python scratchpad code or `%%bash` shell cells to execute in the persistent agent kernel. Use the target project's own environment for project imports, tests, scripts, CLIs, and dependency checks instead of direct kernel imports.",
   }),
+  fresh: Type.Optional(Type.Boolean({
+    description:
+      "Set true only when a clean Python process is useful. FRIDAY kills the current persistent kernel, starts a fresh one, then runs this code. Existing Python variables, imports, and helper functions are discarded.",
+  })),
 });
 
 const IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
@@ -116,6 +120,10 @@ export class IpythonKernelProvisioner {
     await manager?.dispose();
   }
 
+  async restart(): Promise<void> {
+    await this.manager?.restart();
+  }
+
   async kill(): Promise<void> {
     const manager = this.manager;
     this.manager = undefined;
@@ -166,15 +174,20 @@ export function createIpythonTool(
     parameters: ipythonSchema,
     executionMode: "sequential",
     async execute(_toolCallId, params, signal, onUpdate) {
+      const code = applyShellSettingsToBashMagicCell(params.code, options);
+      if (params.fresh === true) {
+        // Authorize the requested execution before destroying useful notebook
+        // state. A denied call must leave the current persistent kernel intact.
+        await options?.beforeExecute?.(code, signal);
+        await provisioner.restart();
+      }
       if (!provisioner.hasRunningKernel) {
         onUpdate?.({
-          content: [{ type: "text", text: "starting Python kernel" }],
+          content: [{ type: "text", text: params.fresh === true ? "starting fresh Python kernel" : "starting Python kernel" }],
           details: { status: "starting" },
         });
       }
-
-      const code = applyShellSettingsToBashMagicCell(params.code, options);
-      await options?.beforeExecute?.(code, signal);
+      if (params.fresh !== true) await options?.beforeExecute?.(code, signal);
       const { result, kernelRestarted } = await executeWithBusyKernelChoice(
         provisioner,
         code,

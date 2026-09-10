@@ -23,6 +23,7 @@ export interface KernelHandle {
       maxOutputChars?: number;
     },
   ): Promise<KernelExecuteResult>;
+  restart(): Promise<void>;
   dispose(): Promise<void>;
   kill(): Promise<void>;
 }

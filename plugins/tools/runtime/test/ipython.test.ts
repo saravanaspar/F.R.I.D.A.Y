@@ -10,6 +10,16 @@ describe("ipython tool", () => {
     expect(result.content[0]).toEqual({ type: "text", text: "42" });
   });
 
+  it("starts a fresh kernel only when explicitly requested", async () => {
+    const tool = createIpythonTool(process.cwd());
+    await tool.execute("py-fresh-1", { code: "counter = 40" });
+    const persisted = await tool.execute("py-fresh-2", { code: "counter += 2\ncounter" });
+    expect(persisted.content[0]).toEqual({ type: "text", text: "42" });
+
+    const fresh = await tool.execute("py-fresh-3", { code: "counter += 2\ncounter", fresh: true });
+    expect(fresh.content[0]).toEqual({ type: "text", text: "2" });
+  });
+
   it("streams stdout updates", async () => {
     const tool = createIpythonTool(process.cwd());
     const onUpdate = vi.fn();
@@ -44,6 +54,7 @@ describe("ipython tool", () => {
           async execute(code) {
             return { stdout: "", stderr: "", result: code, status: "ok", durationMs: 1 };
           },
+          async restart() {},
           async dispose() {},
           async kill() {},
         };
