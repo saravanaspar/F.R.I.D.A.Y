@@ -4,6 +4,7 @@ import { reportOperationalError } from "@friday/operational-errors";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AgentService } from "../agent/contract.js";
+import type { AgentProfilesService } from "../agent-profiles/contract.js";
 import type { ModelCredentialService } from "../auth/contract.js";
 import type { MemoryRelationResult, MemorySearchResult, MemoryService } from "../memory/contract.js";
 import type { ModelService } from "../model/contract.js";
@@ -98,6 +99,7 @@ export interface AgentTurnExecutorOptionalDependencies {
   rlm(): RlmService | undefined;
   subagents(): SubagentsService | undefined;
   sandbox(): SandboxService | undefined;
+  profiles(): AgentProfilesService | undefined;
 }
 
 export interface AgentTurnExecutorDependencies {
@@ -253,17 +255,23 @@ function relevantMemory(
   root: string,
   query: string,
   sessionArtifactDir?: string,
+  scopes: readonly string[] = ["global:user"],
 ): string | undefined {
   if (!memory) return undefined;
-  const globalDir = memory.globalStateDir(root);
   const localDir = memory.localStateDir(sessionArtifactDir);
-  const globalPath = memory.statePath(globalDir);
   const localPath = localDir ? memory.statePath(localDir) : undefined;
-  if (!existsSync(globalPath) && (!localPath || !existsSync(localPath))) return undefined;
+  const stateDirFor = (scope: string): string => {
+    if (scope === "global" || scope === "global:user") return memory.globalStateDir(root);
+    if (!/^(?:agent|project):[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(scope)) throw new Error(`Invalid memory scope: ${scope}`);
+    return join(root, "memory-scopes", scope.replace(":", "-"));
+  };
+  const globalDirs = [...new Set(scopes.filter((scope) => scope !== "local").map(stateDirFor))];
+  if (!globalDirs.some((dir) => existsSync(memory.statePath(dir))) && (!localPath || !existsSync(localPath))) return undefined;
 
   const entries: MemorySearchResult[] = [];
   const relations: MemoryRelationResult[] = [];
-  if (existsSync(globalPath)) {
+  for (const globalDir of globalDirs) {
+    if (!existsSync(memory.statePath(globalDir))) continue;
     const store = memory.openStore({ stateDir: globalDir, scope: "global", semanticSearch: false, readOnly: true });
     try {
       entries.push(...store.search(query, { kinds: ["memory"], limit: 4 }));
@@ -738,6 +746,7 @@ export function createAgentTurnExecutor(
               ownerStateRoot(root, session.getHeader()?.ownerScope),
               query,
               session.getSessionArtifactDir(),
+              activeExtensionContext?.memoryScopes,
             );
             const persistedInputs = boundedPersistedInputContext(messages as AgentMessage[], userIndex);
             const ephemeralContext = ephemeralInputContext?.trim();
@@ -857,6 +866,12 @@ export function createAgentTurnExecutor(
           const afterReplyCallbacks: Array<() => void | Promise<void>> = [];
           const afterReplyFinalizers: TurnFinalizerDescriptor[] = [];
           const afterFailureCallbacks: Array<(error: unknown) => void | Promise<void>> = [];
+          const profileId = turnContext?.turn.agentProfileId;
+          const profile = profileId === undefined ? undefined : dependencies.optional?.profiles?.()?.get(profileId);
+          if (profileId !== undefined && !profile) throw new Error(`agent profile not found: ${profileId}`);
+          const memoryScopes = profile === undefined
+            ? Object.freeze(["global:user", "local"])
+            : Object.freeze([...new Set(["global:user", profile.memoryScope, ...(profile.defaultProjectId ? [`project:${profile.defaultProjectId}`] : []), "local"])]);
           const extensionContext: AgentToolExecutionContext = {
             cwd,
             sessionId,
@@ -864,6 +879,7 @@ export function createAgentTurnExecutor(
             ...(session.getSessionArtifactDir() === undefined ? {} : { sessionArtifactDir: session.getSessionArtifactDir() }),
             ...(turnContext === undefined ? {} : { turn: turnContext.turn }),
             ...(jobId === undefined ? {} : { jobId }),
+            ...(profile === undefined ? {} : { agentProfileId: profile.id, memoryScopes, defaultMemoryScope: profile.memoryScope }),
             deferAfterReply(callback, durable) {
               afterReplyCallbacks.push(callback);
               if (durable) afterReplyFinalizers.push(durable);
@@ -893,8 +909,24 @@ export function createAgentTurnExecutor(
           const preparedPersistedInputs: PersistedAgentInputMessage[] = [];
           const preparedImages: Array<{ type: "image"; data: string; mimeType: string }> = [];
           let progressUnsubscribe: (() => void) | undefined;
+          let directiveUnsubscribe: (() => void) | undefined;
           signal?.addEventListener("abort", abort, { once: true });
           try {
+            if (turnContext?.onDirective) {
+              directiveUnsubscribe = await turnContext.onDirective((directive) => {
+                agent.steer({
+                  role: "user",
+                  content: [{
+                    type: "text",
+                    text: [
+                      "The user redirected the current work. Finish the current safe tool boundary, then re-plan the remaining objective under this instruction:",
+                      directive.text,
+                    ].join("\n\n"),
+                  }],
+                  timestamp: Date.now(),
+                } as never);
+              });
+            }
             if (turnContext !== undefined) {
               for (const contribution of dependencies.inputContributions?.() ?? []) {
                 const prepared = await contribution.prepare(extensionContext);
@@ -1020,6 +1052,7 @@ export function createAgentTurnExecutor(
               ...(afterFailure === undefined ? {} : { afterFailure }),
             });
           } finally {
+            directiveUnsubscribe?.();
             activeExtensionContext = undefined;
             activeTurnContext = undefined;
             activeJobId = undefined;

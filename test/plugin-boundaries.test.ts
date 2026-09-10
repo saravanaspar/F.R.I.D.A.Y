@@ -887,6 +887,7 @@ describe("plugin boundaries", () => {
       "tools",
     ]);
     expect(manifest.optional.map((capability) => capability.id).sort()).toEqual([
+      "agent-profiles",
       "memory",
       "model-credentials",
       "observability",

@@ -272,12 +272,18 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
         "",
         "Original user request:",
         job.requestText,
+        ...(job.directives.length === 0 ? [] : [
+          "",
+          "User directions received while the previous run was active:",
+          ...job.directives.map((directive) => `- ${directive.text}`),
+        ]),
       ].join("\n");
       await ctx.emit(TURN_INGRESS_HOOK, Object.freeze({
         id: turnId,
         principal: Object.freeze({ ...job.origin }),
         text: continuationText,
         timestamp: Date.now(),
+        ...(job.agentProfileId === undefined ? {} : { agentProfileId: job.agentProfileId }),
         resumeDestinationId: job.destinationId,
         resumedJobId: job.id,
         reply: async (text: string) => {
@@ -423,6 +429,31 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
           return `${cancelled.label} (${cancelled.id}) finished before cancellation was applied; nothing was cancelled.`;
         }
         return `Cancelled ${cancelled.label} (${cancelled.id}). Session history was preserved.`;
+      },
+    });
+
+    ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+      id: "session.jobs.redirect",
+      label: "Redirect background session work",
+      description: "Persist a new user direction for an active background job and apply it through the Agent's safe steering boundary.",
+      parameters: Object.freeze({
+        type: "object",
+        properties: { jobId: { type: "string" }, text: { type: "string" } },
+        required: ["jobId", "text"],
+        additionalProperties: false,
+      }),
+      permission(input) {
+        const jobId = optionalString(input, "jobId") ?? "unknown";
+        return { id: "session.jobs.redirect", effect: "system-write", resource: `job:${jobId}`, network: false };
+      },
+      async execute(input, context) {
+        const jobId = optionalString(input, "jobId", 96);
+        const text = optionalString(input, "text", 128_000);
+        if (!jobId || !text) throw new Error("jobId and text are required");
+        const job = manager.get(jobId);
+        if (!job || !sameOrigin(job, context)) throw new Error("background job is unavailable for this conversation");
+        const directive = await manager.redirect(job.id, text);
+        return `Direction queued for ${job.label} (${job.id}): ${directive.preview}`;
       },
     });
 

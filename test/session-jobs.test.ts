@@ -491,6 +491,35 @@ describe("SessionJobManager", () => {
     expect(manager.list({ limit: 5 })[0]?.status).toBe("completed");
   });
 
+  it("persists a JobDirective and applies it through the active runner boundary", async () => {
+    const root = await tempDir();
+    const manager = await SessionJobManager.open({ stateDir: join(root, "jobs"), progressNotifyIntervalMs: 0, idFactory: () => "job-directive" });
+    managers.push(manager);
+    const started = deferred();
+    const release = deferred();
+    const applied: string[] = [];
+    const job = await manager.start({
+      destinationId: "session:directive",
+      text: "prepare a release",
+      timestamp: Date.now(),
+      origin: { authority: "local", channel: "local", accountId: "operator", conversationId: "chat", senderId: "operator" },
+      notify: async () => undefined,
+      async run(_signal, _report, context) {
+        await context?.onDirective((directive) => applied.push(directive.text));
+        started.resolve();
+        await release.promise;
+        return { text: "release draft ready", sessionId: "directive" };
+      },
+    });
+    await started.promise;
+    const directive = await manager.redirect(job.id, "Leave a draft and do not deploy.");
+    expect(directive.status).toBe("applied");
+    expect(applied).toEqual(["Leave a draft and do not deploy."]);
+    expect(manager.get(job.id)?.directives[0]).toMatchObject({ status: "applied", preview: "Leave a draft and do not deploy." });
+    release.resolve();
+    await waitUntil(() => manager.get(job.id)?.status === "completed", "directive job completion");
+  });
+
   it("releases active ownership before a post-notify continuation quiesces session jobs", async () => {
     const root = await tempDir();
     const events: string[] = [];

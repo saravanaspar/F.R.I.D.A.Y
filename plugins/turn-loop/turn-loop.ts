@@ -103,6 +103,9 @@ function normalizeTurn(turn: InboundTurn): InboundTurn {
       ...(turn.principal.threadId === undefined
         ? {}
         : { threadId: boundedOpaque(turn.principal.threadId, "turn principal threadId") }),
+      ...(turn.principal.agentProfileId === undefined
+        ? {}
+        : { agentProfileId: boundedOpaque(turn.principal.agentProfileId, "turn principal agentProfileId", 96) }),
     }),
     text: boundedText(turn.text, "turn text", MAX_TEXT_CHARS),
     ...(attachments === undefined ? {} : { attachments }),
@@ -115,6 +118,12 @@ function normalizeTurn(turn: InboundTurn): InboundTurn {
     ...(turn.resumedJobId === undefined
       ? {}
       : { resumedJobId: boundedOpaque(turn.resumedJobId, "turn resumedJobId", 96) }),
+    ...(turn.agentProfileId === undefined
+      ? {}
+      : { agentProfileId: boundedOpaque(turn.agentProfileId, "turn agentProfileId", 96) }),
+    ...(turn.destinationId === undefined
+      ? {}
+      : { destinationId: boundedOpaque(turn.destinationId, "turn destinationId", 264) }),
     reply: turn.reply,
   });
 }
@@ -208,10 +217,10 @@ function eventData(turn: InboundTurn, key: string): Record<string, string | numb
 }
 
 function resumeDecision(turn: InboundTurn): import("../routing/contract.js").RoutingDecision | undefined {
-  const destinationId = turn.resumeDestinationId?.trim();
+  const destinationId = (turn.destinationId ?? turn.resumeDestinationId)?.trim();
   if (!destinationId) return undefined;
   if (destinationId !== "session:new") {
-    if (!destinationId.startsWith("session:")) throw new Error(`Invalid restart-resume destination: ${destinationId}`);
+    if (!destinationId.startsWith("session:")) throw new Error(`Invalid session destination: ${destinationId}`);
     const sessionId = destinationId.slice("session:".length);
     if (!sessionId || sessionId.length > 256 || sessionId.includes("/") || sessionId.includes("\\") || sessionId.includes("..") || /[\u0000-\u001f\u007f]/.test(sessionId)) {
       throw new Error(`Invalid restart-resume session id: ${JSON.stringify(sessionId)}`);
@@ -498,6 +507,7 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
                 sourceKey: key,
                 turnId: turn.id,
                 destinationId: decision.destination.id,
+                ...(turn.agentProfileId === undefined ? {} : { agentProfileId: turn.agentProfileId }),
                 text: turn.text,
                 timestamp: turn.timestamp,
                 origin: {
@@ -515,6 +525,7 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
                       signal,
                       progress: report,
                       ...(jobContext?.jobId === undefined ? {} : { jobId: jobContext.jobId }),
+                      ...(jobContext?.onDirective === undefined ? {} : { onDirective: jobContext.onDirective }),
                     });
                   const result = jobContext?.jobId === undefined || options.permissions.runAsJob === undefined
                     ? await executeJob()

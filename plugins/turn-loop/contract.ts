@@ -1,6 +1,7 @@
 import type { Capability, Contribution, Hook } from "../capabilities/protocol.js";
 import { defineCapability, defineContribution, defineHook } from "../capabilities/protocol.js";
 import type { RoutingDecision } from "../routing/contract.js";
+import type { SessionJobDirectiveMessage } from "../session-jobs/contract.js";
 
 export type TurnPrincipalAuthority = "local" | "channel";
 
@@ -12,6 +13,8 @@ export interface TurnPrincipal {
   readonly conversationId: string;
   readonly senderId: string;
   readonly threadId?: string | undefined;
+  /** Host-selected persistent Agent Profile for this turn. */
+  readonly agentProfileId?: string | undefined;
 }
 
 
@@ -33,6 +36,10 @@ export interface InboundTurn {
   readonly text: string;
   readonly attachments?: readonly TurnAttachment[] | undefined;
   readonly timestamp: number;
+  /** Host-selected Agent Profile; channels must not infer this from untrusted text. */
+  readonly agentProfileId?: string | undefined;
+  /** Host-selected persistent session destination for product clients. */
+  readonly destinationId?: string | undefined;
   /** Host-owned destination override used only for durable restart resumption. */
   readonly resumeDestinationId?: string | undefined;
   /** Host-owned predecessor job id when reconstructing interrupted work. */
@@ -81,6 +88,10 @@ export interface AgentToolExecutionContext {
   readonly turn?: InboundTurn | undefined;
   /** Durable Session Jobs attribution for restart-aware system/tool actions. */
   readonly jobId?: string | undefined;
+  readonly agentProfileId?: string | undefined;
+  /** Memory namespaces authorized for this Agent turn. */
+  readonly memoryScopes?: readonly string[] | undefined;
+  readonly defaultMemoryScope?: string | undefined;
   deferAfterReply(callback: () => void | Promise<void>, durable?: TurnFinalizerDescriptor): void;
   deferOnFailure(callback: (error: unknown) => void | Promise<void>): void;
 }
@@ -195,6 +206,8 @@ export interface TurnExecutionContext {
   readonly progress?: ((update: TurnProgressUpdate) => Promise<void>) | undefined;
   /** Durable detached-job attribution when execution was admitted by Session Jobs. */
   readonly jobId?: string | undefined;
+  /** Process-local steering port owned by Session Jobs. */
+  readonly onDirective?: ((listener: (directive: SessionJobDirectiveMessage) => void) => Promise<() => void>) | undefined;
 }
 
 export interface TurnProgressUpdate {

@@ -1,10 +1,11 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { reportOperationalError, sanitizeOperationalError } from "@friday/operational-errors";
 import { decodeClientMessage, encodeClientMessage, type ClientAuthenticate, type ClientErrorMessage, type ClientSignalMessage, type ServerSignalMessage } from "@friday/client-protocol";
 import { WebSocket, WebSocketServer } from "ws";
 import type { DevicesService, DeviceType } from "../devices/contract.js";
-import type { ClientConnection, ClientGatewayListenOptions, ClientGatewayServerStatus, ClientGatewayService } from "./contract.js";
+import type { ClientConnection, ClientGatewayListenOptions, ClientGatewayResources, ClientGatewayServerStatus, ClientGatewayService } from "./contract.js";
 
 const MAX_HTTP_BODY_BYTES = 64 * 1024;
 const MAX_WEBSOCKET_PAYLOAD_BYTES = 2 * 1024 * 1024;
@@ -81,6 +82,7 @@ export async function startClientTransport(
   gateway: ClientGatewayService,
   devices: DevicesService,
   options: ClientGatewayListenOptions = {},
+  resources: ClientGatewayResources = {},
 ): Promise<ClientTransportController> {
   const host = options.host?.trim() || "127.0.0.1";
   if (host !== "127.0.0.1" && host !== "::1" && host !== "localhost") throw new Error("client gateway must bind to loopback; use Caddy for public TLS exposure");
@@ -117,6 +119,152 @@ export async function startClientTransport(
         const connection = await gateway.connect({ deviceId: requiredText(body, "deviceId", 128), challenge: requiredText(body, "challenge", 512), signature: requiredText(body, "signature") });
         try { json(response, 200, { events: connection.resume(cursor(body.afterSequence)), latestSequence: gateway.latestSequence() }); }
         finally { connection.close(); }
+        return;
+      }
+      const authenticatedDevice = async (): Promise<string> => {
+        const deviceId = requiredText(body, "deviceId", 128);
+        await gateway.connect({ deviceId, challenge: requiredText(body, "challenge", 512), signature: requiredText(body, "signature") }).then((connection) => { connection.close(); });
+        return deviceId;
+      };
+      if (path === "/v1/agent-profiles/list") {
+        await authenticatedDevice();
+        if (!resources.agentProfiles) throw new Error("agent profiles capability is unavailable");
+        json(response, 200, { profiles: resources.agentProfiles.list() });
+        return;
+      }
+      if (path === "/v1/agent-profiles/create") {
+        await authenticatedDevice();
+        if (!resources.agentProfiles) throw new Error("agent profiles capability is unavailable");
+        const profile = await resources.agentProfiles.create({
+          id: typeof body.id === "string" ? body.id : undefined,
+          name: requiredText(body, "name", 128),
+          ...(typeof body.title === "string" ? { title: body.title } : {}),
+          ...(typeof body.description === "string" ? { description: body.description } : {}),
+          ...(typeof body.roleInstructions === "string" ? { roleInstructions: body.roleInstructions } : {}),
+          ...(typeof body.memoryScope === "string" ? { memoryScope: body.memoryScope } : {}),
+        });
+        json(response, 201, { profile });
+        return;
+      }
+      if (path === "/v1/agent-profiles/update") {
+        await authenticatedDevice();
+        if (!resources.agentProfiles) throw new Error("agent profiles capability is unavailable");
+        const profile = await resources.agentProfiles.update(requiredText(body, "profileId", 96), {
+          ...(typeof body.name === "string" ? { name: body.name } : {}),
+          ...(typeof body.title === "string" ? { title: body.title } : {}),
+          ...(typeof body.description === "string" ? { description: body.description } : {}),
+          ...(typeof body.roleInstructions === "string" ? { roleInstructions: body.roleInstructions } : {}),
+          ...(typeof body.memoryScope === "string" ? { memoryScope: body.memoryScope } : {}),
+          ...(typeof body.notificationPreference === "string" ? { notificationPreference: body.notificationPreference as "all" | "important" | "muted" } : {}),
+          ...(typeof body.approvalPolicy === "string" ? { approvalPolicy: body.approvalPolicy } : {}),
+        });
+        json(response, 200, { profile });
+        return;
+      }
+      if (path === "/v1/agent-profiles/remove") {
+        await authenticatedDevice();
+        if (!resources.agentProfiles) throw new Error("agent profiles capability is unavailable");
+        json(response, 200, { removed: await resources.agentProfiles.remove(requiredText(body, "profileId", 96)) });
+        return;
+      }
+      if (path === "/v1/conversations/list") {
+        await authenticatedDevice();
+        if (!resources.conversations) throw new Error("conversations capability is unavailable");
+        json(response, 200, { conversations: resources.conversations.list() });
+        return;
+      }
+      if (path === "/v1/conversations/create") {
+        await authenticatedDevice();
+        if (!resources.conversations) throw new Error("conversations capability is unavailable");
+        const conversation = await resources.conversations.create({ type: body.type as "direct" | "group", title: typeof body.title === "string" ? body.title : undefined, sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined, participants: body.participants as never });
+        json(response, 201, { conversation });
+        return;
+      }
+      if (path === "/v1/conversations/update") {
+        await authenticatedDevice();
+        if (!resources.conversations) throw new Error("conversations capability is unavailable");
+        const conversation = await resources.conversations.update(requiredText(body, "conversationId", 256), {
+          ...(body.title === undefined ? {} : { title: requiredText(body, "title", 256) }),
+          ...(body.pinned === undefined ? {} : { pinned: body.pinned === true }),
+          ...(body.hidden === undefined ? {} : { hidden: body.hidden === true }),
+          ...(body.notificationsEnabled === undefined ? {} : { notificationsEnabled: body.notificationsEnabled === true }),
+        });
+        json(response, 200, { conversation });
+        return;
+      }
+      if (path === "/v1/conversations/mark-read") {
+        await authenticatedDevice();
+        if (!resources.conversations) throw new Error("conversations capability is unavailable");
+        json(response, 200, { conversation: await resources.conversations.markRead(requiredText(body, "conversationId", 256), cursor(body.sequence)) });
+        return;
+      }
+      if (path === "/v1/conversations/mentions/resolve") {
+        await authenticatedDevice();
+        if (!resources.conversations) throw new Error("conversations capability is unavailable");
+        json(response, 200, { mentions: resources.conversations.resolveMentions(requiredText(body, "conversationId", 256), requiredText(body, "text", 128_000)) });
+        return;
+      }
+      if (path === "/v1/conversations/threads/create") {
+        await authenticatedDevice();
+        if (!resources.conversations) throw new Error("conversations capability is unavailable");
+        json(response, 201, { thread: await resources.conversations.createThread(requiredText(body, "conversationId", 256), requiredText(body, "rootMessageId", 256)) });
+        return;
+      }
+      if (path === "/v1/conversations/threads/reply") {
+        await authenticatedDevice();
+        if (!resources.conversations) throw new Error("conversations capability is unavailable");
+        json(response, 200, { thread: await resources.conversations.recordThreadReply(requiredText(body, "threadId", 256)) });
+        return;
+      }
+      if (path === "/v1/conversations/reactions/add") {
+        await authenticatedDevice();
+        if (!resources.conversations) throw new Error("conversations capability is unavailable");
+        json(response, 201, { reaction: await resources.conversations.addReaction(requiredText(body, "messageId", 256), requiredText(body, "actorId", 256), requiredText(body, "emoji", 32)) });
+        return;
+      }
+      if (path === "/v1/conversations/reactions/remove") {
+        await authenticatedDevice();
+        if (!resources.conversations) throw new Error("conversations capability is unavailable");
+        json(response, 200, { removed: await resources.conversations.removeReaction(requiredText(body, "messageId", 256), requiredText(body, "actorId", 256), requiredText(body, "emoji", 32)) });
+        return;
+      }
+      if (path === "/v1/conversations/reactions/list") {
+        await authenticatedDevice();
+        if (!resources.conversations) throw new Error("conversations capability is unavailable");
+        json(response, 200, { reactions: resources.conversations.listReactions(requiredText(body, "messageId", 256)) });
+        return;
+      }
+      if (path === "/v1/turns") {
+        const deviceId = await authenticatedDevice();
+        if (!resources.conversations || !resources.turnRuntime) throw new Error("conversation turn capabilities are unavailable");
+        const text = requiredText(body, "text", 128_000);
+        const profileId = typeof body.agentProfileId === "string" ? body.agentProfileId.trim() : undefined;
+        const profile = profileId ? resources.agentProfiles?.get(profileId) : undefined;
+        if (profileId && !profile) throw new Error("agent profile not found");
+        const conversationId = typeof body.conversationId === "string" && body.conversationId.trim()
+          ? body.conversationId.trim()
+          : profile?.defaultConversationId;
+        if (!conversationId) throw new Error("conversationId is required unless the Agent Profile has a default conversation");
+        const conversation = resources.conversations.get(conversationId);
+        if (!conversation) throw new Error("conversation not found");
+        let reply = "";
+        const result = await resources.turnRuntime.submit({
+          id: typeof body.turnId === "string" ? body.turnId : randomUUID(),
+          principal: { authority: "local", channel: "client", accountId: deviceId, conversationId: conversation.id, senderId: "operator", ...(typeof body.threadId === "string" ? { threadId: body.threadId } : {}) },
+          text,
+          timestamp: Date.now(),
+          agentProfileId: profileId,
+          destinationId: `session:${conversation.sessionId}`,
+          reply: async (value) => { reply = value; },
+        });
+        json(response, 202, { result, reply });
+        return;
+      }
+      if (path === "/v1/session-jobs/redirect") {
+        await authenticatedDevice();
+        if (!resources.sessionJobs) throw new Error("session jobs capability is unavailable");
+        const directive = await resources.sessionJobs.redirect(requiredText(body, "jobId", 96), requiredText(body, "text", 128_000));
+        json(response, 202, { directive });
         return;
       }
       json(response, 404, { error: "not_found" });
