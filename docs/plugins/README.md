@@ -4,6 +4,8 @@ Plugins are the preferred extension boundary for F.R.I.D.A.Y. You do not need to
 
 This page is the contributor entry point. If you want a small copy-and-paste walkthrough of a first plugin, start with the [`plugin cookbook`](./cookbook.md). The authoritative rules live in [`../PLUGIN_DEVELOPMENT.md`](../PLUGIN_DEVELOPMENT.md).
 
+The product sequence, plugin-versus-package decisions, feature ownership, and acceptance criteria are maintained in the [F.R.I.D.A.Y roadmap](../ROADMAP.md). Read the [platform architecture](../ARCHITECTURE.md) with it before proposing a new domain.
+
 ## Before writing code
 
 Run:

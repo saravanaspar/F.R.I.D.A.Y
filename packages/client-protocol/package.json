@@ -1,0 +1,28 @@
+{
+  "name": "@friday/client-protocol",
+  "version": "1.0.4",
+  "description": "Versioned wire schemas shared by F.R.I.D.A.Y clients and the client gateway",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsgo -p tsconfig.build.json",
+    "test": "vitest run --config vitest.config.ts --configLoader runner --no-cache"
+  },
+  "license": "MIT",
+  "engines": { "node": ">=22.8.0" },
+  "private": true,
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

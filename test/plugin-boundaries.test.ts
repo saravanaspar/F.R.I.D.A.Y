@@ -24,7 +24,7 @@ import voicePlugin from "../plugins/voice/index.js";
 import { getPluginManifest } from "../plugins/capabilities/protocol.js";
 
 const implementationPluginNames = ["session-resources", "sessions", "memory", "vault", "channels", "execution", "lifecycle", "evaluation", "worktrees", "generations", "self-improvement", "model", "refinement", "compaction", "autonomy", "subagents", "rlm", "prompts", "auth", "mcp", "agent", "tools", "skills", "voice"] as const;
-const forbiddenSiblingPackageImport = /(?:from|import\()\s*["']@friday\/(?!operational-errors(?:["'/]))/;
+const forbiddenSiblingPackageImport = /(?:from|import\()\s*["']@friday\/(?!operational-errors(?:["'/])|client-protocol(?:["'/]))/;
 
 async function sourceFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -119,7 +119,7 @@ describe("plugin boundaries", () => {
         const source = await readFile(path, "utf8");
         const siblingImports = [...source.matchAll(/(?:from|import\()\s*["']@friday\/([A-Za-z0-9._-]+)/g)]
           .map((match) => match[1]!)
-          .filter((packageName) => packageName !== pluginName && packageName !== "operational-errors");
+          .filter((packageName) => packageName !== pluginName && packageName !== "operational-errors" && packageName !== "client-protocol");
         expect(siblingImports, `${path} must consume sibling plugins through ../<plugin>/contract.ts`).toEqual([]);
       }
     }

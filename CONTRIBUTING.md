@@ -19,7 +19,7 @@ You do **not** need to understand the entire runtime before contributing. Prefer
 - Start with [`docs/plugins/README.md`](docs/plugins/README.md) if you want to add a plugin, Agent tool, System action, hook, or provider.
 - Follow the [first-plugin cookbook](docs/plugins/cookbook.md) for a copyable end-to-end example.
 - Use the Plugin Proposal issue form when the capability does not already have an obvious owner.
-- Check [`docs/ROADMAP.md`](docs/ROADMAP.md) for areas where maintainers actively want help.
+- Check the detailed [`docs/ROADMAP.md`](docs/ROADMAP.md) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) before choosing an area; they define current priorities, plugin ownership, and the acceptance criteria for new platform work.
 
 ## Development setup
 

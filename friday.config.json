@@ -1,6 +1,7 @@
 {
   "plugins": [
     "./plugins/capabilities/index.ts",
+    "./plugins/devices/index.ts",
     "./plugins/agent/index.ts",
     "./plugins/alerts/index.ts",
     "./plugins/artifacts/index.ts",
@@ -8,6 +9,7 @@
     "./plugins/auth/index.ts",
     "./plugins/autonomy/index.ts",
     "./plugins/channels/index.ts",
+    "./plugins/clients/index.ts",
     "./plugins/compaction/index.ts",
     "./plugins/conditional-hooks/index.ts",
     "./plugins/evaluation/index.ts",
