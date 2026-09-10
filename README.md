@@ -25,12 +25,15 @@
   <a href="#channels">Channels</a> &middot;
   <a href="#durability-and-recovery">Recovery</a> &middot;
   <a href="#development">Development</a> &middot;
+  <a href="docs/ROADMAP.md">Roadmap</a> &middot;
   <a href="#contributing">Contribute</a>
 </p>
 
 ---
 
 ## Meet F.R.I.D.A.Y
+
+The current product direction and staged implementation plan are documented in the [F.R.I.D.A.Y roadmap](docs/ROADMAP.md), with system boundaries in the [platform architecture](docs/ARCHITECTURE.md). Desktop and Android applications begin after the shared client protocol, persistent Agent, Project, Computer Node, Routine, Review Policy, and Search foundations are implemented. Gateway deployment and pairing operations are documented in [CLIENT_GATEWAY.md](docs/CLIENT_GATEWAY.md).
 
 F.R.I.D.A.Y is a local-first, self-hosted personal AI agent designed to behave less like a one-shot chatbot and more like a long-lived assistant that stays useful across projects, devices, sessions, and restarts.
 

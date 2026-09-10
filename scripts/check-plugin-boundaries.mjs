@@ -494,7 +494,7 @@ for (const file of await walk(pluginsRoot)) {
   for (const specifier of importSpecifiers(source)) {
     if (specifier.startsWith("@friday/")) {
       const packageOwner = specifier.slice("@friday/".length).split("/")[0];
-      if (packageOwner !== "operational-errors" && packageOwner !== sourceOwner) {
+      if (packageOwner !== "operational-errors" && packageOwner !== "client-protocol" && packageOwner !== sourceOwner) {
         violations.push(`${relative(root, file)} -> ${specifier} (direct sibling plugin package import)`);
       }
     }
