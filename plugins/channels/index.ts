@@ -16,7 +16,7 @@ import {
   isLifecycleRestartEnvironment,
   LIFECYCLE_HANDOFF_CONTRIBUTION,
 } from "../lifecycle/contract.js";
-import { CHANNELS_CAPABILITY, type ChannelsService } from "./contract.js";
+import { CHANNELS_CAPABILITY, CHANNEL_TURN_ENRICHER_CONTRIBUTION, type ChannelTurnEnrichment, type ChannelsService } from "./contract.js";
 import { setupWhatsApp } from "./tooling.js";
 import { readSavedChannels, updateSavedChannel, type ConfigurableChannelId, type SavedChannelConfig } from "./config.js";
 import {
@@ -59,6 +59,10 @@ function ingressPayload(message: channels.ChannelInboundMessage) {
       ...(attachment.sizeBytes === undefined ? {} : { sizeBytes: attachment.sizeBytes }),
       ...(attachment.downloadUrl === undefined ? {} : { downloadUrl: attachment.downloadUrl }),
     })),
+    ...(message.chatType === undefined ? {} : { chatType: message.chatType }),
+    ...(message.senderName === undefined ? {} : { senderName: message.senderName }),
+    ...(message.conversationName === undefined ? {} : { conversationName: message.conversationName }),
+    ...(message.replyToMessageId === undefined ? {} : { replyToMessageId: message.replyToMessageId }),
   };
 }
 
@@ -73,6 +77,11 @@ function persistedIngress(data: unknown): ReturnType<typeof ingressPayload> {
   }
   if (typeof raw.timestamp !== "number" || !Number.isFinite(raw.timestamp)) throw new Error("persisted channel ingress timestamp is invalid");
   if (!Array.isArray(raw.attachments)) throw new Error("persisted channel ingress attachments are invalid");
+  if (raw.chatType !== undefined && raw.chatType !== "dm" && raw.chatType !== "group" && raw.chatType !== "channel" && raw.chatType !== "thread") throw new Error("persisted channel ingress chatType is invalid");
+  for (const name of ["senderName", "conversationName", "replyToMessageId"] as const) {
+    const value = raw[name];
+    if (value !== undefined && (typeof value !== "string" || !value.trim() || value.length > 512)) throw new Error(`persisted channel ingress ${name} is invalid`);
+  }
   return raw as unknown as ReturnType<typeof ingressPayload>;
 }
 
@@ -485,23 +494,59 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
     }, async ({ event, signal }) => {
       signal?.throwIfAborted();
       const message = persistedIngress(event.data);
+      const target = {
+        channel: message.principal.channel,
+        accountId: message.principal.accountId,
+        conversationId: message.principal.conversationId,
+        ...(message.principal.threadId === undefined ? {} : { threadId: message.principal.threadId }),
+      };
+      let enrichment: ChannelTurnEnrichment = Object.freeze({});
+      for (const enricher of [...ctx.collect(CHANNEL_TURN_ENRICHER_CONTRIBUTION)].sort((left, right) => (left.priority ?? 0) - (right.priority ?? 0) || left.id.localeCompare(right.id))) {
+        signal?.throwIfAborted();
+        const next = await enricher.enrich({
+          id: message.id,
+          principal: message.principal,
+          text: enrichment.text ?? message.text,
+          timestamp: message.timestamp,
+          attachments: message.attachments,
+          ...(message.chatType === undefined ? {} : { chatType: message.chatType }),
+          ...(message.senderName === undefined ? {} : { senderName: message.senderName }),
+          ...(message.conversationName === undefined ? {} : { conversationName: message.conversationName }),
+          ...(message.replyToMessageId === undefined ? {} : { replyToMessageId: message.replyToMessageId }),
+        });
+        if (next) enrichment = Object.freeze({ ...enrichment, ...next });
+        if (enrichment.handled) break;
+      }
+      if (enrichment.handled) {
+        if (enrichment.replyText?.trim()) await hub.send(target, enrichment.replyText);
+        return;
+      }
       await ctx.emit(TURN_INGRESS_HOOK, {
         id: message.id,
         principal: {
           authority: "channel",
           ...message.principal,
+          ...(enrichment.agentProfileId === undefined ? {} : { agentProfileId: enrichment.agentProfileId }),
+          ...(enrichment.sharedConversationId === undefined ? {} : { sharedConversationId: enrichment.sharedConversationId }),
         },
-        text: message.text,
+        text: enrichment.text ?? message.text,
         attachments: message.attachments,
         timestamp: message.timestamp,
-        reply: async (text) => {
-          await hub.send({
-            channel: message.principal.channel,
-            accountId: message.principal.accountId,
-            conversationId: message.principal.conversationId,
-            ...(message.principal.threadId === undefined ? {} : { threadId: message.principal.threadId }),
-          }, text);
+        ...(enrichment.agentProfileId === undefined ? {} : { agentProfileId: enrichment.agentProfileId }),
+        ...(enrichment.agentProfileLabel === undefined ? {} : { agentProfileLabel: enrichment.agentProfileLabel }),
+        ...(enrichment.agentNotificationPreference === undefined ? {} : { agentNotificationPreference: enrichment.agentNotificationPreference }),
+        ...(enrichment.sessionAffinityId === undefined ? {} : { sessionAffinityId: enrichment.sessionAffinityId }),
+        ...(enrichment.collaboratingAgents === undefined ? {} : { collaboratingAgents: enrichment.collaboratingAgents }),
+        channelContext: {
+          ...(message.chatType === undefined ? {} : { chatType: message.chatType }),
+          ...(message.senderName === undefined ? {} : { senderName: message.senderName }),
+          ...(message.conversationName === undefined ? {} : { conversationName: message.conversationName }),
+          providerMessageId: message.id,
+          ...(message.replyToMessageId === undefined ? {} : { replyToMessageId: message.replyToMessageId }),
+          ...(enrichment.sharedConversationId === undefined ? {} : { internalConversationId: enrichment.sharedConversationId }),
+          ...(enrichment.internalThreadId === undefined ? {} : { internalThreadId: enrichment.internalThreadId }),
         },
+        reply: async (text) => { await hub.send(target, text); },
       });
     });
     ctx.effect(unregisterIngressConsumer);
@@ -538,6 +583,7 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
     });
 
     ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+      sourcePluginId: "channels",
       id: "channels.ask-user",
       name: "ask_user",
       label: "Ask user",

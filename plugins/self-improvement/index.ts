@@ -870,6 +870,7 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
   });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "self-improvement",
     id: "self-improvement-capability-ensure",
     name: "capability_ensure",
     label: "Resolve a missing FRIDAY capability",
@@ -903,7 +904,7 @@ const selfImprovementPlugin: FridayPlugin = definePlugin({
       const provider = process.env.FRIDAY_MODEL_PROVIDER?.trim();
       const model = process.env.FRIDAY_MODEL_ID?.trim();
       if (!provider || !model) throw new Error("Capability feasibility analysis requires a configured main model");
-      const permissionMode = permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE);
+      const permissionMode = agentContext.permissionMode ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE);
       const operation = new AbortController();
       const detachSignal = forwardAbort(signal, operation);
       const channels = ctx.services.optional(CHANNELS_TRUSTED_CAPABILITY);

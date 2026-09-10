@@ -4,7 +4,7 @@ import type { EventsService } from "../events/contract.js";
 import type { ObservabilityService } from "../observability/contract.js";
 import type { PermissionsTrustedService } from "../permissions/trusted-contract.js";
 import { principalScope } from "../principal-scope.js";
-import type { RoutingService } from "../routing/contract.js";
+import type { RoutingDecision, RoutingService } from "../routing/contract.js";
 import type { SessionJobsService } from "../session-jobs/contract.js";
 import type {
   InboundTurn,
@@ -36,6 +36,8 @@ export interface TurnRuntimeOptions {
   readonly sessionJobs?: (() => SessionJobsService | undefined) | undefined;
   readonly replyOutbox?: TurnReplyOutbox | undefined;
   readonly finalizers?: (() => readonly TurnFinalizerContribution[]) | undefined;
+  /** Optional host recorder for visible multi-Agent delegation admitted as Session Jobs. */
+  readonly recordHandoff?: ((input: { conversationId: string; fromAgentId: string; toAgentId: string; text: string; sessionId: string; jobId: string }) => Promise<void>) | undefined;
 }
 
 function boundedText(value: string, label: string, maximum: number): string {
@@ -88,10 +90,55 @@ function normalizeAttachments(value: InboundTurn["attachments"]): readonly TurnA
   }));
 }
 
+function notificationPreference(value: unknown, label: string): "all" | "important" | "muted" {
+  if (value !== "all" && value !== "important" && value !== "muted") throw new Error(`${label} is invalid`);
+  return value;
+}
+
+function normalizeChannelContext(value: InboundTurn["channelContext"]): InboundTurn["channelContext"] {
+  if (value === undefined) return undefined;
+  const optional = (entry: unknown, label: string, maximum = 512): string | undefined => entry === undefined ? undefined : boundedOpaque(entry as string, label, maximum);
+  const chatType = value.chatType;
+  if (chatType !== undefined && chatType !== "dm" && chatType !== "group" && chatType !== "channel" && chatType !== "thread") throw new Error("turn channelContext chatType is invalid");
+  return Object.freeze({
+    ...(chatType === undefined ? {} : { chatType }),
+    ...(value.senderName === undefined ? {} : { senderName: optional(value.senderName, "turn channelContext senderName")! }),
+    ...(value.conversationName === undefined ? {} : { conversationName: optional(value.conversationName, "turn channelContext conversationName")! }),
+    ...(value.providerMessageId === undefined ? {} : { providerMessageId: optional(value.providerMessageId, "turn channelContext providerMessageId", 256)! }),
+    ...(value.replyToMessageId === undefined ? {} : { replyToMessageId: optional(value.replyToMessageId, "turn channelContext replyToMessageId", 256)! }),
+    ...(value.internalConversationId === undefined ? {} : { internalConversationId: optional(value.internalConversationId, "turn channelContext internalConversationId", 256)! }),
+    ...(value.internalThreadId === undefined ? {} : { internalThreadId: optional(value.internalThreadId, "turn channelContext internalThreadId", 256)! }),
+  });
+}
+
+function normalizeCollaboratingAgents(value: InboundTurn["collaboratingAgents"]): InboundTurn["collaboratingAgents"] {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 4) throw new Error("turn collaboratingAgents must contain at most 4 Agents");
+  const seen = new Set<string>();
+  return Object.freeze(value.map((entry, index) => {
+    const id = boundedOpaque(entry.id, `turn collaboratingAgents[${index}].id`, 96);
+    if (seen.has(id)) throw new Error(`duplicate collaborating Agent: ${id}`);
+    seen.add(id);
+    return Object.freeze({
+      id,
+      label: boundedOpaque(entry.label, `turn collaboratingAgents[${index}].label`, 160),
+      notificationPreference: notificationPreference(entry.notificationPreference, `turn collaboratingAgents[${index}].notificationPreference`),
+    });
+  }));
+}
+
+function sessionDestination(sessionId: string, label: string): string {
+  const normalized = boundedOpaque(sessionId, label, 256);
+  if (normalized.includes("/") || normalized.includes("\\") || normalized.includes("..")) throw new Error(`${label} is invalid`);
+  return `session:${normalized}`;
+}
+
 function normalizeTurn(turn: InboundTurn): InboundTurn {
   if (!turn || typeof turn !== "object") throw new Error("turn is required");
   if (typeof turn.reply !== "function") throw new Error("turn reply port is required");
   const attachments = normalizeAttachments(turn.attachments);
+  const collaboratingAgents = normalizeCollaboratingAgents(turn.collaboratingAgents);
+  const channelContext = normalizeChannelContext(turn.channelContext);
   return Object.freeze({
     id: boundedOpaque(turn.id, "turn id", MAX_ID_CHARS),
     principal: Object.freeze({
@@ -106,6 +153,9 @@ function normalizeTurn(turn: InboundTurn): InboundTurn {
       ...(turn.principal.agentProfileId === undefined
         ? {}
         : { agentProfileId: boundedOpaque(turn.principal.agentProfileId, "turn principal agentProfileId", 96) }),
+      ...(turn.principal.sharedConversationId === undefined
+        ? {}
+        : { sharedConversationId: boundedOpaque(turn.principal.sharedConversationId, "turn principal sharedConversationId", 256) }),
     }),
     text: boundedText(turn.text, "turn text", MAX_TEXT_CHARS),
     ...(attachments === undefined ? {} : { attachments }),
@@ -121,6 +171,16 @@ function normalizeTurn(turn: InboundTurn): InboundTurn {
     ...(turn.agentProfileId === undefined
       ? {}
       : { agentProfileId: boundedOpaque(turn.agentProfileId, "turn agentProfileId", 96) }),
+    ...(turn.agentProfileLabel === undefined ? {} : { agentProfileLabel: boundedOpaque(turn.agentProfileLabel, "turn agentProfileLabel", 160) }),
+    ...(turn.agentNotificationPreference === undefined ? {} : { agentNotificationPreference: notificationPreference(turn.agentNotificationPreference, "turn agentNotificationPreference") }),
+    ...(turn.sessionAffinityId === undefined ? {} : { sessionAffinityId: sessionDestination(turn.sessionAffinityId, "turn sessionAffinityId").slice("session:".length) }),
+    ...(collaboratingAgents === undefined ? {} : { collaboratingAgents }),
+    ...(turn.delegationDepth === undefined
+      ? {}
+      : { delegationDepth: Number.isSafeInteger(turn.delegationDepth) && turn.delegationDepth >= 0 && turn.delegationDepth <= 3
+          ? turn.delegationDepth
+          : (() => { throw new Error("turn delegationDepth must be an integer between 0 and 3"); })() }),
+    ...(channelContext === undefined ? {} : { channelContext }),
     ...(turn.destinationId === undefined
       ? {}
       : { destinationId: boundedOpaque(turn.destinationId, "turn destinationId", 264) }),
@@ -129,6 +189,7 @@ function normalizeTurn(turn: InboundTurn): InboundTurn {
 }
 
 function conversationKey(turn: InboundTurn): string {
+  if (turn.principal.sharedConversationId) return `shared:${turn.principal.sharedConversationId}`;
   return JSON.stringify([
     turn.principal.authority,
     turn.principal.channel,
@@ -231,6 +292,14 @@ function resumeDecision(turn: InboundTurn): import("../routing/contract.js").Rou
     destination: Object.freeze({ kind: "session" as const, id: destinationId }),
     execution: Object.freeze({ profile: "agent" as const }),
     confidence: 1,
+  });
+}
+
+function applySessionAffinity(decision: import("../routing/contract.js").RoutingDecision, turn: InboundTurn): import("../routing/contract.js").RoutingDecision {
+  if (!turn.sessionAffinityId || decision.destination.kind !== "session" || decision.execution.profile !== "agent") return decision;
+  return Object.freeze({
+    ...decision,
+    destination: Object.freeze({ kind: "session" as const, id: sessionDestination(turn.sessionAffinityId, "turn sessionAffinityId") }),
   });
 }
 
@@ -475,7 +544,7 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
         );
         const observability = options.observability?.();
         const forcedResumeDecision = resumeDecision(turn);
-        const decision = forcedResumeDecision ?? (observability
+        let decision = forcedResumeDecision ?? (observability
           ? await observability.withSpan({
               name: "routing.classify",
               component: "routing",
@@ -487,6 +556,7 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
               },
             }, route)
           : await route());
+        if (!forcedResumeDecision) decision = applySessionAffinity(decision, turn);
 
         phase = "executor-selection";
         const executor = selectExecutor(options.executors(), decision);
@@ -499,10 +569,16 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
         phase = "execution";
         const backgroundJobs = options.sessionJobs?.();
         execution = backgroundJobs
+          && submitOptions.backgroundJobs !== false
           && decision.destination.kind === "session"
           && decision.execution.profile === "agent"
           ? await (async () => {
               phase = "background-admission";
+              type CollaborationFinding = Readonly<{ label: string; text: string }>;
+              let releaseCollaboration!: (findings: readonly CollaborationFinding[]) => void;
+              const collaborationReady = new Promise<readonly CollaborationFinding[]>((resolve) => { releaseCollaboration = resolve; });
+              if ((turn.collaboratingAgents?.length ?? 0) === 0) releaseCollaboration(Object.freeze([]));
+
               const job = await backgroundJobs.start({
                 sourceKey: key,
                 turnId: turn.id,
@@ -517,13 +593,30 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
                   conversationId: turn.principal.conversationId,
                   senderId: turn.principal.senderId,
                   ...(turn.principal.threadId === undefined ? {} : { threadId: turn.principal.threadId }),
+                  ...(turn.principal.sharedConversationId === undefined ? {} : { sharedConversationId: turn.principal.sharedConversationId }),
                 },
                 run: async (signal, report, jobContext) => {
+                  const findings = await collaborationReady;
+                  signal.throwIfAborted();
+                  const coordinatorTurn: InboundTurn = findings.length === 0
+                    ? turn
+                    : Object.freeze({
+                        ...turn,
+                        text: [
+                          turn.text,
+                          "",
+                          "Trusted collaborator findings are below. Synthesize them into one coherent answer, resolve disagreements explicitly, and do not merely repeat the raw findings.",
+                          ...findings.map((finding) => `--- ${finding.label} ---\n${finding.text}`),
+                        ].join("\n"),
+                        collaboratingAgents: Object.freeze([]),
+                      });
                   const executeJob = () => executor.execute({
-                      turn,
+                      turn: coordinatorTurn,
                       decision,
                       signal,
-                      progress: report,
+                      progress: turn.agentNotificationPreference === undefined || turn.agentNotificationPreference === "all"
+                        ? report
+                        : async (update) => report({ ...update, notify: false }),
                       ...(jobContext?.jobId === undefined ? {} : { jobId: jobContext.jobId }),
                       ...(jobContext?.onDirective === undefined ? {} : { onDirective: jobContext.onDirective }),
                     });
@@ -537,16 +630,110 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
                     ...(result.afterReplyFinalizers === undefined ? {} : { afterNotifyFinalizers: result.afterReplyFinalizers }),
                   };
                 },
-                notify: turn.reply,
+                notify: turn.agentProfileLabel
+                  ? async (text) => turn.reply(`${turn.agentProfileLabel} · ${text}`)
+                  : turn.reply,
               });
+
+              const collaboratorJobs: string[] = [];
+              const collaboratorFindings: Promise<CollaborationFinding>[] = [];
+              for (const collaborator of turn.collaboratingAgents ?? []) {
+                if (collaborator.id === turn.agentProfileId) continue;
+                const { sharedConversationId: _sharedConversationId, ...isolatedPrincipal } = turn.principal;
+                const delegatedTurn: InboundTurn = Object.freeze({
+                  ...turn,
+                  id: `${turn.id}:agent:${collaborator.id}`,
+                  principal: Object.freeze({ ...isolatedPrincipal, agentProfileId: collaborator.id }),
+                  agentProfileId: collaborator.id,
+                  agentProfileLabel: collaborator.label,
+                  collaboratingAgents: Object.freeze([]),
+                  delegationDepth: Math.min(3, (turn.delegationDepth ?? 0) + 1),
+                  sessionAffinityId: undefined,
+                  destinationId: "session:new",
+                });
+                let settleFinding!: (finding: CollaborationFinding) => void;
+                const finding = new Promise<CollaborationFinding>((resolve) => { settleFinding = resolve; });
+                collaboratorFindings.push(finding);
+                try {
+                  const delegated = await backgroundJobs.start({
+                    sourceKey: `${key}:agent:${collaborator.id}`,
+                    turnId: delegatedTurn.id,
+                    destinationId: "session:new",
+                    agentProfileId: collaborator.id,
+                    text: delegatedTurn.text,
+                    timestamp: delegatedTurn.timestamp,
+                    origin: {
+                      authority: turn.principal.authority,
+                      channel: turn.principal.channel,
+                      accountId: turn.principal.accountId,
+                      conversationId: turn.principal.conversationId,
+                      senderId: turn.principal.senderId,
+                      ...(turn.principal.threadId === undefined ? {} : { threadId: turn.principal.threadId }),
+                      ...(turn.principal.sharedConversationId === undefined ? {} : { sharedConversationId: turn.principal.sharedConversationId }),
+                    },
+                    run: async (signal, report, jobContext) => {
+                      const delegatedDecision: RoutingDecision = Object.freeze({
+                        ...decision,
+                        messageId: delegatedTurn.id,
+                        destination: Object.freeze({ kind: "session" as const, id: "session:new" }),
+                        execution: Object.freeze({ profile: "agent" as const }),
+                      });
+                      try {
+                        const executeDelegated = () => executor.execute({
+                          turn: delegatedTurn,
+                          decision: delegatedDecision,
+                          signal,
+                          ...(collaborator.notificationPreference === "all" ? { progress: report } : {}),
+                          ...(jobContext?.jobId === undefined ? {} : { jobId: jobContext.jobId }),
+                          ...(jobContext?.onDirective === undefined ? {} : { onDirective: jobContext.onDirective }),
+                        });
+                        const result = jobContext?.jobId === undefined || options.permissions.runAsJob === undefined
+                          ? await executeDelegated()
+                          : await options.permissions.runAsJob(jobContext.jobId, executeDelegated);
+                        settleFinding(Object.freeze({ label: collaborator.label, text: result.text }));
+                        return {
+                          text: result.text,
+                          ...(result.sessionId === undefined ? {} : { sessionId: result.sessionId }),
+                          ...(result.afterReply === undefined ? {} : { afterNotify: result.afterReply }),
+                          ...(result.afterReplyFinalizers === undefined ? {} : { afterNotifyFinalizers: result.afterReplyFinalizers }),
+                        };
+                      } catch (error) {
+                        settleFinding(Object.freeze({ label: collaborator.label, text: `Collaboration failed: ${error instanceof Error ? error.message : String(error)}` }));
+                        throw error;
+                      }
+                    },
+                    notify: collaborator.notificationPreference === "muted"
+                      ? async () => undefined
+                      : async (text) => turn.reply(`${collaborator.label} · ${text}`),
+                  });
+                  collaboratorJobs.push(delegated.id);
+                  if (turn.principal.sharedConversationId && decision.destination.id.startsWith("session:")) {
+                    await options.recordHandoff?.({
+                      conversationId: turn.principal.sharedConversationId,
+                      fromAgentId: turn.agentProfileId ?? "friday",
+                      toAgentId: collaborator.id,
+                      text: delegatedTurn.text,
+                      sessionId: decision.destination.id.slice("session:".length),
+                      jobId: delegated.id,
+                    });
+                  }
+                } catch (error) {
+                  settleFinding(Object.freeze({ label: collaborator.label, text: `Collaboration could not be admitted: ${error instanceof Error ? error.message : String(error)}` }));
+                }
+              }
+              if (collaboratorFindings.length > 0) {
+                void Promise.all(collaboratorFindings).then((findings) => releaseCollaboration(Object.freeze(findings)));
+              }
+
               const queued = job.currentStatus?.startsWith("Queued") === true;
               return Object.freeze({
                 text: [
                   `${queued ? "Queued" : "Started"} background work: ${job.label} (${job.id}).`,
+                  ...(collaboratorJobs.length === 0 ? [] : [`Delegated ${collaboratorJobs.length} additional Agent ${collaboratorJobs.length === 1 ? "job" : "jobs"}: ${collaboratorJobs.join(", ")}.`]),
                   job.currentStatus ?? "Accepted for background execution.",
                   "I will send retry/failure updates and the final report back to this conversation.",
                 ].join("\n"),
-                metadata: { jobId: job.id, background: true },
+                metadata: { jobId: job.id, background: true, collaboratorJobs: collaboratorJobs.length },
               });
             })()
           : decision.destination.kind === "session" && decision.destination.id !== "session:new"
@@ -554,6 +741,9 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
             : await execute();
 
         submitOptions.signal?.throwIfAborted();
+        if (turn.agentProfileLabel && decision.execution.profile === "agent") {
+          execution = Object.freeze({ ...execution, text: `${turn.agentProfileLabel} · ${execution.text}` });
+        }
         // Persist the private externally visible result before attempting delivery.
         // The globally inspectable event journal stores only a hash/reference.
         phase = "execution-result";

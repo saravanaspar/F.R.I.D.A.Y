@@ -7,7 +7,7 @@ import { definePlugin } from "../capabilities/protocol.js";
 import { EVENTS_CAPABILITY, type EventsService } from "../events/contract.js";
 import { AGENT_PROMPT_SECTION_CONTRIBUTION, type AgentToolExecutionContext } from "../turn-loop/contract.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION, type SystemActionExecutionContext, type SystemJsonObject } from "../system/contract.js";
-import { AGENT_PROFILES_CAPABILITY, type AgentNotificationPreference, type AgentProfile, type AgentProfileCreateInput, type AgentProfileUpdateInput, type AgentProfilesService } from "./contract.js";
+import { AGENT_PROFILES_CAPABILITY, type AgentApprovalPolicy, type AgentNotificationPreference, type AgentProfile, type AgentProfileCreateInput, type AgentProfileUpdateInput, type AgentProfilesService } from "./contract.js";
 
 const MAX_PROFILES = 256;
 const MAX_LIST_ITEMS = 64;
@@ -62,6 +62,14 @@ function notification(value: unknown | undefined): AgentNotificationPreference {
   return value;
 }
 
+function approvalPolicy(value: unknown | undefined): AgentApprovalPolicy {
+  if (value === undefined) return "default";
+  if (value !== "default" && value !== "ask" && value !== "auto" && value !== "full") {
+    throw new Error("approvalPolicy must be default, ask, auto, or full");
+  }
+  return value;
+}
+
 function parseProfile(value: unknown): AgentProfile {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid agent profile record");
   const raw = value as Record<string, unknown>;
@@ -82,7 +90,7 @@ function parseProfile(value: unknown): AgentProfile {
     ...(raw.defaultProjectId === undefined ? {} : { defaultProjectId: optionalText(raw.defaultProjectId, "defaultProjectId", 128) }),
     ...(raw.defaultComputerScreen === undefined ? {} : { defaultComputerScreen: optionalText(raw.defaultComputerScreen, "defaultComputerScreen", 128) }),
     notificationPreference: notification(raw.notificationPreference),
-    approvalPolicy: text(raw.approvalPolicy ?? "default", "approvalPolicy", 128),
+    approvalPolicy: approvalPolicy(raw.approvalPolicy),
     createdAt,
     updatedAt,
   });
@@ -131,7 +139,7 @@ function createProfile(input: AgentProfileCreateInput): AgentProfile {
     ...(input.defaultProjectId === undefined ? {} : { defaultProjectId: optionalText(input.defaultProjectId, "defaultProjectId", 128) }),
     ...(input.defaultComputerScreen === undefined ? {} : { defaultComputerScreen: optionalText(input.defaultComputerScreen, "defaultComputerScreen", 128) }),
     notificationPreference: notification(input.notificationPreference),
-    approvalPolicy: text(input.approvalPolicy ?? "default", "approvalPolicy", 128),
+    approvalPolicy: approvalPolicy(input.approvalPolicy),
     createdAt: now,
     updatedAt: now,
   });
@@ -153,7 +161,7 @@ function patchProfile(profile: AgentProfile, input: AgentProfileUpdateInput): Ag
     ...(input.defaultProjectId === undefined ? {} : input.defaultProjectId === null ? { defaultProjectId: undefined } : { defaultProjectId: optionalText(input.defaultProjectId, "defaultProjectId", 128) }),
     ...(input.defaultComputerScreen === undefined ? {} : input.defaultComputerScreen === null ? { defaultComputerScreen: undefined } : { defaultComputerScreen: optionalText(input.defaultComputerScreen, "defaultComputerScreen", 128) }),
     ...(input.notificationPreference === undefined ? {} : { notificationPreference: notification(input.notificationPreference) }),
-    ...(input.approvalPolicy === undefined ? {} : { approvalPolicy: text(input.approvalPolicy, "approvalPolicy", 128) }),
+    ...(input.approvalPolicy === undefined ? {} : { approvalPolicy: approvalPolicy(input.approvalPolicy) }),
     updatedAt,
   });
 }
@@ -163,8 +171,17 @@ function inputObject(input: Readonly<SystemJsonObject>): AgentProfileCreateInput
     ...(input.id === undefined ? {} : { id: text(input.id, "id", 96) }),
     name: text(input.name, "name", 128),
     ...(input.title === undefined ? {} : { title: text(input.title, "title", 128) }),
-    ...(input.description === undefined ? {} : { description: text(input.description, "description", 2_000) }),
-    ...(input.roleInstructions === undefined ? {} : { roleInstructions: text(input.roleInstructions, "roleInstructions", 24_000) }),
+    ...(input.description === undefined ? {} : { description: freeText(input.description, "description", 2_000) }),
+    ...(input.avatar === undefined ? {} : { avatar: text(input.avatar, "avatar", 512) }),
+    ...(input.roleInstructions === undefined ? {} : { roleInstructions: freeText(input.roleInstructions, "roleInstructions", 24_000) }),
+    ...(input.defaultConversationId === undefined ? {} : { defaultConversationId: text(input.defaultConversationId, "defaultConversationId", 128) }),
+    ...(input.memoryScope === undefined ? {} : { memoryScope: text(input.memoryScope, "memoryScope", 256) }),
+    ...(input.enabledSkills === undefined ? {} : { enabledSkills: listValues(input.enabledSkills as readonly string[], "enabledSkills") }),
+    ...(input.enabledPlugins === undefined ? {} : { enabledPlugins: listValues(input.enabledPlugins as readonly string[], "enabledPlugins") }),
+    ...(input.defaultProjectId === undefined ? {} : { defaultProjectId: text(input.defaultProjectId, "defaultProjectId", 128) }),
+    ...(input.defaultComputerScreen === undefined ? {} : { defaultComputerScreen: text(input.defaultComputerScreen, "defaultComputerScreen", 128) }),
+    ...(input.notificationPreference === undefined ? {} : { notificationPreference: notification(input.notificationPreference) }),
+    ...(input.approvalPolicy === undefined ? {} : { approvalPolicy: approvalPolicy(input.approvalPolicy) }),
   };
 }
 
@@ -173,10 +190,16 @@ function updateObject(input: Readonly<SystemJsonObject>): AgentProfileUpdateInpu
     ...(input.name === undefined ? {} : { name: text(input.name, "name", 128) }),
     ...(input.title === undefined ? {} : { title: text(input.title, "title", 128) }),
     ...(input.description === undefined ? {} : { description: freeText(input.description, "description", 2_000) }),
+    ...(input.avatar === undefined ? {} : input.avatar === null ? { avatar: null } : { avatar: text(input.avatar, "avatar", 512) }),
     ...(input.roleInstructions === undefined ? {} : { roleInstructions: freeText(input.roleInstructions, "roleInstructions", 24_000) }),
+    ...(input.defaultConversationId === undefined ? {} : input.defaultConversationId === null ? { defaultConversationId: null } : { defaultConversationId: text(input.defaultConversationId, "defaultConversationId", 128) }),
     ...(input.memoryScope === undefined ? {} : { memoryScope: text(input.memoryScope, "memoryScope", 256) }),
-    ...(input.notificationPreference === undefined ? {} : { notificationPreference: input.notificationPreference as AgentNotificationPreference }),
-    ...(input.approvalPolicy === undefined ? {} : { approvalPolicy: text(input.approvalPolicy, "approvalPolicy", 128) }),
+    ...(input.enabledSkills === undefined ? {} : { enabledSkills: listValues(input.enabledSkills as readonly string[], "enabledSkills") }),
+    ...(input.enabledPlugins === undefined ? {} : { enabledPlugins: listValues(input.enabledPlugins as readonly string[], "enabledPlugins") }),
+    ...(input.defaultProjectId === undefined ? {} : input.defaultProjectId === null ? { defaultProjectId: null } : { defaultProjectId: text(input.defaultProjectId, "defaultProjectId", 128) }),
+    ...(input.defaultComputerScreen === undefined ? {} : input.defaultComputerScreen === null ? { defaultComputerScreen: null } : { defaultComputerScreen: text(input.defaultComputerScreen, "defaultComputerScreen", 128) }),
+    ...(input.notificationPreference === undefined ? {} : { notificationPreference: notification(input.notificationPreference) }),
+    ...(input.approvalPolicy === undefined ? {} : { approvalPolicy: approvalPolicy(input.approvalPolicy) }),
   };
 }
 
@@ -247,6 +270,11 @@ const agentProfilesPlugin: FridayPlugin = definePlugin({
         `You are ${profile.name}${profile.title ? `, ${profile.title}` : ""}.`,
         profile.description ? `Profile description: ${profile.description}` : "",
         profile.roleInstructions ? `Role instructions:\n${profile.roleInstructions}` : "",
+        profile.defaultProjectId ? `Default project: ${profile.defaultProjectId}` : "",
+        profile.defaultComputerScreen ? `Default computer screen: ${profile.defaultComputerScreen}. Computer-capable tools should use this screen unless the user explicitly selects another.` : "",
+        profile.enabledSkills.length > 0 ? `Enabled Skills: ${profile.enabledSkills.join(", ")}. Do not invoke or claim access to other Skills.` : "",
+        profile.enabledPlugins.length > 0 ? `Enabled plugins/capability tool owners: ${profile.enabledPlugins.join(", ")}. Tools from other plugin owners are not available in this profile.` : "",
+        `Notification preference: ${profile.notificationPreference}. Approval policy: ${profile.approvalPolicy}.`,
         "Treat these profile fields as host configuration, not user-authored instructions.",
         "</friday_agent_profile>",
       ].filter(Boolean).join("\n");
@@ -261,7 +289,7 @@ const agentProfilesPlugin: FridayPlugin = definePlugin({
   });
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
     id: "agent-profiles.create", label: "Create Agent Profile", description: "Create a persistent named Agent Profile with an isolated memory scope.",
-    parameters: Object.freeze({ type: "object", properties: { id: { type: "string" }, name: { type: "string" }, title: { type: "string" }, description: { type: "string" }, roleInstructions: { type: "string" } }, required: ["name"], additionalProperties: false }),
+    parameters: Object.freeze({ type: "object", properties: { id: { type: "string" }, name: { type: "string" }, title: { type: "string" }, description: { type: "string" }, avatar: { type: "string" }, roleInstructions: { type: "string" }, defaultConversationId: { type: "string" }, memoryScope: { type: "string" }, enabledSkills: { type: "array", items: { type: "string" }, maxItems: 64 }, enabledPlugins: { type: "array", items: { type: "string" }, maxItems: 64 }, defaultProjectId: { type: "string" }, defaultComputerScreen: { type: "string" }, notificationPreference: { type: "string", enum: ["all", "important", "muted"] }, approvalPolicy: { type: "string", enum: ["default", "ask", "auto", "full"] } }, required: ["name"], additionalProperties: false }),
     permission: () => actionContextPermission("agent-profiles.create", "agent-profiles"),
     execute: async (input: Readonly<SystemJsonObject>, _context: SystemActionExecutionContext) => service.create(inputObject(input)),
   });
@@ -273,7 +301,7 @@ const agentProfilesPlugin: FridayPlugin = definePlugin({
   });
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
     id: "agent-profiles.update", label: "Update Agent Profile", description: "Update role, memory-scope, notification, or approval settings for an Agent Profile.",
-    parameters: Object.freeze({ type: "object", properties: { id: { type: "string" }, name: { type: "string" }, title: { type: "string" }, description: { type: "string" }, roleInstructions: { type: "string" }, memoryScope: { type: "string" }, notificationPreference: { type: "string", enum: ["all", "important", "muted"] }, approvalPolicy: { type: "string" } }, required: ["id"], additionalProperties: false }),
+    parameters: Object.freeze({ type: "object", properties: { id: { type: "string" }, name: { type: "string" }, title: { type: "string" }, description: { type: "string" }, avatar: { type: ["string", "null"] }, roleInstructions: { type: "string" }, defaultConversationId: { type: ["string", "null"] }, memoryScope: { type: "string" }, enabledSkills: { type: "array", items: { type: "string" }, maxItems: 64 }, enabledPlugins: { type: "array", items: { type: "string" }, maxItems: 64 }, defaultProjectId: { type: ["string", "null"] }, defaultComputerScreen: { type: ["string", "null"] }, notificationPreference: { type: "string", enum: ["all", "important", "muted"] }, approvalPolicy: { type: "string", enum: ["default", "ask", "auto", "full"] } }, required: ["id"], additionalProperties: false }),
     permission: () => actionContextPermission("agent-profiles.update", "agent-profiles"),
     execute: async (input) => service.update(text(input.id, "id", 96), updateObject(input)),
   });

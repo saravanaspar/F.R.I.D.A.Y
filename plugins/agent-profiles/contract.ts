@@ -2,6 +2,7 @@ import type { Capability } from "../capabilities/protocol.js";
 import { defineCapability } from "../capabilities/protocol.js";
 
 export type AgentNotificationPreference = "all" | "important" | "muted";
+export type AgentApprovalPolicy = "default" | "ask" | "auto" | "full";
 
 export interface AgentProfile {
   readonly id: string;
@@ -17,7 +18,7 @@ export interface AgentProfile {
   readonly defaultProjectId?: string | undefined;
   readonly defaultComputerScreen?: string | undefined;
   readonly notificationPreference: AgentNotificationPreference;
-  readonly approvalPolicy: string;
+  readonly approvalPolicy: AgentApprovalPolicy;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -36,7 +37,7 @@ export interface AgentProfileCreateInput {
   readonly defaultProjectId?: string | undefined;
   readonly defaultComputerScreen?: string | undefined;
   readonly notificationPreference?: AgentNotificationPreference | undefined;
-  readonly approvalPolicy?: string | undefined;
+  readonly approvalPolicy?: AgentApprovalPolicy | undefined;
 }
 
 export interface AgentProfileUpdateInput {
@@ -52,7 +53,7 @@ export interface AgentProfileUpdateInput {
   readonly defaultProjectId?: string | null | undefined;
   readonly defaultComputerScreen?: string | null | undefined;
   readonly notificationPreference?: AgentNotificationPreference | undefined;
-  readonly approvalPolicy?: string | undefined;
+  readonly approvalPolicy?: AgentApprovalPolicy | undefined;
 }
 
 export interface AgentProfilesService {

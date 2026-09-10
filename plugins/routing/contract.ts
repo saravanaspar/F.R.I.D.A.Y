@@ -11,6 +11,8 @@ export interface RoutingPrincipal {
   readonly conversationId: string;
   readonly senderId: string;
   readonly threadId?: string | undefined;
+  /** Host-owned internal Conversation id for shared routing/session continuity. */
+  readonly sharedConversationId?: string | undefined;
 }
 
 export interface RoutingAttachment {

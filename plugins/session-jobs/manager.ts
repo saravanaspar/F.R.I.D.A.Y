@@ -211,6 +211,7 @@ function parseOrigin(value: unknown): MutableJob["origin"] {
     conversationId: persistedString(raw, "conversationId", 256)!,
     senderId: persistedString(raw, "senderId", 256)!,
     ...(raw.threadId === undefined ? {} : { threadId: persistedString(raw, "threadId", 256)! }),
+    ...(raw.sharedConversationId === undefined ? {} : { sharedConversationId: persistedString(raw, "sharedConversationId", 256)! }),
   };
 }
 

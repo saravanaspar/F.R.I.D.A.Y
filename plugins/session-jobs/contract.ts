@@ -34,6 +34,8 @@ export interface SessionJobOrigin {
   readonly conversationId: string;
   readonly senderId: string;
   readonly threadId?: string | undefined;
+  /** Host-owned internal Conversation id used for shared continuity only. */
+  readonly sharedConversationId?: string | undefined;
 }
 
 export interface SessionJobProgress {

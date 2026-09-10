@@ -9,7 +9,7 @@ import { definePlugin } from "../capabilities/protocol.js";
 import { EVENTS_CAPABILITY } from "../events/contract.js";
 import { MEMORY_CAPABILITY, type MemoryService } from "../memory/contract.js";
 import { MODEL_CAPABILITY, type ModelService } from "../model/contract.js";
-import { ownerScopeAllows, principalScope, principalStateRoot, samePrincipalOrigin } from "../principal-scope.js";
+import { ownerScopeAllows, principalScope, principalStateRoot, sameContinuityOrigin } from "../principal-scope.js";
 import { SESSION_JOBS_CAPABILITY, type SessionJobsService } from "../session-jobs/contract.js";
 import { SESSIONS_CAPABILITY, type SessionsService } from "../sessions/contract.js";
 import { ROUTING_CAPABILITY, type RoutingPrincipal } from "./contract.js";
@@ -57,7 +57,7 @@ function createSessionCandidateProvider(sessions: SessionsService, sessionJobs: 
       .filter((session) => ownerScopeAllows(session.ownerScope, principal));
     const activeBySession = new Map<string, ReturnType<SessionJobsService["list"]>[number][]>();
     for (const job of sessionJobs()?.list({ activeOnly: true, limit: 100 }) ?? []) {
-      if (!samePrincipalOrigin(job.origin, principal)) continue;
+      if (!sameContinuityOrigin(job.origin, principal)) continue;
       if (!job.sessionId) continue;
       const list = activeBySession.get(job.sessionId) ?? [];
       list.push(job);

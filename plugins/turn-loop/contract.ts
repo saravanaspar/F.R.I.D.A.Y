@@ -15,8 +15,26 @@ export interface TurnPrincipal {
   readonly threadId?: string | undefined;
   /** Host-selected persistent Agent Profile for this turn. */
   readonly agentProfileId?: string | undefined;
+  /** Host-owned internal Conversation id used only for shared continuity. */
+  readonly sharedConversationId?: string | undefined;
 }
 
+
+export interface TurnChannelContext {
+  readonly chatType?: "dm" | "group" | "channel" | "thread" | undefined;
+  readonly senderName?: string | undefined;
+  readonly conversationName?: string | undefined;
+  readonly providerMessageId?: string | undefined;
+  readonly replyToMessageId?: string | undefined;
+  readonly internalConversationId?: string | undefined;
+  readonly internalThreadId?: string | undefined;
+}
+
+export interface TurnCollaboratingAgent {
+  readonly id: string;
+  readonly label: string;
+  readonly notificationPreference: "all" | "important" | "muted";
+}
 
 export interface TurnAttachment {
   readonly kind: "image" | "audio" | "video" | "document" | "sticker" | "other";
@@ -38,7 +56,19 @@ export interface InboundTurn {
   readonly timestamp: number;
   /** Host-selected Agent Profile; channels must not infer this from untrusted text. */
   readonly agentProfileId?: string | undefined;
-  /** Host-selected persistent session destination for product clients. */
+  /** Human-visible logical Agent identity for channel/client rendering. */
+  readonly agentProfileLabel?: string | undefined;
+  /** Controls proactive/background progress for the selected named Agent. Direct answers are never suppressed. */
+  readonly agentNotificationPreference?: "all" | "important" | "muted" | undefined;
+  /** Host-owned Conversation session affinity applied only after routing selects Agent/session execution. */
+  readonly sessionAffinityId?: string | undefined;
+  /** Additional named Agents admitted as bounded Session Jobs under one coordinator turn. */
+  readonly collaboratingAgents?: readonly TurnCollaboratingAgent[] | undefined;
+  /** Host-owned bounded delegation depth. User ingress starts at 0; delegated Agent jobs increment it. */
+  readonly delegationDepth?: number | undefined;
+  /** Trusted provider/internal metadata preserved across durable ingress. */
+  readonly channelContext?: TurnChannelContext | undefined;
+  /** Host-selected persistent session destination for restart/internal explicit Agent work only. */
   readonly destinationId?: string | undefined;
   /** Host-owned destination override used only for durable restart resumption. */
   readonly resumeDestinationId?: string | undefined;
@@ -92,6 +122,12 @@ export interface AgentToolExecutionContext {
   /** Memory namespaces authorized for this Agent turn. */
   readonly memoryScopes?: readonly string[] | undefined;
   readonly defaultMemoryScope?: string | undefined;
+  readonly enabledSkills?: readonly string[] | undefined;
+  readonly enabledPlugins?: readonly string[] | undefined;
+  readonly defaultComputerScreen?: string | undefined;
+  readonly notificationPreference?: "all" | "important" | "muted" | undefined;
+  readonly approvalPolicy?: string | undefined;
+  readonly permissionMode?: "ask" | "auto" | "full" | undefined;
   deferAfterReply(callback: () => void | Promise<void>, durable?: TurnFinalizerDescriptor): void;
   deferOnFailure(callback: (error: unknown) => void | Promise<void>): void;
 }
@@ -164,6 +200,8 @@ export interface AgentModelRequestPolicyContribution {
  */
 export interface AgentToolContribution {
   readonly id: string;
+  /** Owning plugin id used by AgentProfile.enabledPlugins allowlists. */
+  readonly sourcePluginId?: string | undefined;
   readonly name: string;
   readonly label: string;
   readonly description: string;
@@ -196,6 +234,8 @@ export const TURN_FINALIZER_CONTRIBUTION: Contribution<TurnFinalizerContribution
 
 export interface TurnSubmitOptions {
   readonly signal?: AbortSignal | undefined;
+  /** Internal callers can disable detached Session Job admission to execute one delegated turn inline. */
+  readonly backgroundJobs?: boolean | undefined;
 }
 
 export interface TurnExecutionContext {

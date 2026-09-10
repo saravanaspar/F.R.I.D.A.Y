@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createInterface } from "node:readline/promises";
 import { readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -11,7 +12,7 @@ import { ARTIFACTS_CAPABILITY } from "../artifacts/contract.js";
 import { CHANNELS_TRUSTED_CAPABILITY } from "../channels/trusted-contract.js";
 import { EVENTS_CAPABILITY } from "../events/contract.js";
 import { OBSERVABILITY_CAPABILITY } from "../observability/contract.js";
-import { PERMISSIONS_CAPABILITY } from "../permissions/contract.js";
+import { PERMISSIONS_CAPABILITY, type PermissionMode } from "../permissions/contract.js";
 import { RUNTIME_SETTINGS_CAPABILITY } from "../runtime-settings/contract.js";
 import { SELF_IMPROVEMENT_CAPABILITY, type SelfImprovementContinuation } from "../self-improvement/contract.js";
 import {
@@ -124,6 +125,7 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
     const auth = bootstrap.services.require(AUTH_CAPABILITY);
     const events = bootstrap.services.require(EVENTS_CAPABILITY);
     const permissions = bootstrap.services.require(PERMISSIONS_CAPABILITY);
+    const agentPermissionMode = new AsyncLocalStorage<PermissionMode | undefined>();
     const vault = bootstrap.services.require(VAULT_CAPABILITY);
     const vaultTrusted = bootstrap.services.require(VAULT_TRUSTED_CAPABILITY);
     const observability = bootstrap.services.optional(OBSERVABILITY_CAPABILITY);
@@ -203,7 +205,7 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
         rotate: (ref, secret) => { vaultTrusted.rotate(ref, secret); },
       },
       async authorize(request) {
-        const mode = permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE);
+        const mode = agentPermissionMode.getStore() ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE);
         await permissions.authorize({
           mode,
           workspace: process.cwd(),
@@ -237,9 +239,9 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
       },
     });
 
-    async function authorizeConfiguredServerAccess(reason: string): Promise<void> {
+    async function authorizeConfiguredServerAccess(reason: string, override?: PermissionMode): Promise<void> {
       await permissions.authorize({
-        mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+        mode: override ?? agentPermissionMode.getStore() ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
         workspace: process.cwd(),
         access: "read",
         action: {
@@ -263,7 +265,7 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
       },
       async searchRegistry(query, signal): Promise<readonly McpDiscoveryCandidate[]> {
         await permissions.authorize({
-          mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+          mode: agentPermissionMode.getStore() ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
           workspace: process.cwd(),
           access: "read",
           action: { id: "mcp.registry.search", effect: "external-read", resource: "registry.modelcontextprotocol.io", network: true },
@@ -292,13 +294,14 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
       disconnect: (server) => manager.disconnect(server),
     });
     bootstrap.contribute(AGENT_TOOL_CONTRIBUTION, {
+      sourcePluginId: "mcp",
       id: "mcp-servers",
       name: "mcp_servers",
       label: "MCP servers",
       description: "List configured MCP servers and whether each is ready for use.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
-      async execute() {
-        await authorizeConfiguredServerAccess("list configured MCP servers");
+      async execute(_input, _signal, executionContext) {
+        await authorizeConfiguredServerAccess("list configured MCP servers", executionContext?.permissionMode);
         return {
           output: service.servers().map((server) => ({
             id: server.id,
@@ -312,6 +315,7 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
       },
     });
     bootstrap.contribute(AGENT_TOOL_CONTRIBUTION, {
+      sourcePluginId: "mcp",
       id: "mcp-search-registry",
       name: "mcp_search_registry",
       label: "Search MCP Registry",
@@ -322,9 +326,9 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
         required: ["query"],
         additionalProperties: false,
       },
-      async execute(input, signal) {
+      async execute(input, signal, executionContext) {
         const query = agentString(input, "query");
-        const candidates = await service.searchRegistry(query, signal);
+        const candidates = await agentPermissionMode.run(executionContext?.permissionMode, () => service.searchRegistry(query, signal));
         return {
           output: candidates.map((candidate) => ({
             name: candidate.name,
@@ -344,6 +348,7 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
       },
     });
     bootstrap.contribute(AGENT_TOOL_CONTRIBUTION, {
+      sourcePluginId: "mcp",
       id: "mcp-list-tools",
       name: "mcp_list_tools",
       label: "List MCP tools",
@@ -354,10 +359,10 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
         required: ["server"],
         additionalProperties: false,
       },
-      async execute(input, signal) {
+      async execute(input, signal, executionContext) {
         const server = agentString(input, "server");
-        await authorizeConfiguredServerAccess(`access configured MCP server ${server}`);
-        const tools = await service.listTools(server, signal);
+        await authorizeConfiguredServerAccess(`access configured MCP server ${server}`, executionContext?.permissionMode);
+        const tools = await agentPermissionMode.run(executionContext?.permissionMode, () => service.listTools(server, signal));
         return {
           output: tools.map((tool) => ({
             server: tool.server,
@@ -369,6 +374,7 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
       },
     });
     bootstrap.contribute(AGENT_TOOL_CONTRIBUTION, {
+      sourcePluginId: "mcp",
       id: "mcp-call-tool",
       name: "mcp_call_tool",
       label: "Call MCP tool",
@@ -383,15 +389,37 @@ export function createMcpPlugin(options: McpPluginOptions = {}): FridayPlugin {
         required: ["server", "tool"],
         additionalProperties: false,
       },
-      async execute(input, signal) {
+      async execute(input, signal, executionContext) {
         const server = agentString(input, "server");
-        await authorizeConfiguredServerAccess(`access configured MCP server ${server}`);
-        const result = await service.callTool({
+        const toolName = agentString(input, "tool");
+        await authorizeConfiguredServerAccess(`access configured MCP server ${server}`, executionContext?.permissionMode);
+        let argumentsValue = input.arguments === undefined ? undefined : structuredClone(input.arguments as McpJsonValue);
+        if (executionContext?.defaultComputerScreen && (argumentsValue === undefined || (argumentsValue && typeof argumentsValue === "object" && !Array.isArray(argumentsValue)))) {
+          const tools = await agentPermissionMode.run(executionContext.permissionMode, () => service.listTools(server, signal));
+          const descriptor = tools.find((entry) => entry.name === toolName);
+          const schema = descriptor?.inputSchema && typeof descriptor.inputSchema === "object" && !Array.isArray(descriptor.inputSchema)
+            ? descriptor.inputSchema as Record<string, unknown>
+            : undefined;
+          const properties = schema?.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)
+            ? schema.properties as Record<string, unknown>
+            : undefined;
+          const targetKey = ["screen", "screenId", "display", "displayId"].find((key) => {
+            const property = properties?.[key];
+            return property && typeof property === "object" && !Array.isArray(property) && (property as Record<string, unknown>).type === "string";
+          });
+          if (targetKey) {
+            const record = argumentsValue && typeof argumentsValue === "object" && !Array.isArray(argumentsValue)
+              ? argumentsValue as Record<string, McpJsonValue>
+              : {};
+            if (record[targetKey] === undefined) argumentsValue = { ...record, [targetKey]: executionContext.defaultComputerScreen };
+          }
+        }
+        const result = await agentPermissionMode.run(executionContext?.permissionMode, () => service.callTool({
           server,
-          tool: agentString(input, "tool"),
-          ...(input.arguments === undefined ? {} : { arguments: input.arguments as McpJsonValue }),
+          tool: toolName,
+          ...(argumentsValue === undefined ? {} : { arguments: argumentsValue }),
           ...(signal === undefined ? {} : { signal }),
-        });
+        }));
         return { output: result.content, isError: result.isError };
       },
     });
