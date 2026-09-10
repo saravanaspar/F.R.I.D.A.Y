@@ -76,6 +76,8 @@ Contributor-sized work is tracked through [good first issue](https://github.com/
 
 ### Phase 1 — Client protocol, gateway, and devices
 
+Tracking: [pull request #18](https://github.com/saravanaspar/F.R.I.D.A.Y/pull/18).
+
 Add `plugins/clients`, `plugins/devices`, and `packages/client-protocol`.
 
 Status: **implemented on `feat/phase-1-client-foundation`**. The repository now has versioned protocol encoding/validation, persistent device pairing with Ed25519 challenge authentication, revocation and last-seen tracking, an event-backed gateway connection with replay/resume, a loopback HTTP API, authenticated WebSocket streaming, and WebRTC signaling relay. TLS termination remains a deployment concern; see [`docs/CLIENT_GATEWAY.md`](CLIENT_GATEWAY.md).
@@ -92,6 +94,10 @@ Acceptance: two independent test clients connect, resume after disconnect, and o
 
 ### Phase 2 — Persistent Agent Profiles and Conversations
 
+Tracking: [issue #27](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/27).
+
+Status: **in progress**. The first vertical slice now persists Agent Profiles and Conversation metadata, restores both across restart, validates profile memory-scope declarations, records Threads/Reactions/read state, resolves Agent mentions, and routes visible handoffs through the existing Session Jobs capability when a runner is supplied. Turn Loop profile selection, full memory-store scope enforcement, user-facing JobDirective redirection, and client API exposure remain part of the phase before it is marked complete.
+
 Add `plugins/agent-profiles` and `plugins/conversations` over existing runtime services.
 
 `AgentProfile` includes name, title, description, avatar, role instructions, default conversation, memory scope, enabled Skills/plugins, default Project or Computer screen, notifications, approval policy, and timestamps. An Agent Profile is a persistent teammate; a Subagent remains a bounded temporary worker.
@@ -104,6 +110,8 @@ Acceptance: create Developer and Research profiles, give them separate conversat
 
 ### Phase 3 — Projects and Execution Targets
 
+Tracking: [issue #21](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/21).
+
 Add `plugins/projects` and `packages/execution-targets`.
 
 A Project records identity, root path, preferred Computer Node, repository metadata, and policy. An `ExecutionTarget` routes existing shell, edit, process, and Git tools to Sandbox, Core Host, or Computer Node. Coding jobs use job-specific Git worktrees, run tests/builds, expose diffs and artifacts, and merge/cherry-pick only after authorization.
@@ -113,6 +121,8 @@ A request from Android or desktop resolves the Project and target on the server;
 Acceptance: an Android request selects a Project on a local PC, creates an isolated worktree, edits/tests code, returns a diff, and survives client closure.
 
 ### Phase 4 — Shared Agent Computer
+
+Tracking: [issue #22](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/22).
 
 Add `plugins/computer` with `ComputerNode`, `ScreenLease`, `ControlLease`, Browser Supervisor, resource admission, status/doctor, update, restart, and managed reset operations.
 
@@ -126,6 +136,8 @@ Acceptance: an Agent reaches a login wall, the user takes over, signs in without
 
 ### Phase 5 — Linux and Raspberry Pi implementation
 
+Tracking: [issue #22](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/22).
+
 Linux is the first-class Computer Node implementation.
 
 - Debian-family Linux/Raspberry Pi OS, systemd user services, Sway/wlroots, Wayland virtual inputs, Chromium, Playwright/CDP, AT-SPI, PipeWire, and WebRTC screen streaming.
@@ -138,6 +150,8 @@ Acceptance: a Pi user works on the physical monitor while two Agents browse inde
 
 ### Phase 6 — Desktop client
 
+Tracking: [issue #19](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/19).
+
 Start only after Phases 1–4 stabilize. Build `apps/desktop` with Electron, React, TypeScript, Vite, Zustand, TanStack Query, SQLite cache, OS credential storage, xterm.js, Monaco, native notifications, WebRTC voice/video, and the shared protocol.
 
 Provide Agents, Groups, Conversations, Threads, Projects, Routines, Skills, Plugins, Files, Computer, Approvals, Jobs, Search, Usage, and Settings. The three-pane layout includes Agent/group navigation, streaming conversation with tool activity/diffs/approvals/artifacts, and an Activity/Computer/Files/Terminal/Diff panel. Add command palette, deep links, offline cache, reconnect, and desktop updater/recovery.
@@ -145,6 +159,8 @@ Provide Agents, Groups, Conversations, Threads, Projects, Routines, Skills, Plug
 Acceptance: desktop replaces normal messaging-channel use for chat, streaming, background jobs, approvals, artifacts, project work, and computer takeover.
 
 ### Phase 7 — Android voice-first client
+
+Tracking: [issue #20](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/20).
 
 Start after the gateway and desktop protocol are stable. Build `apps/android` with Kotlin, Jetpack Compose, ViewModel/Flow, Hilt, Retrofit/OkHttp, kotlinx.serialization, Room, Android Keystore, FCM, CameraX, Storage Access Framework, WorkManager, and WebRTC.
 
@@ -154,6 +170,8 @@ Acceptance: user speaks from Android, a local Computer Node performs Project wor
 
 ### Phase 8 — Windows Computer Node
 
+Tracking: [issue #22](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/22).
+
 Keep F.R.I.D.A.Y Core in WSL2. Add a native per-user `friday-computer-node.exe` (Rust or C++) for display APIs, screen capture, Win32/COM, UI Automation, process/window metadata, and native input. The Electron desktop remains separate.
 
 Use a dedicated F.R.I.D.A.Y browser profile rather than locking the user’s personal Chrome profile. Support CDP/Playwright, Windows UI Automation, and an optional Indirect Display Driver for virtual Agent monitors. `RawInputLease` serializes global pointer/keyboard injection because foreground interactive desktop constraints prevent unlimited arbitrary native GUI parallelism. Offer Native Windows mode and WSL2 Linux Computer mode for stronger multi-seat concurrency.
@@ -162,17 +180,23 @@ Acceptance: browser, shell, files, Git, UI Automation, and virtual-screen work r
 
 ### Phase 9 — Routines and event automation
 
+Tracking: [issue #23](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/23).
+
 Add `plugins/routines` as product metadata over Scheduler and Events. A Routine stores Agent Profile, instruction/Skill, trigger, Project/Computer target, approval policy, enabled state, and run history. Support create, edit, test, pause, resume, run now, next-run display, and history on desktop and Android. Existing Events trigger Routines, which create normal Turn Loop/Session Jobs.
 
 Acceptance: scheduled and event-triggered routines run in the configured timezone, show history, respect approvals, and resume after restart.
 
 ### Phase 10 — Review Policy and safety controls
 
+Tracking: [issue #24](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/24).
+
 Add `plugins/review-policy` before existing Permissions. Rules classify actions as Allow, Require Approval, or Deny; an optional independent review model can recommend a decision, while Permissions remains authoritative. Examples include approval for external email or `production/**` writes and automatic allowance for read-only Project operations. Reactions never constitute security approval.
 
 Acceptance: policy decisions are explainable, persisted, auditable, and cannot bypass Vault or Permissions.
 
 ### Phase 11 — Search, artifacts, and plugin UX
+
+Tracking: [issue #25](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/25).
 
 Add `plugins/search` over Agents, Groups, Sessions, Messages, Projects, Files, Artifacts, Skills, and Routines using SQLite FTS initially. Desktop command palette is `Ctrl/Cmd+K`; Android has global Search.
 
@@ -181,6 +205,8 @@ Extend existing Artifacts with rich cards for documents, spreadsheets, images, c
 Acceptance: users can find prior work, inspect a result, and configure an integration without accessing internal plugin implementations.
 
 ### Phase 12 — Teach, share, and lifecycle polish
+
+Tracking: [issue #26](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/26).
 
 Teach-by-demonstration records semantic browser/UI actions during a takeover, omits secret values, drafts a Skill, tests it, and allows save/schedule. Agent duplicate/share exports sanitized `AgentProfileTemplate` data without conversations, memory history, Vault references, browser credentials, or private paths. Computer update/reset affects managed Agent state and never silently resets a person’s operating system; dedicated VMs may support full rebuilds. Add usage UI, deep links, offline recovery, health diagnostics, and migration tooling.
 

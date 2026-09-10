@@ -3,6 +3,7 @@ import type { FridayPlugin } from "./plugin.js";
 import capabilities from "../plugins/capabilities/index.js";
 import devices from "../plugins/devices/index.js";
 import agent from "../plugins/agent/index.js";
+import agentProfiles from "../plugins/agent-profiles/index.js";
 import alerts from "../plugins/alerts/index.js";
 import artifacts from "../plugins/artifacts/index.js";
 import audit from "../plugins/audit/index.js";
@@ -10,6 +11,7 @@ import auth from "../plugins/auth/index.js";
 import autonomy from "../plugins/autonomy/index.js";
 import channels from "../plugins/channels/index.js";
 import clients from "../plugins/clients/index.js";
+import conversations from "../plugins/conversations/index.js";
 import compaction from "../plugins/compaction/index.js";
 import conditionalHooks from "../plugins/conditional-hooks/index.js";
 import evaluation from "../plugins/evaluation/index.js";
@@ -53,6 +55,7 @@ export const BUILTIN_PLUGINS: ReadonlyMap<string, FridayPlugin> = new Map([
   ["./plugins/capabilities/index.ts", capabilities],
   ["./plugins/devices/index.ts", devices],
   ["./plugins/agent/index.ts", agent],
+  ["./plugins/agent-profiles/index.ts", agentProfiles],
   ["./plugins/alerts/index.ts", alerts],
   ["./plugins/artifacts/index.ts", artifacts],
   ["./plugins/audit/index.ts", audit],
@@ -60,6 +63,7 @@ export const BUILTIN_PLUGINS: ReadonlyMap<string, FridayPlugin> = new Map([
   ["./plugins/autonomy/index.ts", autonomy],
   ["./plugins/channels/index.ts", channels],
   ["./plugins/clients/index.ts", clients],
+  ["./plugins/conversations/index.ts", conversations],
   ["./plugins/compaction/index.ts", compaction],
   ["./plugins/conditional-hooks/index.ts", conditionalHooks],
   ["./plugins/evaluation/index.ts", evaluation],

@@ -5,6 +5,21 @@ Notable user-facing changes to F.R.I.D.A.Y are tracked here.
 The project is in active development. GitHub Releases contain the authoritative
 published release artifacts and generated release notes.
 
+## [Unreleased]
+
+### Client foundation
+
+- Added the versioned client protocol package used by server transports and future desktop, Android, and Computer Node clients.
+- Added persistent device pairing with Ed25519 challenge authentication, explicit approval, revocation, last-seen tracking, and private state storage.
+- Added the loopback Client Gateway with health, pairing, authentication, event replay/resume, authenticated WebSocket streaming, and WebRTC signaling relay.
+- Added deployment and verification documentation for loopback binding, TLS termination, pairing, replay, reconnect, and signaling checks.
+
+### Agent Profiles and Conversations
+
+- Added persistent named Agent Profiles with role instructions, scoped memory declarations, enabled Skills/plugins, notification preferences, approval policy, and restart-safe CRUD operations.
+- Added persistent Direct/Group Conversation metadata over existing Sessions, including participants, pin/hide state, notification state, read sequence, Threads with reply counts, Reactions, mention resolution, and visible Agent-to-Agent handoffs.
+- Routed handoffs through the existing Session Jobs capability when an execution runner is available, without introducing a second queue or transcript store.
+
 ## [1.0.4] - 2026-09-09
 
 ### Memory correctness and retrieval
