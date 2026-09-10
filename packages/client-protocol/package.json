@@ -1,6 +1,6 @@
 {
   "name": "@friday/client-protocol",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Versioned wire schemas shared by F.R.I.D.A.Y clients and the client gateway",
   "type": "module",
   "main": "./dist/index.js",

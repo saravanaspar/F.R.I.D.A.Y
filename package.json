@@ -47,7 +47,7 @@
     "check:workspace-node-modules": "node scripts/workspace-packages.mjs check-node-modules"
   },
   "dependencies": {
-    "@friday/client-protocol": "1.0.3",
+    "@friday/client-protocol": "1.0.4",
     "@friday/operational-errors": "1.0.4",
     "ws": "^8.18.0"
   },
