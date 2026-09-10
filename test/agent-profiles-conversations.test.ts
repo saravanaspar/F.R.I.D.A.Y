@@ -12,6 +12,8 @@ import { createEventsPlugin } from "../plugins/events/index.js";
 import sessionsPlugin from "../plugins/sessions/index.js";
 import { createSessionJobsPlugin } from "../plugins/session-jobs/index.js";
 import { SESSION_JOBS_CAPABILITY } from "../plugins/session-jobs/contract.js";
+import { AGENT_PROMPT_SECTION_CONTRIBUTION } from "../plugins/turn-loop/contract.js";
+import { collectContributions } from "../plugins/capabilities/protocol.js";
 import { PluginTestHost } from "./helpers/plugin-host.js";
 
 const roots: string[] = [];
@@ -35,6 +37,14 @@ async function activate(stateDir: string): Promise<PluginTestHost> {
   await host.activatePlugin(conversationsPlugin);
   await host.completePluginBootstrap();
   return host;
+}
+
+async function waitUntil(predicate: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error(`Timed out waiting for ${label}`);
 }
 
 describe("Phase 2 Agent Profiles and Conversations", () => {
@@ -86,7 +96,8 @@ describe("Phase 2 Agent Profiles and Conversations", () => {
     expect(reaction.emoji).toBe("✅");
     expect(read.lastReadSequence).toBe(12);
     expect(handoff.jobId).toBeTypeOf("string");
-    expect(jobs.get(handoff.jobId!)).toBeDefined();
+    expect(jobs.get(handoff.jobId!)).toMatchObject({ agentProfileId: "research", destinationId: "session:session-launch" });
+    await waitUntil(() => conversations.listHandoffs(conversation.id)[0]?.status === "completed", "handoff completion");
     expect(conversations.listHandoffs(conversation.id)).toHaveLength(1);
     expect(conversations.listThreads(conversation.id)).toHaveLength(1);
     expect(conversations.listReactions("message-root")).toHaveLength(1);
@@ -97,5 +108,22 @@ describe("Phase 2 Agent Profiles and Conversations", () => {
     expect(restored).toMatchObject({ title: "Website Launch", lastReadSequence: 12, pinned: false, hidden: false });
     expect(requireCapability(CONVERSATIONS_CAPABILITY).listHandoffs(conversation.id)).toHaveLength(1);
     await reopened.dispose();
+  });
+
+  it("renders the selected persistent profile through the shared Turn Loop prompt seam", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "friday-agent-profile-prompt-"));
+    roots.push(stateDir);
+    const host = await activate(stateDir);
+    const profiles = requireCapability(AGENT_PROFILES_CAPABILITY);
+    await profiles.create({ name: "Developer", title: "Build teammate", roleInstructions: "Prefer small tested changes." });
+    const contribution = collectContributions(AGENT_PROMPT_SECTION_CONTRIBUTION).find((entry) => entry.id === "agent-profile-identity");
+    expect(contribution?.render({
+      cwd: stateDir,
+      sessionId: "session-profile",
+      agentProfileId: "developer",
+      deferAfterReply() {},
+      deferOnFailure() {},
+    })).toContain("Prefer small tested changes.");
+    await host.dispose();
   });
 });

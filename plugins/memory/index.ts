@@ -6,7 +6,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, rea
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { FridayPlugin } from "../../src/plugin.js";
 import { definePlugin } from "../capabilities/protocol.js";
-import { AGENT_TOOL_CONTRIBUTION, type AgentExtensionJsonValue } from "../turn-loop/contract.js";
+import { AGENT_TOOL_CONTRIBUTION, type AgentExtensionJsonValue, type AgentToolExecutionContext } from "../turn-loop/contract.js";
 import { PERMISSIONS_CAPABILITY } from "../permissions/contract.js";
 import { ownerStateRoot, principalScope } from "../principal-scope.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION, type SystemJsonObject } from "../system/contract.js";
@@ -85,45 +85,59 @@ async function withGlobalReadStoreAsync<T>(
   }
 }
 
+function memoryStateDir(scope: string, sessionArtifactDir: string | undefined, ownerScope: string | undefined): { readonly stateDir: string; readonly storageScope: "global" | "local" } {
+  if (scope === "local") {
+    const stateDir = memory.getLocalMemoryStateDir(sessionArtifactDir);
+    if (!stateDir) throw new Error("Local memory requires a persistent session");
+    return { stateDir, storageScope: "local" };
+  }
+  if (scope === "global" || scope === "global:user") return { stateDir: memory.getGlobalMemoryStateDir(ownerStateRoot(rootDir(), ownerScope)), storageScope: "global" };
+  if (!/^(?:agent|project):[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(scope)) throw new Error("memory scope must be global:user, agent:<id>, project:<id>, or local");
+  return { stateDir: join(ownerStateRoot(rootDir(), ownerScope), "memory-scopes", scope.replace(":", "-")), storageScope: "global" };
+}
+
+function authorizedMemoryScope(value: unknown, executionContext: AgentToolExecutionContext | undefined): string {
+  const requested = value === undefined ? (executionContext?.defaultMemoryScope ?? "global:user") : String(value).trim();
+  const scope = requested === "global" ? "global:user" : requested;
+  if (scope !== "local" && scope !== "global:user" && !/^(?:agent|project):[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(scope)) {
+    throw new Error("memory scope must be global:user, agent:<id>, project:<id>, or local");
+  }
+  const allowed = executionContext?.memoryScopes ?? ["global:user", "local"];
+  const normalizedAllowed = allowed.map((entry) => entry === "global" ? "global:user" : entry);
+  if (!normalizedAllowed.includes(scope)) throw new Error(`memory scope is not authorized for this Agent: ${scope}`);
+  return scope;
+}
+
 function withScopedStore<T>(
-  scope: "global" | "local",
+  scope: string,
   sessionArtifactDir: string | undefined,
   ownerScope: string | undefined,
   operation: (store: InstanceType<typeof memory.MemoryStore>) => T,
 ): T {
-  const stateDir = scope === "global"
-    ? memory.getGlobalMemoryStateDir(ownerStateRoot(rootDir(), ownerScope))
-    : memory.getLocalMemoryStateDir(sessionArtifactDir);
-  if (!stateDir) throw new Error("Local memory requires a persistent session");
-  const store = new memory.MemoryStore({ stateDir, scope });
+  const resolved = memoryStateDir(scope, sessionArtifactDir, ownerScope);
+  const store = new memory.MemoryStore({ stateDir: resolved.stateDir, scope: resolved.storageScope });
   try { return operation(store); } finally { store.close(); }
 }
 
 async function withScopedStoreAsync<T>(
-  scope: "global" | "local",
+  scope: string,
   sessionArtifactDir: string | undefined,
   ownerScope: string | undefined,
   operation: (store: InstanceType<typeof memory.MemoryStore>) => Promise<T>,
 ): Promise<T> {
-  const stateDir = scope === "global"
-    ? memory.getGlobalMemoryStateDir(ownerStateRoot(rootDir(), ownerScope))
-    : memory.getLocalMemoryStateDir(sessionArtifactDir);
-  if (!stateDir) throw new Error("Local memory requires a persistent session");
-  const store = new memory.MemoryStore({ stateDir, scope });
+  const resolved = memoryStateDir(scope, sessionArtifactDir, ownerScope);
+  const store = new memory.MemoryStore({ stateDir: resolved.stateDir, scope: resolved.storageScope });
   try { return await operation(store); } finally { store.close(); }
 }
 
 async function withScopedReadStoreAsync<T>(
-  scope: "global" | "local",
+  scope: string,
   sessionArtifactDir: string | undefined,
   ownerScope: string | undefined,
   operation: (store: InstanceType<typeof memory.MemoryStore>) => Promise<T>,
 ): Promise<T> {
-  const stateDir = scope === "global"
-    ? memory.getGlobalMemoryStateDir(ownerStateRoot(rootDir(), ownerScope))
-    : memory.getLocalMemoryStateDir(sessionArtifactDir);
-  if (!stateDir) throw new Error("Local memory requires a persistent session");
-  const store = new memory.MemoryStore({ stateDir, scope, readOnly: true });
+  const resolved = memoryStateDir(scope, sessionArtifactDir, ownerScope);
+  const store = new memory.MemoryStore({ stateDir: resolved.stateDir, scope: resolved.storageScope, readOnly: true });
   try { return await operation(store); } finally { store.close(); }
 }
 
@@ -156,12 +170,6 @@ function memoryText(value: unknown, label: string, maximum = 24_000): string {
   if (normalized.length > maximum) throw new Error(`${label} exceeds ${maximum} characters`);
   memory.assertMemoryTextHasNoSecrets(normalized, label);
   return normalized;
-}
-
-function memoryScope(value: unknown): "global" | "local" {
-  if (value === undefined || value === "global") return "global";
-  if (value === "local") return "local";
-  throw new Error("scope must be global or local");
 }
 
 function canonicalProjectRoot(cwd: string): string {
@@ -319,10 +327,14 @@ const memoryPlugin: FridayPlugin = definePlugin({
     async execute(input, _signal, executionContext) {
       const query = stringValue(input.query, "query")!;
       const limit = typeof input.limit === "number" ? input.limit : 8;
+      const scopes = executionContext?.memoryScopes ?? ["global:user", "local"];
       const [global, local] = await Promise.all([
-        withGlobalReadStoreAsync(executionContext?.ownerScope, async (store) => ({
+        Promise.all(scopes.filter((scope) => scope !== "local").map((scope) => withScopedReadStoreAsync(scope, executionContext?.sessionArtifactDir, executionContext?.ownerScope, async (store) => ({
           notes: await store.hybridSearch(query, { kinds: ["memory"], limit }),
           relations: store.queryRelations({ query, limit }),
+        })))).then((stores) => ({
+          notes: stores.flatMap((store) => store.notes),
+          relations: stores.flatMap((store) => store.relations),
         })),
         executionContext?.sessionArtifactDir
           ? withScopedReadStoreAsync("local", executionContext.sessionArtifactDir, executionContext.ownerScope, async (store) => ({
@@ -346,7 +358,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
         title: { type: "string", description: "Short descriptive note title" },
         content: { type: "string", description: "Durable fact, decision, project note, or future context to remember" },
         path: { type: "string", description: "Logical grouping such as projects/t-project or preferences" },
-        scope: { type: "string", enum: ["global", "local"], description: "global survives across sessions; local belongs only to this project session" },
+        scope: { type: "string", description: "Authorized namespace: global:user, agent:<id>, project:<id>, or local. Omit to use the active Agent scope." },
       },
       required: ["title", "content"],
       additionalProperties: false,
@@ -355,7 +367,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
       const title = memoryText(input.title, "memory title", 240);
       const content = memoryText(input.content, "memory content");
       const path = input.path === undefined ? "notes" : memoryText(input.path, "memory path", 240);
-      const scope = memoryScope(input.scope);
+      const scope = authorizedMemoryScope(input.scope, executionContext);
       const permissions = ctx.services.optional(PERMISSIONS_CAPABILITY);
       await permissions?.authorize({
         mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
@@ -389,7 +401,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
       properties: {
         id: { type: "string" },
         kind: { type: "string", enum: ["note", "relation"] },
-        scope: { type: "string", enum: ["global", "local"] },
+        scope: { type: "string", description: "Authorized namespace: global:user, agent:<id>, project:<id>, or local." },
       },
       required: ["id", "kind"],
       additionalProperties: false,
@@ -398,7 +410,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
       const id = memoryText(input.id, "memory id", 160);
       const kind = input.kind;
       if (kind !== "note" && kind !== "relation") throw new Error("kind must be note or relation");
-      const scope = memoryScope(input.scope);
+      const scope = authorizedMemoryScope(input.scope, executionContext);
       const permissions = ctx.services.optional(PERMISSIONS_CAPABILITY);
       await permissions?.authorize({
         mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
@@ -426,7 +438,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
         predicate: { type: "string", description: "Short relation such as prefers, uses, next_goal, contact_person, has_document, or decided" },
         object: { type: "string", description: "Related entity/value/action/document" },
         context: { type: "object", additionalProperties: true, description: "Optional non-secret repeat-action details" },
-        scope: { type: "string", enum: ["global", "local"] },
+        scope: { type: "string", description: "Authorized namespace: global:user, agent:<id>, project:<id>, or local." },
       },
       required: ["subject", "predicate", "object"],
       additionalProperties: false,
@@ -435,7 +447,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
       const subject = memoryText(input.subject, "subject", 512);
       const predicate = memoryText(input.predicate, "predicate", 128);
       const object = memoryText(input.object, "object", 512);
-      const scope = memoryScope(input.scope);
+      const scope = authorizedMemoryScope(input.scope, executionContext);
       const relationContext = safeMemoryContext(input.context);
       const permissions = ctx.services.optional(PERMISSIONS_CAPABILITY);
       await permissions?.authorize({

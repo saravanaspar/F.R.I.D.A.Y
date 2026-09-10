@@ -91,6 +91,26 @@ describe("agent memory tools", () => {
       .not.toContain("Alice private preference");
   });
 
+  it("enforces named Agent memory scopes for reads and writes", async () => {
+    const { root, tools } = await assemble();
+    const remember = tools.find((tool) => tool.name === "memory_remember")!;
+    const recall = tools.find((tool) => tool.name === "memory_recall")!;
+    const developer = {
+      cwd: root,
+      sessionId: "session-developer",
+      ownerScope: "local:operator",
+      memoryScopes: ["global:user", "agent:developer", "local"],
+      defaultMemoryScope: "agent:developer",
+      deferAfterReply() {},
+      deferOnFailure() {},
+    };
+    const research = { ...developer, memoryScopes: ["global:user", "agent:research", "local"], defaultMemoryScope: "agent:research" };
+    await remember.execute({ title: "Private build convention", content: "Developer prefers contract tests." }, undefined, developer);
+    expect(JSON.stringify((await recall.execute({ query: "contract tests" }, undefined, developer)).output)).toContain("Private build convention");
+    expect(JSON.stringify((await recall.execute({ query: "contract tests" }, undefined, research)).output)).not.toContain("Private build convention");
+    await expect(remember.execute({ title: "Forbidden", content: "should fail", scope: "agent:research" }, undefined, developer)).rejects.toThrow(/not authorized/);
+  });
+
   it("indexes only bounded project Markdown knowledge rather than the codebase", async () => {
     const { root, tools } = await assemble();
     const project = join(root, "demo-project");

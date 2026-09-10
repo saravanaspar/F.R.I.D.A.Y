@@ -7,6 +7,7 @@ import { definePlugin } from "../capabilities/protocol.js";
 import { AGENT_PROFILES_CAPABILITY, type AgentProfilesService } from "../agent-profiles/contract.js";
 import { EVENTS_CAPABILITY, type EventsService } from "../events/contract.js";
 import { SESSION_JOBS_CAPABILITY, type SessionJobsService } from "../session-jobs/contract.js";
+import { SESSIONS_CAPABILITY, type SessionsService } from "../sessions/contract.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION, type SystemJsonObject } from "../system/contract.js";
 import { CONVERSATIONS_CAPABILITY, type Conversation, type ConversationCreateInput, type ConversationHandoff, type ConversationHandoffInput, type ConversationMentions, type ConversationParticipant, type ConversationParticipantKind, type ConversationUpdateInput, type ConversationsService, type HandoffExecution, type HandoffStatus, type Reaction, type Thread } from "./contract.js";
 
@@ -19,6 +20,10 @@ function stateRoot(): string {
   return resolve(process.env.FRIDAY_STATE_DIR?.trim() || process.env.FRIDAY_HOME?.trim() || join(homedir(), ".friday"), "conversations");
 }
 
+function fridayRoot(): string {
+  return resolve(process.env.FRIDAY_STATE_DIR?.trim() || process.env.FRIDAY_HOME?.trim() || join(homedir(), ".friday"));
+}
+
 function text(value: unknown, label: string, maximum = 512): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must be a non-empty string`);
   const normalized = value.normalize("NFKC").replaceAll("\u0000", "\ufffd").trim();
@@ -28,6 +33,12 @@ function text(value: unknown, label: string, maximum = 512): string {
 
 function identifier(value: unknown, label: string): string {
   return text(value, label, 256);
+}
+
+function sessionIdentifier(value: unknown): string {
+  const normalized = identifier(value, "sessionId");
+  if (normalized.length > 256 || normalized.includes("/") || normalized.includes("\\") || normalized.includes("..") || /[\u0000-\u001f\u007f]/.test(normalized)) throw new Error("sessionId is invalid");
+  return normalized;
 }
 
 function participant(value: unknown): ConversationParticipant {
@@ -66,7 +77,7 @@ function parseConversation(value: unknown): Conversation {
     id: identifier(raw.id, "conversation id"),
     type: conversationType(raw.type),
     title: text(raw.title, "conversation title", 256),
-    sessionId: identifier(raw.sessionId, "sessionId"),
+    sessionId: sessionIdentifier(raw.sessionId),
     participants: participantList(raw.participants as readonly ConversationParticipant[]),
     pinned: raw.pinned === true,
     hidden: raw.hidden === true,
@@ -101,6 +112,17 @@ function handoffStatus(value: unknown): HandoffStatus {
   return value;
 }
 
+function currentHandoff(handoff: ConversationHandoff, jobs: SessionJobsService | undefined): ConversationHandoff {
+  if (!handoff.jobId || !jobs) return handoff;
+  const job = jobs.get(handoff.jobId);
+  if (!job) return handoff;
+  const status: HandoffStatus = job.status === "queued" ? "queued"
+    : job.status === "running" || job.status === "retrying" ? "running"
+      : job.status === "completed" || job.status === "resumed" ? "completed"
+        : "error";
+  return status === handoff.status ? handoff : Object.freeze({ ...handoff, status, updatedAt: job.updatedAt });
+}
+
 function parseHandoff(value: unknown): ConversationHandoff {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid handoff record");
   const raw = value as Record<string, unknown>;
@@ -109,7 +131,7 @@ function parseHandoff(value: unknown): ConversationHandoff {
     fromAgentId: identifier(raw.fromAgentId, "fromAgentId"), toAgentId: identifier(raw.toAgentId, "toAgentId"),
     text: text(raw.text, "handoff text", 24_000),
     ...(raw.jobId === undefined ? {} : { jobId: identifier(raw.jobId, "jobId") }),
-    sessionId: identifier(raw.sessionId, "sessionId"), status: handoffStatus(raw.status),
+    sessionId: sessionIdentifier(raw.sessionId), status: handoffStatus(raw.status),
     createdAt: text(raw.createdAt, "createdAt", 64), updatedAt: text(raw.updatedAt, "updatedAt", 64),
   });
 }
@@ -154,18 +176,19 @@ function makeConversation(input: ConversationCreateInput): Conversation {
   const type = conversationType(input.type);
   if (type === "direct" && participants.length !== 2) throw new Error("direct conversations must have exactly two participants");
   const now = new Date().toISOString();
-  return Object.freeze({ id: identifier(input.id ?? randomUUID(), "conversation id"), type, title: text(input.title ?? "Conversation", "conversation title", 256), sessionId: identifier(input.sessionId ?? randomUUID(), "sessionId"), participants, pinned: false, hidden: false, notificationsEnabled: true, lastReadSequence: 0, createdAt: now, updatedAt: now });
+  return Object.freeze({ id: identifier(input.id ?? randomUUID(), "conversation id"), type, title: text(input.title ?? "Conversation", "conversation title", 256), sessionId: sessionIdentifier(input.sessionId ?? randomUUID()), participants, pinned: false, hidden: false, notificationsEnabled: true, lastReadSequence: 0, createdAt: now, updatedAt: now });
 }
 
 const conversationsPlugin: FridayPlugin = definePlugin({
   id: "conversations",
   requires: [AGENT_PROFILES_CAPABILITY, EVENTS_CAPABILITY],
-  optional: [SESSION_JOBS_CAPABILITY],
+  optional: [SESSION_JOBS_CAPABILITY, SESSIONS_CAPABILITY],
   provides: [CONVERSATIONS_CAPABILITY],
 }, async (ctx) => {
   const events = ctx.services.require(EVENTS_CAPABILITY);
   const profiles = ctx.services.require(AGENT_PROFILES_CAPABILITY);
   const jobs = ctx.services.optional(SESSION_JOBS_CAPABILITY);
+  const sessions = ctx.services.optional(SESSIONS_CAPABILITY);
   let state = emptyState();
   let loaded = false;
   let mutationTail: Promise<void> = Promise.resolve();
@@ -275,9 +298,9 @@ const conversationsPlugin: FridayPlugin = definePlugin({
       const now = new Date().toISOString();
       let jobId: string | undefined;
       let status: HandoffStatus = "queued";
-      const sessionId = identifier(input.sessionId ?? conversation.sessionId, "sessionId");
+      const sessionId = sessionIdentifier(input.sessionId ?? conversation.sessionId);
       if (jobs && execution) {
-        const job = await jobs.start({ sourceKey: `handoff:${randomUUID()}`, destinationId: `agent:${toAgentId}`, text: input.text, timestamp: Date.now(), origin: execution.origin ?? { authority: "local", channel: "local", accountId: "operator", conversationId, senderId: fromAgentId }, run: execution.run, notify: execution.notify ?? (async () => undefined) });
+        const job = await jobs.start({ sourceKey: `handoff:${randomUUID()}`, destinationId: `session:${sessionId}`, agentProfileId: toAgentId, text: input.text, timestamp: Date.now(), origin: execution.origin ?? { authority: "local", channel: "local", accountId: "operator", conversationId, senderId: fromAgentId }, run: execution.run, notify: execution.notify ?? (async () => undefined) });
         jobId = job.id;
         status = job.status === "running" ? "running" : "queued";
       }
@@ -285,10 +308,26 @@ const conversationsPlugin: FridayPlugin = definePlugin({
       if (state.handoffs.length >= MAX_HANDOFFS) throw new Error("handoff limit reached");
       state = { ...state, handoffs: Object.freeze([...state.handoffs, handoff]) };
       await persist();
+      if (sessions) {
+        const sessionsDir = join(fridayRoot(), "sessions");
+        const sessionInfo = (await sessions.SessionManager.listAll(undefined, sessionsDir)).find((entry) => entry.id === sessionId);
+        if (sessionInfo) {
+          const session = sessions.SessionManager.open(sessionInfo.path, sessionsDir);
+          session.appendCustomEntry("conversation.handoff", {
+            handoffId: handoff.id,
+            conversationId,
+            fromAgentId,
+            toAgentId,
+            text: handoff.text,
+            ...(jobId === undefined ? {} : { jobId }),
+          });
+          session.flushNow();
+        }
+      }
       events.publish({ type: "conversation.handoff.created", source: "conversations", subject: `conversation:${conversationId}`, data: { handoffId: handoff.id, fromAgentId, toAgentId, ...(jobId === undefined ? {} : { jobId }), sessionId, status } });
       return handoff;
     }),
-    listHandoffs: (conversationId?: string) => Object.freeze(state.handoffs.filter((entry) => conversationId === undefined || entry.conversationId === conversationId)),
+    listHandoffs: (conversationId?: string) => Object.freeze(state.handoffs.filter((entry) => conversationId === undefined || entry.conversationId === conversationId).map((entry) => currentHandoff(entry, jobs))),
   });
   ctx.services.provide(CONVERSATIONS_CAPABILITY, service);
   ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, { id: "conversations", label: "Conversations", snapshot: () => ({ conversations: service.list().length, handoffs: service.listHandoffs().length }) });

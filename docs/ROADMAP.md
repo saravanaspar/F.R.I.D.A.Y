@@ -96,7 +96,7 @@ Acceptance: two independent test clients connect, resume after disconnect, and o
 
 Tracking: [issue #27](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/27).
 
-Status: **in progress**. The first vertical slice now persists Agent Profiles and Conversation metadata, restores both across restart, validates profile memory-scope declarations, records Threads/Reactions/read state, resolves Agent mentions, and routes visible handoffs through the existing Session Jobs capability when a runner is supplied. Turn Loop profile selection, full memory-store scope enforcement, user-facing JobDirective redirection, and client API exposure remain part of the phase before it is marked complete.
+Status: **complete**. The phase now persists Agent Profiles and Conversation metadata, restores both across restart, selects profiles in the Turn Loop, renders profile identity, enforces authorized Memory namespaces, records Threads/Reactions/read state, resolves Agent mentions, routes visible handoffs through existing Session Jobs, applies durable JobDirectives through the Agent steering boundary, and exposes authenticated client APIs for profile/conversation operations and profile-targeted turns.
 
 Add `plugins/agent-profiles` and `plugins/conversations` over existing runtime services.
 
@@ -107,6 +107,8 @@ Add direct and group Conversations with participants (user and Agent Profiles), 
 Add memory scopes such as `global:user`, `agent:developer`, and `project:atlas`; compose only the scopes authorized for the current Agent and Project.
 
 Acceptance: create Developer and Research profiles, give them separate conversations and memory scopes, mention either from a group, and observe a durable visible handoff backed by the existing Turn Loop and Session Jobs.
+
+Implementation notes: profile selection is host-owned on `InboundTurn`; clients cannot select a profile from message text. Memory keeps the existing SQLite store and `global`/`local` storage semantics while namespacing Agent and Project scopes under the owner root. JobDirectives are stored by Session Jobs and delivered through the Agent runtime's existing steering queue after the current tool boundary. The Client Gateway remains the authenticated protocol surface; desktop and Android clients consume these APIs in later phases.
 
 ### Phase 3 — Projects and Execution Targets
 

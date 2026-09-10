@@ -5,6 +5,8 @@ import { resolve } from "node:path";
 import type { EventsService } from "../events/contract.js";
 import type {
   SessionJobFinalizerDescriptor,
+  SessionJobDirective,
+  SessionJobDirectiveMessage,
   SessionJobListOptions,
   SessionJobProgress,
   SessionJobRecord,
@@ -38,6 +40,7 @@ type MutableJob = {
   sourceKey?: string;
   turnId?: string;
   destinationId: string;
+  agentProfileId?: string;
   sessionId?: string;
   label: string;
   requestPreview: string;
@@ -56,6 +59,16 @@ type MutableJob = {
   resultPreview?: string;
   notification?: PendingNotification;
   timeline: SessionJobTimelineEntry[];
+  directives: MutableDirective[];
+};
+
+type MutableDirective = {
+  id: string;
+  text: string;
+  preview: string;
+  status: SessionJobDirective["status"];
+  createdAt: string;
+  appliedAt?: string;
 };
 
 type PersistedState = { schema: 1; jobs: MutableJob[] };
@@ -68,6 +81,7 @@ interface ActiveRun {
   settled: boolean;
   lastProgressNoticeAt: number;
   completion?: Promise<void>;
+  readonly directiveListeners: Set<(directive: SessionJobDirectiveMessage) => void>;
 }
 
 export interface SessionJobManagerOptions {
@@ -95,17 +109,19 @@ function cloneMutable(job: MutableJob): MutableJob {
     ...(job.notification ? { notification: structuredClone(job.notification) } : {}),
     origin: { ...job.origin },
     timeline: job.timeline.map((entry) => ({ ...entry })),
+    directives: job.directives.map((entry) => ({ ...entry })),
   };
 }
 
 function clone(job: MutableJob): SessionJobRecord {
   const snapshot = cloneMutable(job);
-  const { requestText: _privateRequestText, notification, turnId: _turnId, ...publicSnapshot } = snapshot;
+  const { requestText: _privateRequestText, notification, turnId: _turnId, directives, ...publicSnapshot } = snapshot;
   return Object.freeze({
     ...publicSnapshot,
     ...(notification ? { deliveryStatus: notification.delivered ? "finalizing" as const : "pending" as const } : {}),
     origin: Object.freeze(publicSnapshot.origin),
     timeline: Object.freeze(publicSnapshot.timeline.map((entry) => Object.freeze(entry))),
+    directives: Object.freeze(directives.map(({ text: _privateText, ...entry }) => Object.freeze(entry))),
   });
 }
 
@@ -216,6 +232,25 @@ function parseTimeline(value: unknown): SessionJobTimelineEntry[] {
   });
 }
 
+function parseDirectives(value: unknown): MutableDirective[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 64) throw new Error("Session-jobs directives are invalid");
+  return value.map((entry) => {
+    const raw = record(entry);
+    if (!raw) throw new Error("Session-jobs directive is invalid");
+    const status = persistedString(raw, "status", 16);
+    if (status !== "pending" && status !== "applied") throw new Error("Session-jobs directive status is invalid");
+    return {
+      id: persistedString(raw, "id", 96)!,
+      text: persistedString(raw, "text", MAX_REQUEST_TEXT)!,
+      preview: persistedString(raw, "preview", MAX_PREVIEW)!,
+      status,
+      createdAt: persistedTimestamp(raw, "createdAt")!,
+      ...(raw.appliedAt === undefined ? {} : { appliedAt: persistedTimestamp(raw, "appliedAt")! }),
+    };
+  });
+}
+
 function parsePersistedJob(value: unknown): MutableJob {
   const raw = record(value);
   if (!raw) throw new Error("Session-jobs record is invalid");
@@ -226,6 +261,7 @@ function parsePersistedJob(value: unknown): MutableJob {
     ...(raw.sourceKey === undefined ? {} : { sourceKey: persistedString(raw, "sourceKey", 256)! }),
     ...(raw.turnId === undefined ? {} : { turnId: persistedString(raw, "turnId", 256)! }),
     destinationId: persistedString(raw, "destinationId", 256)!,
+    ...(raw.agentProfileId === undefined ? {} : { agentProfileId: persistedString(raw, "agentProfileId", 96)! }),
     ...(raw.sessionId === undefined ? {} : { sessionId: persistedString(raw, "sessionId", 256)! }),
     label: persistedString(raw, "label", 160)!,
     requestPreview: persistedString(raw, "requestPreview", MAX_PREVIEW)!,
@@ -243,6 +279,7 @@ function parsePersistedJob(value: unknown): MutableJob {
     ...(raw.resultPreview === undefined ? {} : { resultPreview: persistedString(raw, "resultPreview", MAX_PREVIEW)! }),
     ...(raw.notification === undefined ? {} : { notification: parseNotification(raw.notification) }),
     timeline: parseTimeline(raw.timeline),
+    directives: parseDirectives(raw.directives),
   };
 }
 
@@ -439,6 +476,7 @@ export class SessionJobManager implements SessionJobsService {
       ...(sourceKey === undefined ? {} : { sourceKey }),
       ...(request.turnId === undefined ? {} : { turnId: clip(request.turnId, 256) }),
       destinationId,
+      ...(request.agentProfileId === undefined ? {} : { agentProfileId: clip(request.agentProfileId, 96) }),
       ...(destinationId.startsWith("session:") && destinationId !== "session:new"
         ? { sessionId: destinationId.slice("session:".length) }
         : {}),
@@ -451,6 +489,7 @@ export class SessionJobManager implements SessionJobsService {
       updatedAt: createdAt,
       currentStatus: queuedBehindExisting ? "Queued behind existing work in this session" : "Accepted for background execution",
       timeline: [],
+      directives: [],
     };
     this.jobs.set(id, job);
     const run: ActiveRun = {
@@ -460,6 +499,7 @@ export class SessionJobManager implements SessionJobsService {
       queueAliases: new Map(),
       settled: false,
       lastProgressNoticeAt: 0,
+      directiveListeners: new Set(),
     };
     this.active.set(id, run);
     try {
@@ -535,6 +575,33 @@ export class SessionJobManager implements SessionJobsService {
     this.publish("session-job.cancelled", job);
     if (run) await this.safeNotify(run.request.notify, `Cancelled ${job.label} (${job.id}).`);
     return clone(job);
+  }
+
+  async redirect(jobId: string, text: string): Promise<SessionJobDirective> {
+    if (this.closed) throw new Error("session-jobs manager is closed");
+    const job = this.jobs.get(jobId.trim());
+    if (!job) throw new Error(`Unknown session job: ${jobId}`);
+    if (!isActive(job.status)) throw new Error(`Session job is no longer active: ${job.id}`);
+    const normalized = clip(text, MAX_REQUEST_TEXT);
+    if (!normalized) throw new Error("job directive text is required");
+    const createdAt = new Date(this.options.now()).toISOString();
+    const directive: MutableDirective = {
+      id: `directive-${randomUUID().slice(0, 12)}`,
+      text: normalized,
+      preview: clip(normalized, MAX_PREVIEW),
+      status: "pending",
+      createdAt,
+    };
+    const updated = cloneMutable(job);
+    updated.directives.push(directive);
+    if (updated.directives.length > 64) updated.directives.splice(0, updated.directives.length - 64);
+    updated.currentStatus = `New direction received: ${directive.preview}`;
+    updated.updatedAt = createdAt;
+    await this.persist([updated]);
+    Object.assign(job, updated);
+    this.publish("session-job.directive.requested", job, undefined, directive.id);
+    await this.applyPendingDirectives(job, this.active.get(job.id));
+    return clone(job).directives.find((entry) => entry.id === directive.id)!;
   }
 
   /** Stop admission and durably pause resumable work before restart ownership changes. */
@@ -640,9 +707,11 @@ export class SessionJobManager implements SessionJobsService {
       .map((job) => Object.freeze({
         id: job.id,
         destinationId: job.destinationId,
+        ...(job.agentProfileId === undefined ? {} : { agentProfileId: job.agentProfileId }),
         requestText: job.requestText!,
         timestamp: Date.parse(job.createdAt),
         origin: Object.freeze({ ...job.origin }),
+        directives: Object.freeze(job.directives.filter((directive) => directive.status === "pending").map((directive) => Object.freeze({ id: directive.id, text: directive.text }))),
       })));
   }
 
@@ -774,7 +843,14 @@ export class SessionJobManager implements SessionJobsService {
       const result = await run.request.run(
         run.controller.signal,
         async (progress) => this.report(job, run, progress),
-        Object.freeze({ jobId: job.id }),
+        Object.freeze({
+          jobId: job.id,
+          onDirective: async (listener: (directive: SessionJobDirectiveMessage) => void) => {
+            run.directiveListeners.add(listener);
+            await this.applyPendingDirectives(job, run);
+            return () => run.directiveListeners.delete(listener);
+          },
+        }),
       );
       if (run.controller.signal.aborted || !isActive(job.status)) return;
       if (result.sessionId !== undefined) this.bindSession(job, run, result.sessionId);
@@ -932,7 +1008,22 @@ export class SessionJobManager implements SessionJobsService {
     run.controller.signal.throwIfAborted();
   }
 
-  private publish(type: string, job: MutableJob, progress?: SessionJobProgress): void {
+  private async applyPendingDirectives(job: MutableJob, run: ActiveRun | undefined): Promise<void> {
+    if (!run || run.settled || run.directiveListeners.size === 0) return;
+    const pending = job.directives.filter((entry) => entry.status === "pending");
+    for (const directive of pending) {
+      const message = Object.freeze({ id: directive.id, text: directive.text });
+      for (const listener of run.directiveListeners) listener(message);
+      directive.status = "applied";
+      directive.appliedAt = new Date(this.options.now()).toISOString();
+      job.updatedAt = directive.appliedAt;
+      job.currentStatus = `Direction applied: ${directive.preview}`;
+      await this.persist([job]);
+      this.publish("session-job.directive.applied", job, undefined, directive.id);
+    }
+  }
+
+  private publish(type: string, job: MutableJob, progress?: SessionJobProgress, directiveId?: string): void {
     try {
       this.options.events?.publish({
         type,
@@ -946,6 +1037,7 @@ export class SessionJobManager implements SessionJobsService {
           ...(job.sessionId === undefined ? {} : { sessionId: job.sessionId }),
           ...(progress?.kind === undefined ? {} : { progressKind: progress.kind }),
           ...(progress?.attempt === undefined ? {} : { retryAttempt: progress.attempt }),
+          ...(directiveId === undefined ? {} : { directiveId }),
         },
       });
     } catch (error) {

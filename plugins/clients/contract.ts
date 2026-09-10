@@ -1,5 +1,9 @@
 import type { Capability } from "../capabilities/protocol.js";
 import { defineCapability } from "../capabilities/protocol.js";
+import type { AgentProfilesService } from "../agent-profiles/contract.js";
+import type { ConversationsService } from "../conversations/contract.js";
+import type { TurnRuntimeService } from "../turn-loop/contract.js";
+import type { SessionJobsService } from "../session-jobs/contract.js";
 
 /** Wire-compatible event envelope. The canonical generated schemas live in @friday/client-protocol. */
 export interface ClientEventMessage {
@@ -41,6 +45,13 @@ export interface ClientGatewayService {
   start(options?: ClientGatewayListenOptions): Promise<ClientGatewayServerStatus>;
   stop(): Promise<void>;
   serverStatus(): ClientGatewayServerStatus;
+}
+
+export interface ClientGatewayResources {
+  readonly agentProfiles?: AgentProfilesService | undefined;
+  readonly conversations?: ConversationsService | undefined;
+  readonly turnRuntime?: TurnRuntimeService | undefined;
+  readonly sessionJobs?: SessionJobsService | undefined;
 }
 
 export interface ClientGatewayListenOptions {

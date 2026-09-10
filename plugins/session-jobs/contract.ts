@@ -5,6 +5,27 @@ import type { TurnFinalizerDescriptor } from "../turn-loop/contract.js";
 export type SessionJobFinalizerDescriptor = TurnFinalizerDescriptor;
 
 export type SessionJobStatus = "queued" | "running" | "retrying" | "completed" | "resumed" | "error" | "cancelled";
+export type SessionJobDirectiveStatus = "pending" | "applied";
+
+export interface SessionJobDirective {
+  readonly id: string;
+  readonly preview: string;
+  readonly status: SessionJobDirectiveStatus;
+  readonly createdAt: string;
+  readonly appliedAt?: string | undefined;
+}
+
+/** Private directive payload supplied only to the process-local job runner. */
+export interface SessionJobDirectiveMessage {
+  readonly id: string;
+  readonly text: string;
+}
+
+export interface SessionJobRunContext {
+  readonly jobId: string;
+  /** Register steering at the Agent's safe continuation boundary. */
+  onDirective(listener: (directive: SessionJobDirectiveMessage) => void): Promise<() => void>;
+}
 
 export interface SessionJobOrigin {
   readonly authority: "local" | "channel";
@@ -40,6 +61,7 @@ export interface SessionJobRecord {
   /** Stable source-operation key used to make admission idempotent across provider retries. */
   readonly sourceKey?: string | undefined;
   readonly destinationId: string;
+  readonly agentProfileId?: string | undefined;
   readonly sessionId?: string | undefined;
   readonly label: string;
   readonly requestPreview: string;
@@ -57,15 +79,19 @@ export interface SessionJobRecord {
   /** Execution is finished, but delivery or its required continuation is pending. */
   readonly deliveryStatus?: "pending" | "finalizing" | undefined;
   readonly timeline: readonly SessionJobTimelineEntry[];
+  readonly directives: readonly SessionJobDirective[];
 }
 
 
 export interface SessionJobResumeRecord {
   readonly id: string;
   readonly destinationId: string;
+  readonly agentProfileId?: string | undefined;
   readonly requestText: string;
   readonly timestamp: number;
   readonly origin: SessionJobOrigin;
+  /** Host-only full directive text required to reconstruct interrupted work. */
+  readonly directives: readonly SessionJobDirectiveMessage[];
 }
 
 export interface SessionJobRunResult {
@@ -81,13 +107,14 @@ export interface SessionJobStartRequest {
   readonly sourceKey?: string | undefined;
   readonly turnId?: string | undefined;
   readonly destinationId: string;
+  readonly agentProfileId?: string | undefined;
   readonly text: string;
   readonly timestamp: number;
   readonly origin: SessionJobOrigin;
   readonly run: (
     signal: AbortSignal,
     report: (progress: SessionJobProgress) => Promise<void>,
-    context?: Readonly<{ jobId: string }> | undefined,
+    context?: SessionJobRunContext | undefined,
   ) => Promise<SessionJobRunResult>;
   readonly notify: (text: string) => Promise<void>;
 }
@@ -103,6 +130,7 @@ export interface SessionJobsService {
   get(jobId: string): SessionJobRecord | undefined;
   find(query: string, options?: { activeOnly?: boolean | undefined }): readonly SessionJobRecord[];
   cancel(jobId: string, reason?: string): Promise<SessionJobRecord>;
+  redirect(jobId: string, text: string): Promise<SessionJobDirective>;
   /** Host-only interrupted work that has no process-local runner and can be reconstructed after restart. */
   resumable(): readonly SessionJobResumeRecord[];
   /** Mark an interrupted predecessor job as replaced by its durable resume turn. */

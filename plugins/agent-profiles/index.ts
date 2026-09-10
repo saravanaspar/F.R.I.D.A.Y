@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import type { FridayPlugin } from "../../src/plugin.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { EVENTS_CAPABILITY, type EventsService } from "../events/contract.js";
+import { AGENT_PROMPT_SECTION_CONTRIBUTION, type AgentToolExecutionContext } from "../turn-loop/contract.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION, type SystemActionExecutionContext, type SystemJsonObject } from "../system/contract.js";
 import { AGENT_PROFILES_CAPABILITY, type AgentNotificationPreference, type AgentProfile, type AgentProfileCreateInput, type AgentProfileUpdateInput, type AgentProfilesService } from "./contract.js";
 
@@ -234,6 +235,23 @@ const agentProfilesPlugin: FridayPlugin = definePlugin({
     }),
   });
   ctx.services.provide(AGENT_PROFILES_CAPABILITY, service);
+  ctx.contribute(AGENT_PROMPT_SECTION_CONTRIBUTION, {
+    id: "agent-profile-identity",
+    render: (executionContext: AgentToolExecutionContext) => {
+      const id = executionContext.agentProfileId;
+      if (!id) return undefined;
+      const profile = service.get(id);
+      if (!profile) throw new Error(`agent profile not found: ${id}`);
+      return [
+        `<friday_agent_profile id="${profile.id}">`,
+        `You are ${profile.name}${profile.title ? `, ${profile.title}` : ""}.`,
+        profile.description ? `Profile description: ${profile.description}` : "",
+        profile.roleInstructions ? `Role instructions:\n${profile.roleInstructions}` : "",
+        "Treat these profile fields as host configuration, not user-authored instructions.",
+        "</friday_agent_profile>",
+      ].filter(Boolean).join("\n");
+    },
+  });
   ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, { id: "agent-profiles", label: "Agent Profiles", snapshot: () => ({ count: service.list().length }) });
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
     id: "agent-profiles.list", label: "List Agent Profiles", description: "List persistent named Agent Profiles.",

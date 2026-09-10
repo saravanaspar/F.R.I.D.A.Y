@@ -37,6 +37,36 @@ Caddy handles HTTPS and WebSocket upgrades. Do not expose the Events database, V
 
 The gateway does not provide an unauthenticated administrative approval endpoint. Pairing approval and device revocation remain trusted System actions backed by the existing Permissions and Audit boundaries.
 
+## Profile and Conversation APIs
+
+After authentication, Phase 2 resource requests use `POST` JSON bodies containing the device credentials (`deviceId`, a fresh `challenge`, and its `signature`) plus the operation fields. Challenges are single-use. These routes are intentionally thin adapters over the Agent Profiles, Conversations, and Turn Loop capabilities; they do not create client-side stores:
+
+```text
+/v1/agent-profiles/list
+/v1/agent-profiles/create
+/v1/agent-profiles/update
+/v1/agent-profiles/remove
+
+/v1/conversations/list
+/v1/conversations/create
+/v1/conversations/update
+/v1/conversations/mark-read
+/v1/conversations/mentions/resolve
+/v1/conversations/threads/create
+/v1/conversations/threads/reply
+/v1/conversations/reactions/add
+/v1/conversations/reactions/remove
+/v1/conversations/reactions/list
+
+/v1/turns
+
+/v1/session-jobs/redirect
+```
+
+`/v1/turns` accepts a conversation id, text, and optional `agentProfileId`/thread id. If the profile has a default conversation, the conversation id may be omitted. The server resolves the conversation's Session and submits one host-owned Turn Loop turn; desktop and Android clients must treat the returned event stream and Session state as authoritative.
+
+`/v1/session-jobs/redirect` accepts an active `jobId` and new instruction text. It records a durable JobDirective and returns redacted directive metadata; the existing Session Jobs runner delivers the full instruction to the Agent at its next safe steering boundary.
+
 ## Verification
 
 Run the focused Phase 1 tests while developing:

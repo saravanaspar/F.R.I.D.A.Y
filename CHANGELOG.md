@@ -19,6 +19,9 @@ published release artifacts and generated release notes.
 - Added persistent named Agent Profiles with role instructions, scoped memory declarations, enabled Skills/plugins, notification preferences, approval policy, and restart-safe CRUD operations.
 - Added persistent Direct/Group Conversation metadata over existing Sessions, including participants, pin/hide state, notification state, read sequence, Threads with reply counts, Reactions, mention resolution, and visible Agent-to-Agent handoffs.
 - Routed handoffs through the existing Session Jobs capability when an execution runner is available, without introducing a second queue or transcript store.
+- Added profile selection to Turn Loop turns, profile identity prompt sections, and authorized `global:user`, `agent:<id>`, `project:<id>`, and `local` Memory namespaces with cross-profile read/write isolation.
+- Added durable `JobDirective` redirection: active jobs persist user directions, expose redacted directive metadata, and apply them through the Agent steering boundary; interrupted jobs include pending directions during restart reconstruction.
+- Added authenticated client gateway APIs for Agent Profile CRUD, Conversation CRUD/read state, mentions, Threads, Reactions, profile-targeted turn submission, and durable active-job redirection.
 
 ## [1.0.4] - 2026-09-09
 

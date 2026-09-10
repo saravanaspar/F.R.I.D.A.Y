@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import type { FridayPlugin } from "../../src/plugin.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { DEVICES_CAPABILITY } from "../devices/contract.js";
+import { AGENT_PROFILES_CAPABILITY } from "../agent-profiles/contract.js";
+import { CONVERSATIONS_CAPABILITY } from "../conversations/contract.js";
 import { EVENTS_CAPABILITY, type EventRecord } from "../events/contract.js";
+import { TURN_LOOP_CAPABILITY } from "../turn-loop/contract.js";
+import { SESSION_JOBS_CAPABILITY } from "../session-jobs/contract.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION } from "../system/contract.js";
 import { CLIENT_GATEWAY_CAPABILITY, type ClientConnection, type ClientConnectInput, type ClientEventMessage, type ClientGatewayListenOptions, type ClientGatewayServerStatus, type ClientGatewayService } from "./contract.js";
 import { startClientTransport, type ClientTransportController } from "./transport.js";
@@ -21,6 +25,7 @@ function eventMessage(event: EventRecord, requestId: string): ClientEventMessage
 const clientsPlugin: FridayPlugin = definePlugin({
   id: "clients",
   requires: [DEVICES_CAPABILITY, EVENTS_CAPABILITY],
+  optional: [AGENT_PROFILES_CAPABILITY, CONVERSATIONS_CAPABILITY, TURN_LOOP_CAPABILITY, SESSION_JOBS_CAPABILITY],
   provides: [CLIENT_GATEWAY_CAPABILITY],
 }, (ctx) => {
   const devices = ctx.services.require(DEVICES_CAPABILITY);
@@ -67,7 +72,12 @@ const clientsPlugin: FridayPlugin = definePlugin({
     connections: () => Object.freeze([...connections.values()].map(({ connectionId, deviceId, connectedAt }) => Object.freeze({ connectionId, deviceId, connectedAt }))),
     latestSequence: () => events.storageStatus().latestSequence,
     start: async (options: ClientGatewayListenOptions = {}) => {
-      if (!transport) transport = await startClientTransport(service, devices, options);
+      if (!transport) transport = await startClientTransport(service, devices, options, {
+        agentProfiles: ctx.services.optional(AGENT_PROFILES_CAPABILITY),
+        conversations: ctx.services.optional(CONVERSATIONS_CAPABILITY),
+        turnRuntime: ctx.services.optional(TURN_LOOP_CAPABILITY),
+        sessionJobs: ctx.services.optional(SESSION_JOBS_CAPABILITY),
+      });
       return service.serverStatus();
     },
     stop: async () => {
