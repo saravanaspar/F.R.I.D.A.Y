@@ -5,6 +5,7 @@ import { reportOperationalError, sanitizeOperationalError } from "@friday/operat
 import { decodeClientMessage, encodeClientMessage, type ClientAuthenticate, type ClientErrorMessage, type ClientSignalMessage, type ServerSignalMessage } from "@friday/client-protocol";
 import { WebSocket, WebSocketServer } from "ws";
 import type { DevicesService, DeviceType } from "../devices/contract.js";
+import type { ProjectPolicy, ProjectRepositoryMetadata } from "../projects/contract.js";
 import type { ClientConnection, ClientGatewayListenOptions, ClientGatewayResources, ClientGatewayServerStatus, ClientGatewayService } from "./contract.js";
 
 const MAX_HTTP_BODY_BYTES = 64 * 1024;
@@ -45,6 +46,40 @@ function requiredText(input: Record<string, unknown>, name: string, maximum = 16
   const value = input[name];
   if (typeof value !== "string" || !value.trim() || value.length > maximum) throw new Error(`${name} is required`);
   return value;
+}
+
+
+function optionalText(input: Record<string, unknown>, name: string, maximum = 16_384): string | undefined {
+  const value = input[name];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || !value.trim() || value.length > maximum) throw new Error(`${name} is invalid`);
+  return value;
+}
+
+function stringArray(value: unknown, name: string, maximumItems = 32): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > maximumItems) throw new Error(`${name} must be an array with at most ${maximumItems} items`);
+  return value.map((item, index) => {
+    if (typeof item !== "string" || !item.trim() || item.length > 128) throw new Error(`${name}[${index}] is invalid`);
+    return item;
+  });
+}
+
+function projectPolicy(body: Record<string, unknown>): Partial<ProjectPolicy> | undefined {
+  const policy = body.policy;
+  if (policy === undefined) return undefined;
+  if (!policy || typeof policy !== "object" || Array.isArray(policy)) throw new Error("policy must be an object");
+  const raw = policy as Record<string, unknown>;
+  const allowedTargetIds = stringArray(raw.allowedTargetIds, "policy.allowedTargetIds");
+  if (raw.requireWorktreeForWrites !== undefined && typeof raw.requireWorktreeForWrites !== "boolean") throw new Error("policy.requireWorktreeForWrites must be a boolean");
+  if (raw.allowCoreHostWrites !== undefined && typeof raw.allowCoreHostWrites !== "boolean") throw new Error("policy.allowCoreHostWrites must be a boolean");
+  return {
+    ...(typeof raw.defaultTargetId === "string" ? { defaultTargetId: raw.defaultTargetId } : {}),
+    ...(allowedTargetIds === undefined ? {} : { allowedTargetIds }),
+    ...(raw.requireWorktreeForWrites === undefined ? {} : { requireWorktreeForWrites: raw.requireWorktreeForWrites }),
+    ...(raw.allowCoreHostWrites === undefined ? {} : { allowCoreHostWrites: raw.allowCoreHostWrites }),
+    ...(typeof raw.worktreeRoot === "string" ? { worktreeRoot: raw.worktreeRoot } : {}),
+  };
 }
 
 function requestedDeviceType(value: unknown): DeviceType {
@@ -248,6 +283,113 @@ export async function startClientTransport(
         json(response, 200, { reactions: resources.conversations.listReactions(requiredText(body, "messageId", 256)) });
         return;
       }
+
+      if (path === "/v1/projects/list") {
+        await authenticatedDevice();
+        if (!resources.projects) throw new Error("projects capability is unavailable");
+        json(response, 200, { projects: resources.projects.list() });
+        return;
+      }
+      if (path === "/v1/projects/create") {
+        await authenticatedDevice();
+        if (!resources.projects) throw new Error("projects capability is unavailable");
+        const id = optionalText(body, "id", 96);
+        const description = optionalText(body, "description", 4_000);
+        const preferredComputerNodeId = optionalText(body, "preferredComputerNodeId", 128);
+        const repositoryKind = optionalText(body, "repositoryKind", 32);
+        const repositoryDefaultBranch = optionalText(body, "repositoryDefaultBranch", 256);
+        const repositoryRemote = optionalText(body, "repositoryRemote", 2_048);
+        let repository: ProjectRepositoryMetadata | undefined;
+        if (repositoryKind !== undefined) {
+          if (repositoryKind !== "git") throw new Error("repositoryKind must be git");
+          repository = {
+            kind: "git",
+            ...(repositoryDefaultBranch === undefined ? {} : { defaultBranch: repositoryDefaultBranch }),
+            ...(repositoryRemote === undefined ? {} : { remote: repositoryRemote }),
+          };
+        }
+        const policy = projectPolicy(body);
+        const project = await resources.projects.create({
+          ...(id === undefined ? {} : { id }),
+          name: requiredText(body, "name", 160),
+          ...(description === undefined ? {} : { description }),
+          rootPath: requiredText(body, "rootPath", 4_096),
+          ...(preferredComputerNodeId === undefined ? {} : { preferredComputerNodeId }),
+          ...(repository === undefined ? {} : { repository }),
+          ...(policy === undefined ? {} : { policy }),
+        });
+        json(response, 201, { project });
+        return;
+      }
+      if (path === "/v1/projects/update") {
+        await authenticatedDevice();
+        if (!resources.projects) throw new Error("projects capability is unavailable");
+        const policy = projectPolicy(body);
+        const project = await resources.projects.update(requiredText(body, "projectId", 96), {
+          ...(body.name === undefined ? {} : { name: requiredText(body, "name", 160) }),
+          ...(body.description === undefined ? {} : { description: requiredText(body, "description", 4_000) }),
+          ...(body.rootPath === undefined ? {} : { rootPath: requiredText(body, "rootPath", 4_096) }),
+          ...(body.preferredComputerNodeId === undefined ? {} : body.preferredComputerNodeId === null ? { preferredComputerNodeId: null } : { preferredComputerNodeId: requiredText(body, "preferredComputerNodeId", 128) }),
+          ...(policy === undefined ? {} : { policy }),
+        });
+        json(response, 200, { project });
+        return;
+      }
+      if (path === "/v1/projects/remove") {
+        await authenticatedDevice();
+        if (!resources.projects) throw new Error("projects capability is unavailable");
+        json(response, 200, { removed: await resources.projects.remove(requiredText(body, "projectId", 96)) });
+        return;
+      }
+      if (path === "/v1/projects/resolve-target") {
+        await authenticatedDevice();
+        if (!resources.projects) throw new Error("projects capability is unavailable");
+        json(response, 200, { plan: await resources.projects.resolveExecution({
+          projectId: requiredText(body, "projectId", 96),
+          operation: requiredText(body, "operation", 32) as "shell" | "edit" | "process" | "git",
+          access: requiredText(body, "access", 16) as "read" | "write",
+          ...(optionalText(body, "targetId", 128) === undefined ? {} : { targetId: optionalText(body, "targetId", 128) }),
+        }) });
+        return;
+      }
+      if (path === "/v1/projects/worktrees/create") {
+        await authenticatedDevice();
+        if (!resources.projects) throw new Error("projects capability is unavailable");
+        json(response, 201, { workspace: await resources.projects.createCodingWorkspace({
+          projectId: requiredText(body, "projectId", 96),
+          ...(optionalText(body, "targetId", 128) === undefined ? {} : { targetId: optionalText(body, "targetId", 128) }),
+          ...(optionalText(body, "name", 128) === undefined ? {} : { name: optionalText(body, "name", 128) }),
+          ...(optionalText(body, "baseRef", 256) === undefined ? {} : { baseRef: optionalText(body, "baseRef", 256) }),
+        }) });
+        return;
+      }
+      if (path === "/v1/projects/worktrees/inspect") {
+        await authenticatedDevice();
+        if (!resources.projects) throw new Error("projects capability is unavailable");
+        json(response, 200, { workspace: await resources.projects.inspectCodingWorkspace(requiredText(body, "projectId", 96), requiredText(body, "directory", 4_096)) });
+        return;
+      }
+      if (path === "/v1/projects/worktrees/diff") {
+        await authenticatedDevice();
+        if (!resources.projects) throw new Error("projects capability is unavailable");
+        json(response, 200, { diff: await resources.projects.diffCodingWorkspace(requiredText(body, "projectId", 96), requiredText(body, "directory", 4_096)) });
+        return;
+      }
+      if (path === "/v1/projects/worktrees/commit") {
+        await authenticatedDevice();
+        if (!resources.projects) throw new Error("projects capability is unavailable");
+        json(response, 200, { commit: await resources.projects.commitCodingWorkspace(requiredText(body, "projectId", 96), requiredText(body, "directory", 4_096), requiredText(body, "message", 4_096)) });
+        return;
+      }
+      if (path === "/v1/projects/worktrees/remove") {
+        await authenticatedDevice();
+        if (!resources.projects) throw new Error("projects capability is unavailable");
+        if (body.force !== undefined && typeof body.force !== "boolean") throw new Error("force must be a boolean");
+        if (body.deleteBranch !== undefined && typeof body.deleteBranch !== "boolean") throw new Error("deleteBranch must be a boolean");
+        json(response, 200, { removed: await resources.projects.removeCodingWorkspace(requiredText(body, "projectId", 96), requiredText(body, "directory", 4_096), { ...(body.force === undefined ? {} : { force: body.force }), ...(body.deleteBranch === undefined ? {} : { deleteBranch: body.deleteBranch }) }) });
+        return;
+      }
+
       if (path === "/v1/turns") {
         const deviceId = await authenticatedDevice();
         if (!resources.conversations || !resources.turnRuntime) throw new Error("conversation turn capabilities are unavailable");

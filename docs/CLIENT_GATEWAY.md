@@ -67,6 +67,25 @@ After authentication, Phase 2 resource requests use `POST` JSON bodies containin
 
 `/v1/session-jobs/redirect` accepts an active `jobId` and new instruction text. It records a durable JobDirective and returns redacted directive metadata; the existing Session Jobs runner delivers the full instruction to the Agent at its next safe steering boundary.
 
+## Project and execution-target APIs
+
+Phase 3 keeps Project identity and path policy on the server. Authenticated clients select a Project and request an operation; they do not send an arbitrary canonical checkout as an execution workspace. The first vertical slice exposes:
+
+```text
+/v1/projects/list
+/v1/projects/create
+/v1/projects/update
+/v1/projects/remove
+/v1/projects/resolve-target
+/v1/projects/worktrees/create
+/v1/projects/worktrees/inspect
+/v1/projects/worktrees/diff
+/v1/projects/worktrees/commit
+/v1/projects/worktrees/remove
+```
+
+`/v1/projects/resolve-target` returns the server-side target decision and whether a write requires an isolated worktree. Coding workspace routes delegate to the existing hardened Worktrees capability; worktree directories must stay outside the canonical Project root. The first slice executes coding workspaces on the local host while enforcing a Sandbox target policy. Direct Core Host tool routing and remote Computer Node execution are intentionally not claimed complete yet.
+
 ## Verification
 
 Run the focused Phase 1 tests while developing:

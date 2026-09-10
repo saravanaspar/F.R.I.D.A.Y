@@ -18,3 +18,10 @@ Linux is first-class through a managed Sway/wlroots session, Chromium/Playwright
 See the [roadmap](ROADMAP.md), [plugin development guide](PLUGIN_DEVELOPMENT.md), and [plugin cookbook](plugins/cookbook.md) before proposing a new owner.
 
 For gateway startup, pairing, reverse-proxy, and WebSocket operations, see [`CLIENT_GATEWAY.md`](CLIENT_GATEWAY.md).
+
+## Projects and execution targets
+
+Projects are durable server-owned records, not client-side path aliases. A Project binds an identity to a canonical root, repository metadata, an optional preferred Computer Node, and an execution policy. The provider-neutral `@friday/execution-targets` package decides whether a requested shell/edit/process/Git operation is allowed on Sandbox, Core Host, or a named Computer Node and whether a write must use an isolated worktree.
+
+The Projects plugin does not reimplement Git or shell execution. It delegates coding workspace lifecycle and trusted diff/commit operations to Worktrees, while Sandbox/Execution/Tools remain the authorities that actually run code. This keeps authorization identity, Project/workspace identity, and execution-target selection separate. The Phase 3 foundation supports durable Project resolution and isolated local coding workspaces; Computer Node execution is introduced by the later Computer phase.
+

@@ -46,6 +46,12 @@ describe("worktrees plugin", () => {
 
       await writeFile(join(candidate.directory, "base.txt"), "changed\n");
       await writeFile(join(candidate.directory, "untracked.txt"), "remove me\n");
+      await execFileAsync("git", ["add", "base.txt"], { cwd: candidate.directory });
+      const diff = await worktrees.diffWorktree({ repository, directory: candidate.directory });
+      expect(diff.status).toContain("base.txt");
+      expect(diff.status).toContain("untracked.txt");
+      expect(diff.patch).toContain("-base");
+      expect(diff.patch).toContain("+changed");
       await expect(worktrees.resetWorktree({ repository, directory: candidate.directory })).resolves.toBe(true);
       expect(await readFile(join(candidate.directory, "base.txt"), "utf8")).toBe("base\n");
 

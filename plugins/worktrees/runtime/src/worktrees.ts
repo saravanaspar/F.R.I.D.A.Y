@@ -16,6 +16,7 @@ import { parseWorktreePorcelain } from "./porcelain.js";
 import type {
   CommitWorktreeOptions,
   CommitWorktreeResult,
+  DiffWorktreeOptions,
   CreateWorktreeOptions,
   InspectWorktreeOptions,
   ListedWorktree,
@@ -24,6 +25,7 @@ import type {
   ResetWorktreeOptions,
   WorktreeInfo,
   WorktreeSnapshot,
+  WorktreeDiff,
 } from "./types.js";
 
 const MAX_NAME_ATTEMPTS = 26;
@@ -490,4 +492,36 @@ export async function commitWorktree(options: CommitWorktreeOptions): Promise<Co
   if (!after.clean) throw new WorktreeCommitError("Candidate commit completed but the worktree is still dirty");
   if (after.head === before.head) throw new WorktreeCommitError("Candidate commit did not advance worktree HEAD");
   return { directory: located.target, commit: after.head, changed: true };
+}
+
+
+export async function diffWorktree(options: DiffWorktreeOptions): Promise<WorktreeDiff> {
+  options.signal?.throwIfAborted();
+  let located: LocatedWorktree;
+  try {
+    located = await findListedWorktree(options.repository, options.directory, options.signal);
+  } catch (error) {
+    if (error instanceof WorktreeRemoveError) throw new WorktreeInspectError(error.message);
+    throw error;
+  }
+  let context: TrustedGitContext;
+  try {
+    context = await trustedGitContext(located, options.signal);
+  } catch (error) {
+    if (error instanceof WorktreeTrustError) throw new WorktreeInspectError(error.message);
+    throw error;
+  }
+  const status = await gitInWorktree(
+    context,
+    ["-c", "core.fsmonitor=false", "status", "--porcelain=v1", "--untracked-files=all"],
+    options.signal,
+  );
+  if (status.code !== 0) throw new WorktreeInspectError(gitMessage(status, "Failed to inspect worktree status"));
+  const diff = await gitInWorktree(
+    context,
+    ["diff", "--no-ext-diff", "--binary", "HEAD", "--", "."],
+    options.signal,
+  );
+  if (diff.code !== 0) throw new WorktreeInspectError(gitMessage(diff, "Failed to render worktree diff"));
+  return Object.freeze({ directory: located.target, patch: diff.stdout, status: status.stdout });
 }

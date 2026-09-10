@@ -114,6 +114,8 @@ Implementation notes: profile selection is host-owned on `InboundTurn`; untruste
 
 Tracking: [issue #21](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/21).
 
+Status: **in progress — foundation vertical slice implemented**. Project records now persist canonical server-owned roots and execution policy, `@friday/execution-targets` resolves provider-neutral Sandbox/Core Host/Computer Node targets fail-closed, coding workspaces reuse the hardened Worktrees capability for isolated creation/inspection/diff/commit/removal, and authenticated Client Gateway project APIs expose the slice. Sandbox is the executable target for this first slice; direct Core Host tool routing, test/build orchestration through the selected target, authorized merge/cherry-pick, and Computer Node execution remain Phase 3/4 follow-up work.
+
 Add `plugins/projects` and `packages/execution-targets`.
 
 A Project records identity, root path, preferred Computer Node, repository metadata, and policy. An `ExecutionTarget` routes existing shell, edit, process, and Git tools to Sandbox, Core Host, or Computer Node. Coding jobs use job-specific Git worktrees, run tests/builds, expose diffs and artifacts, and merge/cherry-pick only after authorization.

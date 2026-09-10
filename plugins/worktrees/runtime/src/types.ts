@@ -90,3 +90,15 @@ export interface CommitWorktreeResult {
   commit: string;
   changed: boolean;
 }
+
+export interface DiffWorktreeOptions {
+  repository: string;
+  directory: string;
+  signal?: AbortSignal | undefined;
+}
+
+export interface WorktreeDiff {
+  directory: string;
+  patch: string;
+  status: string;
+}

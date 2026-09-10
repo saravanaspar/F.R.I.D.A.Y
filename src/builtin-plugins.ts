@@ -49,6 +49,7 @@ import vault from "../plugins/vault/index.js";
 import voice from "../plugins/voice/index.js";
 import webhooks from "../plugins/webhooks/index.js";
 import worktrees from "../plugins/worktrees/index.js";
+import projects from "../plugins/projects/index.js";
 
 /** Ordered exactly like friday.config.json; Map insertion order is startup order. */
 export const BUILTIN_PLUGINS: ReadonlyMap<string, FridayPlugin> = new Map([
@@ -101,4 +102,5 @@ export const BUILTIN_PLUGINS: ReadonlyMap<string, FridayPlugin> = new Map([
   ["./plugins/voice/index.ts", voice],
   ["./plugins/webhooks/index.ts", webhooks],
   ["./plugins/worktrees/index.ts", worktrees],
+  ["./plugins/projects/index.ts", projects],
 ]);
