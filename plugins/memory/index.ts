@@ -311,6 +311,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
   });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "memory",
     id: "memory-recall",
     name: "memory_recall",
     label: "Recall durable memory",
@@ -348,6 +349,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
   });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "memory",
     id: "memory-remember-note",
     name: "memory_remember",
     label: "Remember a durable note",
@@ -370,7 +372,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
       const scope = authorizedMemoryScope(input.scope, executionContext);
       const permissions = ctx.services.optional(PERMISSIONS_CAPABILITY);
       await permissions?.authorize({
-        mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+        mode: executionContext?.permissionMode ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
         workspace: executionContext?.cwd ?? process.cwd(),
         access: "write",
         action: { id: "memory.remember", effect: "system-write", resource: `memory:${scope}:${path}`, network: false },
@@ -392,6 +394,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
   });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "memory",
     id: "memory-forget-note",
     name: "memory_forget",
     label: "Forget a saved note or relation",
@@ -413,7 +416,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
       const scope = authorizedMemoryScope(input.scope, executionContext);
       const permissions = ctx.services.optional(PERMISSIONS_CAPABILITY);
       await permissions?.authorize({
-        mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+        mode: executionContext?.permissionMode ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
         workspace: executionContext?.cwd ?? process.cwd(),
         access: "write",
         action: { id: "memory.forget", effect: "system-write", resource: `memory:${scope}:${id}`, network: false },
@@ -427,6 +430,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
   });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "memory",
     id: "memory-remember-relation",
     name: "memory_remember_relation",
     label: "Remember a knowledge relation",
@@ -451,7 +455,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
       const relationContext = safeMemoryContext(input.context);
       const permissions = ctx.services.optional(PERMISSIONS_CAPABILITY);
       await permissions?.authorize({
-        mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+        mode: executionContext?.permissionMode ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
         workspace: executionContext?.cwd ?? process.cwd(),
         access: "write",
         action: { id: "memory.relation.remember", effect: "system-write", resource: `memory:${scope}:graph`, network: false },
@@ -469,6 +473,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
   });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "memory",
     id: "memory-index-project-docs",
     name: "memory_index_project_docs",
     label: "Index project Markdown knowledge",
@@ -481,7 +486,7 @@ const memoryPlugin: FridayPlugin = definePlugin({
       const key = projectKey(executionContext.cwd);
       const permissions = ctx.services.optional(PERMISSIONS_CAPABILITY);
       await permissions?.authorize({
-        mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+        mode: executionContext?.permissionMode ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
         workspace: executionContext.cwd,
         access: "write",
         action: { id: "memory.project-docs.index", effect: "system-write", resource: `memory:project:${key}`, network: false },

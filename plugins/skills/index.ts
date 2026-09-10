@@ -55,6 +55,7 @@ const skillsPlugin: FridayPlugin = definePlugin({
   });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "skills",
     id: "skills-view",
     name: "skill_view",
     label: "View learned skills",
@@ -64,14 +65,21 @@ const skillsPlugin: FridayPlugin = definePlugin({
       properties: { name: { type: "string" }, path: { type: "string" } },
       additionalProperties: false,
     },
-    async execute(input) {
+    async execute(input, _signal, executionContext) {
       const name = typeof input.name === "string" && input.name.trim() ? input.name : undefined;
       const path = typeof input.path === "string" && input.path.trim() ? input.path : undefined;
-      return { output: await viewSkill(service, name, path) as unknown as AgentExtensionJsonValue };
+      const enabled = executionContext?.enabledSkills ?? [];
+      if (name && enabled.length > 0 && !enabled.includes(name)) throw new Error(`Skill ${name} is not enabled for this Agent Profile`);
+      const result = await viewSkill(service, name, path);
+      if (!name && enabled.length > 0 && Array.isArray(result.skills)) {
+        result.skills = result.skills.filter((entry: unknown) => Boolean(entry && typeof entry === "object" && enabled.includes(String((entry as { name?: unknown }).name ?? ""))));
+      }
+      return { output: result as unknown as AgentExtensionJsonValue };
     },
   });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "skills",
     id: "skills-manage",
     name: "skill_manage",
     label: "Create or update a reusable Skill",
@@ -106,9 +114,11 @@ const skillsPlugin: FridayPlugin = definePlugin({
         throw new Error("skill_manage action is invalid");
       }
       if (typeof input.name !== "string") throw new Error("skill_manage name is required");
+      const enabled = executionContext?.enabledSkills ?? [];
+      if (enabled.length > 0 && !enabled.includes(input.name)) throw new Error(`Skill ${input.name} is not enabled for this Agent Profile`);
       const permissions = ctx.services.require(PERMISSIONS_CAPABILITY);
       await permissions.authorize({
-        mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+        mode: executionContext?.permissionMode ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
         workspace: executionContext?.cwd ?? process.cwd(),
         access: "write",
         action: { id: "skills.manage", effect: "system-write", resource: `skills:${input.name}`, network: false },

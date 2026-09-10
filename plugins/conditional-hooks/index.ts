@@ -188,6 +188,7 @@ const conditionalHooksPlugin: FridayPlugin = definePlugin({
   });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "conditional-hooks",
     id: "conditional-hooks-invoke",
     name: "conditional_hook_invoke",
     label: "Invoke conditional hook",

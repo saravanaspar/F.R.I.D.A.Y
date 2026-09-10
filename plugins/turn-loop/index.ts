@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import type { FridayPlugin } from "../../src/plugin.js";
 import { AGENT_CAPABILITY } from "../agent/contract.js";
 import { AGENT_PROFILES_CAPABILITY } from "../agent-profiles/contract.js";
+import { CONVERSATIONS_CAPABILITY } from "../conversations/contract.js";
 import { MODEL_CREDENTIALS_CAPABILITY } from "../auth/contract.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { EVENTS_CAPABILITY } from "../events/contract.js";
@@ -57,6 +59,7 @@ const turnLoopPlugin: FridayPlugin = definePlugin({
     SKILLS_CAPABILITY,
     SUBAGENTS_CAPABILITY,
     AGENT_PROFILES_CAPABILITY,
+    CONVERSATIONS_CAPABILITY,
   ],
   provides: [TURN_LOOP_CAPABILITY],
 }, (ctx) => {
@@ -86,19 +89,152 @@ const turnLoopPlugin: FridayPlugin = definePlugin({
   ctx.effect(() => executor.dispose());
   ctx.contribute(TURN_EXECUTOR_CONTRIBUTION, executor);
 
+  const trustedPermissions = ctx.services.require(PERMISSIONS_TRUSTED_CAPABILITY);
+
   const replyOutbox = new SqliteTurnReplyOutbox();
   ctx.effect(() => replyOutbox.close());
   const runtime = createTurnRuntime({
     routing: ctx.services.require(ROUTING_CAPABILITY),
-    permissions: ctx.services.require(PERMISSIONS_TRUSTED_CAPABILITY),
+    permissions: trustedPermissions,
     events: ctx.services.require(EVENTS_CAPABILITY),
     executors: () => ctx.collect(TURN_EXECUTOR_CONTRIBUTION),
     observability: () => ctx.services.optional(OBSERVABILITY_CAPABILITY),
     sessionJobs: () => ctx.services.optional(SESSION_JOBS_CAPABILITY),
     replyOutbox,
     finalizers: () => ctx.collect(TURN_FINALIZER_CONTRIBUTION),
+    recordHandoff: async (input) => {
+      const conversations = ctx.services.optional(CONVERSATIONS_CAPABILITY);
+      if (!conversations) return;
+      await conversations.createHandoff({
+        conversationId: input.conversationId,
+        fromAgentId: input.fromAgentId,
+        toAgentId: input.toAgentId,
+        text: input.text,
+        sessionId: input.sessionId,
+        jobId: input.jobId,
+      });
+    },
   });
   ctx.services.provide(TURN_LOOP_CAPABILITY, runtime);
+
+  ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "turn-loop",
+    id: "turn-loop-delegate-agent",
+    name: "delegate_to_agent",
+    label: "Delegate to named Agent",
+    description: "Delegate bounded work to another Agent Profile participating in the current shared Conversation. The delegated work runs as a durable Session Job and reports back to this conversation.",
+    parameters: Object.freeze({
+      type: "object",
+      properties: {
+        agentId: { type: "string", description: "Target Agent Profile id, for example developer or research" },
+        text: { type: "string", description: "Specific task to delegate" },
+      },
+      required: ["agentId", "text"],
+      additionalProperties: false,
+    }),
+    async execute(input, _signal, executionContext) {
+      const turn = executionContext?.turn;
+      const sharedConversationId = turn?.principal.sharedConversationId;
+      if (!turn || !sharedConversationId) throw new Error("delegate_to_agent requires a shared Conversation turn");
+      if ((turn.delegationDepth ?? 0) >= 3) throw new Error("Agent delegation depth limit reached (3)");
+      const conversations = ctx.services.optional(CONVERSATIONS_CAPABILITY);
+      const profiles = ctx.services.optional(AGENT_PROFILES_CAPABILITY);
+      const sessionJobs = ctx.services.optional(SESSION_JOBS_CAPABILITY);
+      if (!conversations || !profiles || !sessionJobs) throw new Error("Agent delegation capabilities are unavailable");
+      const conversation = conversations.get(sharedConversationId);
+      if (!conversation) throw new Error("shared Conversation not found");
+      const agentId = typeof input.agentId === "string" ? input.agentId.trim().toLowerCase() : "";
+      const delegatedText = typeof input.text === "string" ? input.text.trim() : "";
+      if (!agentId || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(agentId)) throw new Error("agentId is invalid");
+      if (!delegatedText || delegatedText.length > 128_000) throw new Error("delegated text is invalid");
+      const target = profiles.get(agentId);
+      if (!target) throw new Error(`Agent Profile not found: ${agentId}`);
+      if (!conversation.participants.some((participant) => participant.kind === "agent" && participant.id === agentId)) {
+        throw new Error(`Agent @${agentId} is not a participant in this Conversation`);
+      }
+      if (executionContext.agentProfileId === agentId) throw new Error("an Agent cannot delegate the same task to itself");
+      const label = target.title.trim() || target.name.trim() || target.id;
+      const sourceKey = `agent-handoff:${createHash("sha256").update(JSON.stringify([
+        executionContext.jobId ?? turn.id,
+        sharedConversationId,
+        executionContext.agentProfileId ?? "friday",
+        agentId,
+        delegatedText,
+      ])).digest("hex").slice(0, 40)}`;
+      const delegatedTurn = Object.freeze({
+        ...turn,
+        id: `${turn.id}:handoff:${sourceKey.slice(-16)}`,
+        principal: Object.freeze({ ...turn.principal, agentProfileId: agentId, sharedConversationId }),
+        text: delegatedText,
+        timestamp: Date.now(),
+        agentProfileId: agentId,
+        agentProfileLabel: label,
+        agentNotificationPreference: target.notificationPreference,
+        sessionAffinityId: conversation.sessionId,
+        collaboratingAgents: Object.freeze([]),
+        delegationDepth: (turn.delegationDepth ?? 0) + 1,
+        destinationId: `session:${conversation.sessionId}`,
+      });
+      const handoff = await conversations.createHandoff({
+        conversationId: sharedConversationId,
+        fromAgentId: executionContext.agentProfileId ?? "friday",
+        toAgentId: agentId,
+        text: delegatedText,
+        sessionId: conversation.sessionId,
+      }, {
+        sourceKey,
+        origin: {
+          authority: turn.principal.authority,
+          channel: turn.principal.channel,
+          accountId: turn.principal.accountId,
+          conversationId: turn.principal.conversationId,
+          senderId: turn.principal.senderId,
+          ...(turn.principal.threadId === undefined ? {} : { threadId: turn.principal.threadId }),
+          sharedConversationId,
+        },
+        notify: target.notificationPreference === "muted"
+          ? async () => undefined
+          : async (text) => turn.reply(`${label} · ${text}`),
+        run: async (signal, report, jobContext) => {
+          const decision = Object.freeze({
+            messageId: delegatedTurn.id,
+            destination: Object.freeze({ kind: "session" as const, id: `session:${conversation.sessionId}` }),
+            execution: Object.freeze({ profile: "agent" as const }),
+            confidence: 1,
+          });
+          const executeDelegated = () => executor.execute({
+            turn: delegatedTurn,
+            decision,
+            signal,
+            progress: target.notificationPreference === "all"
+              ? report
+              : async (update) => report({ ...update, notify: false }),
+            ...(jobContext?.jobId === undefined ? {} : { jobId: jobContext.jobId }),
+            ...(jobContext?.onDirective === undefined ? {} : { onDirective: jobContext.onDirective }),
+          });
+          const result = jobContext?.jobId === undefined || trustedPermissions.runAsJob === undefined
+            ? await executeDelegated()
+            : await trustedPermissions.runAsJob(jobContext.jobId, executeDelegated);
+          return {
+            text: result.text,
+            ...(result.sessionId === undefined ? { sessionId: conversation.sessionId } : { sessionId: result.sessionId }),
+            ...(result.afterReply === undefined ? {} : { afterNotify: result.afterReply }),
+            ...(result.afterReplyFinalizers === undefined ? {} : { afterNotifyFinalizers: result.afterReplyFinalizers }),
+          };
+        },
+      });
+      return {
+        output: {
+          handoffId: handoff.id,
+          jobId: handoff.jobId ?? null,
+          status: handoff.status,
+          agentId,
+          label,
+        },
+      };
+    },
+  });
+
   ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
     id: "turn-loop",
     label: "Turn Loop",

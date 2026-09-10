@@ -87,6 +87,8 @@ describe("RLM prompt composition", () => {
     expect(prompt).toContain("await rlm('sub-task')");
     expect(prompt).toContain("await rlm.list_subagents()");
     expect(prompt).toContain("await rlm.gather([...])");
+    expect(prompt).toContain("not as permanent FRIDAY tools or capabilities");
+    expect(prompt).toContain("set `fresh=true` on the next `ipython` call");
   });
 
   it("adds parent-reply doctrine only when the messaging skill is visible", () => {

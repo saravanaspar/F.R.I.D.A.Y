@@ -1,10 +1,42 @@
 import type { Capability } from "../capabilities/protocol.js";
 import { defineCapability } from "../capabilities/protocol.js";
-import type { SessionJobOrigin, SessionJobRunResult, SessionJobProgress } from "../session-jobs/contract.js";
+import type { SessionJobOrigin, SessionJobRunContext, SessionJobRunResult, SessionJobProgress } from "../session-jobs/contract.js";
 
 export type ConversationType = "direct" | "group";
 export type ConversationParticipantKind = "user" | "agent";
 export type HandoffStatus = "queued" | "running" | "completed" | "error";
+
+export type ChannelConversationMode = "general" | "sticky" | "auto";
+
+export interface ChannelConversationBinding {
+  readonly id: string;
+  readonly channel: string;
+  readonly accountId: string;
+  readonly externalConversationId: string;
+  readonly externalThreadId?: string | undefined;
+  readonly conversationId: string;
+  readonly mode: ChannelConversationMode;
+  readonly defaultAgentProfileId?: string | undefined;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface ChannelConversationBindingInput {
+  readonly channel: string;
+  readonly accountId: string;
+  readonly externalConversationId: string;
+  readonly externalThreadId?: string | undefined;
+  readonly conversationId: string;
+  readonly mode: ChannelConversationMode;
+  readonly defaultAgentProfileId?: string | undefined;
+}
+
+export interface ChannelConversationLookup {
+  readonly channel: string;
+  readonly accountId: string;
+  readonly externalConversationId: string;
+  readonly externalThreadId?: string | undefined;
+}
 
 export interface ConversationParticipant {
   readonly kind: ConversationParticipantKind;
@@ -75,10 +107,12 @@ export interface ConversationUpdateInput {
 }
 
 export interface HandoffExecution {
+  /** Stable idempotence key supplied by a trusted orchestrator. */
+  readonly sourceKey?: string | undefined;
   readonly run: (
     signal: AbortSignal,
     report: (progress: SessionJobProgress) => Promise<void>,
-    context?: Readonly<{ jobId: string }> | undefined,
+    context?: SessionJobRunContext | undefined,
   ) => Promise<SessionJobRunResult>;
   readonly notify?: ((text: string) => Promise<void>) | undefined;
   readonly origin?: SessionJobOrigin | undefined;
@@ -90,6 +124,8 @@ export interface ConversationHandoffInput {
   readonly toAgentId: string;
   readonly text: string;
   readonly sessionId?: string | undefined;
+  /** Existing Session Job id when recording a handoff admitted by another trusted orchestrator. */
+  readonly jobId?: string | undefined;
 }
 
 export interface ConversationsService {
@@ -97,11 +133,16 @@ export interface ConversationsService {
   get(id: string): Conversation | undefined;
   list(): readonly Conversation[];
   update(id: string, input: ConversationUpdateInput): Promise<Conversation>;
+  ensureParticipant(id: string, participant: ConversationParticipant): Promise<Conversation>;
   markRead(id: string, sequence: number): Promise<Conversation>;
   createThread(conversationId: string, rootMessageId: string): Promise<Thread>;
   recordThreadReply(threadId: string): Promise<Thread>;
   listThreads(conversationId: string): readonly Thread[];
   resolveMentions(conversationId: string, text: string): ConversationMentions;
+  bindChannel(input: ChannelConversationBindingInput): Promise<ChannelConversationBinding>;
+  resolveChannelBinding(input: ChannelConversationLookup): ChannelConversationBinding | undefined;
+  listChannelBindings(conversationId?: string): readonly ChannelConversationBinding[];
+  removeChannelBinding(input: ChannelConversationLookup): Promise<boolean>;
   addReaction(messageId: string, actorId: string, emoji: string): Promise<Reaction>;
   removeReaction(messageId: string, actorId: string, emoji: string): Promise<boolean>;
   listReactions(messageId: string): readonly Reaction[];

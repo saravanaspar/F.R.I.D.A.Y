@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PluginTestHost } from "./helpers/plugin-host.js";
 import agentPlugin from "../plugins/agent/index.js";
 import { AGENT_CAPABILITY } from "../plugins/agent/contract.js";
+import type { AgentProfilesService } from "../plugins/agent-profiles/contract.js";
 import type { AgentInputContribution, AgentModelRequestPolicyContribution, AgentToolContribution } from "../plugins/turn-loop/contract.js";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
@@ -444,6 +445,102 @@ describe("Turn Loop agent executor", () => {
       expect(result).toMatchObject({ text: "tool completed", sessionId });
       expect(calls).toEqual([{ value: "hello" }]);
       expect(faux.state.callCount).toBe(3);
+    } finally {
+      await executor.dispose();
+      faux.unregister();
+    }
+  });
+
+  it("enforces Agent Profile plugin allowlists and approval policy at runtime", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "faux";
+    process.env.FRIDAY_MODEL_ID = "faux-1";
+    const stateDir = tempRoot();
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(sessionsPlugin);
+    await friday.activatePlugin(promptsPlugin);
+    await friday.activatePlugin(modelPlugin);
+    await friday.activatePlugin(agentPlugin);
+
+    const models = requireCapability(MODEL_CAPABILITY);
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
+    const toolOptions: Array<{ permissionMode?: string }> = [];
+    const contributionCalls: string[] = [];
+    const profiles = {
+      get(id: string) {
+        if (id !== "developer") return undefined;
+        return {
+          id: "developer",
+          name: "Developer",
+          title: "Developer",
+          description: "Implementation specialist",
+          roleInstructions: "Implement and verify changes.",
+          memoryScope: "agent:developer",
+          enabledSkills: [],
+          enabledPlugins: ["tools", "allowed-plugin"],
+          notificationPreference: "important" as const,
+          approvalPolicy: "ask" as const,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        };
+      },
+      list() { return []; },
+    } as unknown as AgentProfilesService;
+    const tools = {
+      createTool() { throw new Error("not used"); },
+      createAllTools(_cwd: string, options?: { permissionMode?: string }) {
+        toolOptions.push({ ...(options?.permissionMode === undefined ? {} : { permissionMode: options.permissionMode }) });
+        return {};
+      },
+    } as unknown as ToolsService;
+    const contributions: AgentToolContribution[] = [
+      {
+        sourcePluginId: "allowed-plugin",
+        id: "allowed-tool",
+        name: "allowed_tool",
+        label: "Allowed tool",
+        description: "Allowed by the Developer profile.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        async execute() { contributionCalls.push("allowed"); return { output: { ok: true } }; },
+      },
+      {
+        sourcePluginId: "blocked-plugin",
+        id: "blocked-tool",
+        name: "blocked_tool",
+        label: "Blocked tool",
+        description: "Must not be exposed to the Developer profile.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        async execute() { contributionCalls.push("blocked"); return { output: { ok: true } }; },
+      },
+    ];
+    const executor = createAgentTurnExecutor({
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: withTestModel(models, faux),
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions: requireCapability(SESSIONS_CAPABILITY),
+      tools,
+      toolContributions: () => contributions,
+      optional: { profiles: () => profiles },
+    }, { stateDir, maxCachedSessions: 2 });
+
+    try {
+      let firstRequest = "";
+      faux.setResponses([
+        (context, options) => {
+          firstRequest = JSON.stringify({ context, options });
+          return modelRuntime.fauxAssistantMessage(modelRuntime.fauxToolCall("allowed_tool", {}), { stopReason: "toolUse" });
+        },
+        modelRuntime.fauxAssistantMessage("profile tool completed"),
+      ]);
+      const profiledTurn: InboundTurn = { ...turn("profile-policy", "use the allowed tool"), agentProfileId: "developer" };
+      const result = await executor.execute({ turn: profiledTurn, decision: decision("session:new") });
+      expect(result.text).toBe("profile tool completed");
+      expect(contributionCalls).toEqual(["allowed"]);
+      expect(toolOptions.some((entry) => entry.permissionMode === "ask")).toBe(true);
+      expect(firstRequest).toContain("allowed_tool");
+      expect(firstRequest).not.toContain("blocked_tool");
     } finally {
       await executor.dispose();
       faux.unregister();

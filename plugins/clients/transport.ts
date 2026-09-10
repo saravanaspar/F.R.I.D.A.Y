@@ -138,10 +138,18 @@ export async function startClientTransport(
         const profile = await resources.agentProfiles.create({
           id: typeof body.id === "string" ? body.id : undefined,
           name: requiredText(body, "name", 128),
+          ...(typeof body.avatar === "string" ? { avatar: body.avatar } : {}),
           ...(typeof body.title === "string" ? { title: body.title } : {}),
           ...(typeof body.description === "string" ? { description: body.description } : {}),
           ...(typeof body.roleInstructions === "string" ? { roleInstructions: body.roleInstructions } : {}),
+          ...(typeof body.defaultConversationId === "string" ? { defaultConversationId: body.defaultConversationId } : {}),
           ...(typeof body.memoryScope === "string" ? { memoryScope: body.memoryScope } : {}),
+          ...(Array.isArray(body.enabledSkills) ? { enabledSkills: body.enabledSkills.filter((value): value is string => typeof value === "string") } : {}),
+          ...(Array.isArray(body.enabledPlugins) ? { enabledPlugins: body.enabledPlugins.filter((value): value is string => typeof value === "string") } : {}),
+          ...(typeof body.defaultProjectId === "string" ? { defaultProjectId: body.defaultProjectId } : {}),
+          ...(typeof body.defaultComputerScreen === "string" ? { defaultComputerScreen: body.defaultComputerScreen } : {}),
+          ...(typeof body.notificationPreference === "string" ? { notificationPreference: body.notificationPreference as "all" | "important" | "muted" } : {}),
+          ...(typeof body.approvalPolicy === "string" ? { approvalPolicy: body.approvalPolicy as "default" | "ask" | "auto" | "full" } : {}),
         });
         json(response, 201, { profile });
         return;
@@ -151,12 +159,18 @@ export async function startClientTransport(
         if (!resources.agentProfiles) throw new Error("agent profiles capability is unavailable");
         const profile = await resources.agentProfiles.update(requiredText(body, "profileId", 96), {
           ...(typeof body.name === "string" ? { name: body.name } : {}),
+          ...(body.avatar === null ? { avatar: null } : typeof body.avatar === "string" ? { avatar: body.avatar } : {}),
           ...(typeof body.title === "string" ? { title: body.title } : {}),
           ...(typeof body.description === "string" ? { description: body.description } : {}),
           ...(typeof body.roleInstructions === "string" ? { roleInstructions: body.roleInstructions } : {}),
+          ...(body.defaultConversationId === null ? { defaultConversationId: null } : typeof body.defaultConversationId === "string" ? { defaultConversationId: body.defaultConversationId } : {}),
           ...(typeof body.memoryScope === "string" ? { memoryScope: body.memoryScope } : {}),
+          ...(Array.isArray(body.enabledSkills) ? { enabledSkills: body.enabledSkills.filter((value): value is string => typeof value === "string") } : {}),
+          ...(Array.isArray(body.enabledPlugins) ? { enabledPlugins: body.enabledPlugins.filter((value): value is string => typeof value === "string") } : {}),
+          ...(body.defaultProjectId === null ? { defaultProjectId: null } : typeof body.defaultProjectId === "string" ? { defaultProjectId: body.defaultProjectId } : {}),
+          ...(body.defaultComputerScreen === null ? { defaultComputerScreen: null } : typeof body.defaultComputerScreen === "string" ? { defaultComputerScreen: body.defaultComputerScreen } : {}),
           ...(typeof body.notificationPreference === "string" ? { notificationPreference: body.notificationPreference as "all" | "important" | "muted" } : {}),
-          ...(typeof body.approvalPolicy === "string" ? { approvalPolicy: body.approvalPolicy } : {}),
+          ...(typeof body.approvalPolicy === "string" ? { approvalPolicy: body.approvalPolicy as "default" | "ask" | "auto" | "full" } : {}),
         });
         json(response, 200, { profile });
         return;
@@ -247,14 +261,27 @@ export async function startClientTransport(
         if (!conversationId) throw new Error("conversationId is required unless the Agent Profile has a default conversation");
         const conversation = resources.conversations.get(conversationId);
         if (!conversation) throw new Error("conversation not found");
+        if (profileId && !conversation.participants.some((participant) => participant.kind === "agent" && participant.id === profileId)) {
+          throw new Error("agent profile must participate in the conversation");
+        }
         let reply = "";
         const result = await resources.turnRuntime.submit({
           id: typeof body.turnId === "string" ? body.turnId : randomUUID(),
-          principal: { authority: "local", channel: "client", accountId: deviceId, conversationId: conversation.id, senderId: "operator", ...(typeof body.threadId === "string" ? { threadId: body.threadId } : {}) },
+          principal: {
+            authority: "local",
+            channel: "client",
+            accountId: deviceId,
+            conversationId: conversation.id,
+            senderId: "operator",
+            sharedConversationId: conversation.id,
+            ...(typeof body.threadId === "string" ? { threadId: body.threadId } : {}),
+            ...(profileId === undefined ? {} : { agentProfileId: profileId }),
+          },
           text,
           timestamp: Date.now(),
-          agentProfileId: profileId,
-          destinationId: `session:${conversation.sessionId}`,
+          ...(profileId === undefined ? {} : { agentProfileId: profileId }),
+          ...(profile === undefined ? {} : { agentProfileLabel: profile.title.trim() || profile.name.trim() || profile.id, agentNotificationPreference: profile.notificationPreference }),
+          sessionAffinityId: conversation.sessionId,
           reply: async (value) => { reply = value; },
         });
         json(response, 202, { result, reply });

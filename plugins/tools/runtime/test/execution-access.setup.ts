@@ -37,6 +37,10 @@ class FakeKernel implements KernelHandle {
     return { stdout: "", stderr: "", result: code, status: "ok", durationMs: 1 };
   }
 
+  async restart(): Promise<void> {
+    this.counter = 0;
+  }
+
   async dispose(): Promise<void> {}
   async kill(): Promise<void> {}
 }

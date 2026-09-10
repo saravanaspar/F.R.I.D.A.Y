@@ -1,7 +1,8 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { FridayPlugin } from "../../src/plugin.js";
 import { AGENT_TOOL_CONTRIBUTION, type AgentExtensionJsonValue } from "../turn-loop/contract.js";
 import { definePlugin } from "../capabilities/protocol.js";
-import { PERMISSIONS_CAPABILITY } from "../permissions/contract.js";
+import { PERMISSIONS_CAPABILITY, type PermissionMode } from "../permissions/contract.js";
 import {
   SYSTEM_ACTION_CONTRIBUTION,
   type SystemJsonObject,
@@ -51,9 +52,10 @@ const integrationsPlugin: FridayPlugin = definePlugin({
   provides: [INTEGRATIONS_CAPABILITY],
 }, (ctx) => {
   const permissions = ctx.services.require(PERMISSIONS_CAPABILITY);
+  const agentPermissionMode = new AsyncLocalStorage<PermissionMode | undefined>();
   const integrations = createIntegrationsService({
     async authorize({ connection, action }) {
-      const mode = permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE);
+      const mode = agentPermissionMode.getStore() ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE);
       await permissions.authorize({
         mode,
         workspace: process.cwd(),
@@ -68,9 +70,9 @@ const integrationsPlugin: FridayPlugin = definePlugin({
       });
     },
   });
-  async function authorizeConfiguredConnectionAccess(reason: string): Promise<void> {
+  async function authorizeConfiguredConnectionAccess(reason: string, override?: PermissionMode): Promise<void> {
     await permissions.authorize({
-      mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+      mode: override ?? agentPermissionMode.getStore() ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
       workspace: process.cwd(),
       access: "read",
       action: {
@@ -85,13 +87,14 @@ const integrationsPlugin: FridayPlugin = definePlugin({
   ctx.services.provide(INTEGRATIONS_CAPABILITY, integrations);
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "integrations",
     id: "integrations-connections",
     name: "integrations_connections",
     label: "Integration connections",
     description: "List configured integration connections and the actions exposed by installed adapters.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
-    async execute() {
-      await authorizeConfiguredConnectionAccess("list configured integration connections");
+    async execute(_input, _signal, executionContext) {
+      await authorizeConfiguredConnectionAccess("list configured integration connections", executionContext?.permissionMode);
       const adapters = new Map(integrations.adapters().map((adapter) => [adapter.id, adapter]));
       return {
         output: integrations.connections().map((connection) => ({
@@ -109,6 +112,7 @@ const integrationsPlugin: FridayPlugin = definePlugin({
     },
   });
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "integrations",
     id: "integrations-invoke",
     name: "integrations_invoke",
     label: "Invoke integration",
@@ -123,17 +127,19 @@ const integrationsPlugin: FridayPlugin = definePlugin({
       required: ["connectionId", "actionId"],
       additionalProperties: false,
     },
-    async execute(input, signal) {
+    async execute(input, signal, executionContext) {
       const connectionId = agentString(input, "connectionId");
-      await authorizeConfiguredConnectionAccess(`access configured integration connection ${connectionId}`);
-      return {
-        output: await integrations.invoke(
-          connectionId,
-          agentString(input, "actionId"),
-          (input.input ?? null) as IntegrationJsonValue,
-          signal,
-        ),
-      };
+      return agentPermissionMode.run(executionContext?.permissionMode, async () => {
+        await authorizeConfiguredConnectionAccess(`access configured integration connection ${connectionId}`, executionContext?.permissionMode);
+        return {
+          output: await integrations.invoke(
+            connectionId,
+            agentString(input, "actionId"),
+            (input.input ?? null) as IntegrationJsonValue,
+            signal,
+          ),
+        };
+      });
     },
   });
 

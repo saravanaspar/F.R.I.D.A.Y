@@ -9,6 +9,8 @@ export interface PrincipalOrigin {
   readonly conversationId: string;
   readonly senderId: string;
   readonly threadId?: string | undefined;
+  /** Host-owned internal Conversation id used for shared continuity, never authorization identity. */
+  readonly sharedConversationId?: string | undefined;
 }
 
 function normalized(value: string): string {
@@ -28,15 +30,36 @@ export function principalScope(origin: PrincipalOrigin): string {
   return `channel:${digest}`;
 }
 
+/** Opaque shared Conversation ownership key. User identity remains principalScope(origin). */
+export function conversationScope(conversationId: string): string {
+  const value = normalized(conversationId);
+  if (!value) throw new Error("Conversation id must not be empty");
+  const digest = createHash("sha256").update(value).digest("hex").slice(0, 32);
+  return `conversation:${digest}`;
+}
+
+/** Continuity key for routing/session context; never use this as the caller authorization identity. */
+export function continuityScope(origin: PrincipalOrigin): string {
+  return origin.sharedConversationId?.trim()
+    ? conversationScope(origin.sharedConversationId)
+    : principalScope(origin);
+}
+
 export function samePrincipalOrigin(left: PrincipalOrigin, right: PrincipalOrigin): boolean {
   return principalScope(left) === principalScope(right);
 }
 
+export function sameContinuityOrigin(left: PrincipalOrigin, right: PrincipalOrigin): boolean {
+  return continuityScope(left) === continuityScope(right);
+}
+
 /** Legacy unowned state belongs only to the local operator. */
 export function ownerScopeAllows(ownerScope: string | undefined, origin: PrincipalOrigin): boolean {
-  return ownerScope === undefined
-    ? origin.authority === "local"
-    : ownerScope === principalScope(origin);
+  if (ownerScope === undefined) return origin.authority === "local";
+  if (ownerScope === principalScope(origin)) return true;
+  const sharedConversationId = origin.sharedConversationId?.trim();
+  return Boolean(sharedConversationId)
+    && ownerScope === conversationScope(sharedConversationId!);
 }
 
 export function principalStateSegment(origin: PrincipalOrigin): string {
@@ -49,6 +72,6 @@ export function principalStateRoot(base: string, origin: PrincipalOrigin): strin
 
 export function ownerStateRoot(base: string, ownerScope: string | undefined): string {
   if (ownerScope === undefined || ownerScope === "local:operator") return base;
-  if (!/^channel:[a-f0-9]{32}$/.test(ownerScope)) throw new Error("Invalid principal owner scope");
+  if (!/^(?:channel|conversation):[a-f0-9]{32}$/.test(ownerScope)) throw new Error("Invalid principal owner scope");
   return join(base, "principals", ownerScope.replace(":", "-"));
 }

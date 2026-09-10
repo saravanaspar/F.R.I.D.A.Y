@@ -408,6 +408,74 @@ describe("Turn Loop", () => {
     await Promise.all([third, fourth]);
   });
 
+
+  it("applies shared Conversation session affinity only to Agent/session routing", async () => {
+    const events = eventsHarness();
+    const permissions = permissionsHarness();
+    const routing = routingHarness(decision({ kind: "session", id: "session:new" }, "agent"));
+    let observedDestination = "";
+    const runtime = createTurnRuntime({
+      routing: routing.service,
+      permissions: permissions.service,
+      events: events.service,
+      executors: () => [{
+        id: "agent",
+        canHandle: () => true,
+        async execute(context) {
+          observedDestination = context.decision.destination.id;
+          expect(context.turn.principal.sharedConversationId).toBe("engineering");
+          expect(context.turn.agentProfileId).toBe("developer");
+          return { text: "bound", sessionId: "shared-session" };
+        },
+      }],
+    });
+    const inbound = turn("affinity", async () => undefined);
+
+    await runtime.submit({
+      ...inbound,
+      principal: { ...inbound.principal, sharedConversationId: "engineering", agentProfileId: "developer" },
+      agentProfileId: "developer",
+      agentProfileLabel: "Developer",
+      sessionAffinityId: "shared-session",
+    });
+
+    expect(observedDestination).toBe("session:shared-session");
+  });
+
+  it("does not let Agent profile affinity bypass Scheduler/System/utility routing", async () => {
+    const events = eventsHarness();
+    const permissions = permissionsHarness();
+    const routing = routingHarness(decision({ kind: "scheduler", id: "scheduler" }, "scheduler"));
+    let observedDestination = "";
+    let observedProfile = "";
+    const runtime = createTurnRuntime({
+      routing: routing.service,
+      permissions: permissions.service,
+      events: events.service,
+      executors: () => [{
+        id: "scheduler",
+        canHandle: (value) => value.execution.profile === "scheduler",
+        async execute(context) {
+          observedDestination = context.decision.destination.id;
+          observedProfile = context.decision.execution.profile;
+          return { text: "scheduled" };
+        },
+      }],
+    });
+    const inbound = turn("profile-reminder", async () => undefined);
+
+    await runtime.submit({
+      ...inbound,
+      text: "remind me tomorrow",
+      principal: { ...inbound.principal, sharedConversationId: "engineering", agentProfileId: "developer" },
+      agentProfileId: "developer",
+      sessionAffinityId: "shared-session",
+    });
+
+    expect(observedDestination).toBe("scheduler");
+    expect(observedProfile).toBe("scheduler");
+  });
+
   it("dispatches new execution profiles through executor contributions instead of hard-coded branches", async () => {
     const events = eventsHarness();
     const permissions = permissionsHarness();

@@ -12,6 +12,10 @@ import { CHANNELS_CAPABILITY } from "../plugins/channels/contract.js";
 import { CHANNELS_TRUSTED_CAPABILITY } from "../plugins/channels/trusted-contract.js";
 import { EVENTS_CAPABILITY } from "../plugins/events/contract.js";
 import { createEventsService } from "../plugins/events/events.js";
+import sessionsPlugin from "../plugins/sessions/index.js";
+import agentProfilesPlugin from "../plugins/agent-profiles/index.js";
+import { AGENT_PROFILES_CAPABILITY } from "../plugins/agent-profiles/contract.js";
+import conversationsPlugin from "../plugins/conversations/index.js";
 import { SCHEDULED_ACTION_CONTRIBUTION } from "../plugins/scheduler/contract.js";
 import type { InboundTurn } from "../plugins/turn-loop/contract.js";
 import { TURN_INGRESS_HOOK } from "../plugins/turn-loop/contract.js";
@@ -51,6 +55,28 @@ async function activate(turns?: InboundTurn[]) {
   }
   await friday.activatePlugin(createVaultPlugin({ stateDir: join(home, "vault"), workspaceRoot: process.cwd() }));
   await friday.activatePlugin(createChannelsPlugin({ autoStart: false }));
+  return friday;
+}
+
+async function activateConversationAwareChannels(turns: InboundTurn[]) {
+  const home = temp();
+  process.env.FRIDAY_HOME = home;
+  const friday = new PluginTestHost();
+  await friday.activatePlugin(capabilitiesPlugin);
+  await friday.activatePlugin(definePlugin({ id: "test-events", provides: [EVENTS_CAPABILITY] }, (ctx) => {
+    const events = createEventsService({ stateDir: join(home, "events") });
+    ctx.services.provide(EVENTS_CAPABILITY, events);
+    ctx.effect(() => events.close());
+  }));
+  await friday.activatePlugin(sessionsPlugin);
+  await friday.activatePlugin(agentProfilesPlugin);
+  await friday.activatePlugin(conversationsPlugin);
+  await friday.activatePlugin(definePlugin({ id: "turn-ingress-test" }, (ctx) => {
+    ctx.on(TURN_INGRESS_HOOK, (turn) => { turns.push(turn); });
+  }));
+  await friday.activatePlugin(createVaultPlugin({ stateDir: join(home, "vault"), workspaceRoot: process.cwd() }));
+  await friday.activatePlugin(createChannelsPlugin({ autoStart: false }));
+  await friday.completePluginBootstrap();
   return friday;
 }
 
@@ -154,6 +180,71 @@ describe("channels plugin", () => {
     });
     expect(JSON.stringify(saved.channels.telegram)).not.toContain("must-not-be-stored-here");
     expect(loadTrustedIdentities(getPermissionsStateDir(process.env))).toEqual([]);
+  });
+
+  it("enriches durable Telegram group ingress with shared Conversation and Agent Profile selection before Turn Loop", async () => {
+    const turns: InboundTurn[] = [];
+    await activateConversationAwareChannels(turns);
+    const profiles = requireCapability(AGENT_PROFILES_CAPABILITY);
+    await profiles.create({
+      name: "Developer",
+      description: "implementation code build",
+      roleInstructions: "Implement and test code.",
+    });
+
+    const events = requireCapability(EVENTS_CAPABILITY);
+    events.publish({
+      id: "test-channel-ingress-telegram-group",
+      type: "channel.ingress.accepted",
+      source: "channels",
+      subject: "channel:telegram:default",
+      data: {
+        id: "telegram-message-100",
+        principal: {
+          channel: "telegram",
+          accountId: "default",
+          conversationId: "-100123",
+          senderId: "alice",
+          threadId: "42",
+        },
+        text: "@Developer fix the login bug",
+        timestamp: Date.now(),
+        attachments: [],
+        chatType: "group",
+        senderName: "Alice",
+        conversationName: "Engineering",
+        replyToMessageId: "telegram-message-99",
+      },
+    });
+
+    const deliveries = await events.runPending({ maxDeliveries: 20 });
+    expect(deliveries.some((entry) => entry.consumerId === "channels.turn-ingress.v1" && entry.status === "success")).toBe(true);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({
+      id: "telegram-message-100",
+      text: "fix the login bug",
+      agentProfileId: "developer",
+      principal: {
+        authority: "channel",
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "-100123",
+        senderId: "alice",
+        threadId: "42",
+        agentProfileId: "developer",
+      },
+      channelContext: {
+        chatType: "group",
+        senderName: "Alice",
+        conversationName: "Engineering",
+        providerMessageId: "telegram-message-100",
+        replyToMessageId: "telegram-message-99",
+      },
+    });
+    expect(turns[0]?.principal.sharedConversationId).toBeTypeOf("string");
+    expect(turns[0]?.sessionAffinityId).toBeTypeOf("string");
+    expect(turns[0]?.channelContext?.internalConversationId).toBe(turns[0]?.principal.sharedConversationId);
+    expect(turns[0]?.channelContext?.internalThreadId).toBeTypeOf("string");
   });
 
 });

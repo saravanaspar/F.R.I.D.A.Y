@@ -1,4 +1,4 @@
-import { principalScope } from "../principal-scope.js";
+import { continuityScope } from "../principal-scope.js";
 import type {
   RoutedMessage,
   RoutingDecision,
@@ -121,7 +121,7 @@ function clip(value: string, max: number): string {
 }
 
 function conversationKey(principal: RoutingPrincipal): string {
-  return principalScope(principal);
+  return continuityScope(principal);
 }
 
 function cloneMessage(message: RoutingMessage, textLimit = MAX_CONTEXT_TEXT_CHARS): RoutingMessage {
@@ -134,6 +134,7 @@ function cloneMessage(message: RoutingMessage, textLimit = MAX_CONTEXT_TEXT_CHAR
       conversationId: clip(message.principal.conversationId, 256),
       senderId: clip(message.principal.senderId, 256),
       ...(message.principal.threadId === undefined ? {} : { threadId: clip(message.principal.threadId, 256) }),
+      ...(message.principal.sharedConversationId === undefined ? {} : { sharedConversationId: clip(message.principal.sharedConversationId, 256) }),
     }),
     text: clip(message.text, textLimit),
     ...(message.attachments === undefined ? {} : {

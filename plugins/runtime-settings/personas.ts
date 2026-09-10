@@ -221,6 +221,7 @@ export async function registerPersonaExtensions(
   });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "runtime-settings",
     id: "persona-list",
     name: "persona_list",
     label: "List personas",
@@ -234,6 +235,7 @@ export async function registerPersonaExtensions(
   });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "runtime-settings",
     id: "persona-switch",
     name: "persona_switch",
     label: "Switch persona",
@@ -245,7 +247,7 @@ export async function registerPersonaExtensions(
       const state = await load();
       if (!definitions(state).some((entry) => entry.name === name)) throw new Error(`Unknown persona: ${name}`);
       await permissions.authorize({
-        mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+        mode: executionContext?.permissionMode ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
         workspace: executionContext?.cwd ?? process.cwd(),
         access: "write",
         action: { id: "persona.switch", effect: "system-write", resource: `persona:${name}`, network: false },
@@ -257,6 +259,7 @@ export async function registerPersonaExtensions(
   });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "runtime-settings",
     id: "persona-create",
     name: "persona_create",
     label: "Create persona",
@@ -287,7 +290,7 @@ export async function registerPersonaExtensions(
         instructions: safeCustomInstructions(input.instructions),
       });
       await permissions.authorize({
-        mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+        mode: executionContext?.permissionMode ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
         workspace: executionContext?.cwd ?? process.cwd(),
         access: "write",
         action: { id: "persona.create", effect: "system-write", resource: `persona:${name}`, network: false },
@@ -301,6 +304,7 @@ export async function registerPersonaExtensions(
   });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    sourcePluginId: "runtime-settings",
     id: "persona-delete",
     name: "persona_delete",
     label: "Delete persona",
@@ -314,7 +318,7 @@ export async function registerPersonaExtensions(
       const exists = state.custom.some((entry) => entry.name === name);
       if (!exists) return { output: { deleted: false, name } };
       await permissions.authorize({
-        mode: permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+        mode: executionContext?.permissionMode ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
         workspace: executionContext?.cwd ?? process.cwd(),
         access: "write",
         action: { id: "persona.delete", effect: "system-write", resource: `persona:${name}`, network: false },
