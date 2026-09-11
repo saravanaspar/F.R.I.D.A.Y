@@ -66,7 +66,15 @@ export interface PackageSourceInput {
   readonly signal?: AbortSignal | undefined;
 }
 
+export interface GeneratedArtifactInput {
+  readonly fileName: string;
+  readonly mimeType?: string | undefined;
+  readonly bytes: Uint8Array;
+}
+
 export interface ArtifactService {
+  /** Persist a host-generated result without routing through channel attachment ingestion. */
+  storeGenerated(input: GeneratedArtifactInput): Promise<ArtifactRecord>;
   ingestChannelAttachment(
     principal: ArtifactChannelPrincipal,
     attachment: ArtifactAttachment,

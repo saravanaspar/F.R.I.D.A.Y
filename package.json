@@ -48,6 +48,7 @@
   },
   "dependencies": {
     "@friday/client-protocol": "1.0.4",
+    "@friday/execution-targets": "1.0.4",
     "@friday/operational-errors": "1.0.4",
     "ws": "^8.18.0"
   },

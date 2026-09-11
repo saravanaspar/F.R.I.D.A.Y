@@ -10,12 +10,14 @@ import {
   WorktreeNameError,
   WorktreeRemoveError,
   WorktreeResetError,
+  WorktreePromoteError,
 } from "./errors.js";
 import { git, gitMessage } from "./git.js";
 import { parseWorktreePorcelain } from "./porcelain.js";
 import type {
   CommitWorktreeOptions,
   CommitWorktreeResult,
+  DiffWorktreeOptions,
   CreateWorktreeOptions,
   InspectWorktreeOptions,
   ListedWorktree,
@@ -24,6 +26,9 @@ import type {
   ResetWorktreeOptions,
   WorktreeInfo,
   WorktreeSnapshot,
+  WorktreeDiff,
+  PromoteWorktreeOptions,
+  PromoteWorktreeResult,
 } from "./types.js";
 
 const MAX_NAME_ATTEMPTS = 26;
@@ -490,4 +495,177 @@ export async function commitWorktree(options: CommitWorktreeOptions): Promise<Co
   if (!after.clean) throw new WorktreeCommitError("Candidate commit completed but the worktree is still dirty");
   if (after.head === before.head) throw new WorktreeCommitError("Candidate commit did not advance worktree HEAD");
   return { directory: located.target, commit: after.head, changed: true };
+}
+
+
+export async function diffWorktree(options: DiffWorktreeOptions): Promise<WorktreeDiff> {
+  options.signal?.throwIfAborted();
+  let located: LocatedWorktree;
+  try {
+    located = await findListedWorktree(options.repository, options.directory, options.signal);
+  } catch (error) {
+    if (error instanceof WorktreeRemoveError) throw new WorktreeInspectError(error.message);
+    throw error;
+  }
+  let context: TrustedGitContext;
+  try {
+    context = await trustedGitContext(located, options.signal);
+  } catch (error) {
+    if (error instanceof WorktreeTrustError) throw new WorktreeInspectError(error.message);
+    throw error;
+  }
+  const status = await gitInWorktree(
+    context,
+    ["-c", "core.fsmonitor=false", "status", "--porcelain=v1", "--untracked-files=all"],
+    options.signal,
+  );
+  if (status.code !== 0) throw new WorktreeInspectError(gitMessage(status, "Failed to inspect worktree status"));
+  const diff = await gitInWorktree(
+    context,
+    ["diff", "--no-ext-diff", "--binary", "HEAD", "--", "."],
+    options.signal,
+  );
+  if (diff.code !== 0) throw new WorktreeInspectError(gitMessage(diff, "Failed to render worktree diff"));
+  return Object.freeze({ directory: located.target, patch: diff.stdout, status: status.stdout });
+}
+
+export async function promoteWorktree(options: PromoteWorktreeOptions): Promise<PromoteWorktreeResult> {
+  options.signal?.throwIfAborted();
+  if (options.strategy !== "merge" && options.strategy !== "cherry-pick") {
+    throw new WorktreePromoteError(`Unsupported worktree promotion strategy: ${String(options.strategy)}`);
+  }
+
+  let located: LocatedWorktree;
+  try {
+    located = await findListedWorktree(options.repository, options.directory, options.signal);
+  } catch (error) {
+    if (error instanceof WorktreeRemoveError) throw new WorktreePromoteError(error.message);
+    throw error;
+  }
+  if (located.entry.detached) throw new WorktreePromoteError("Candidate worktree must be branch-backed before promotion");
+
+  let context: TrustedGitContext;
+  try {
+    context = await trustedGitContext(located, options.signal);
+  } catch (error) {
+    if (error instanceof WorktreeTrustError) throw new WorktreePromoteError(error.message);
+    throw error;
+  }
+  let candidate: WorktreeSnapshot;
+  try {
+    candidate = await inspectLocatedWorktree(located, context, options.signal);
+  } catch (error) {
+    if (error instanceof WorktreeInspectError) throw new WorktreePromoteError(error.message);
+    throw error;
+  }
+  if (!candidate.clean) throw new WorktreePromoteError("Candidate worktree must be clean and committed before promotion");
+
+  const primaryStatus = await git(
+    located.primary,
+    ["-c", "core.fsmonitor=false", "status", "--porcelain=v1", "--untracked-files=all"],
+    options.signal,
+  );
+  if (primaryStatus.code !== 0) throw new WorktreePromoteError(gitMessage(primaryStatus, "Failed to inspect primary worktree"));
+  if (primaryStatus.stdout.trim()) throw new WorktreePromoteError("Primary worktree must be clean before promotion");
+
+  const primaryHeadResult = await git(located.primary, ["rev-parse", "--verify", "HEAD^{commit}"], options.signal);
+  if (primaryHeadResult.code !== 0 || !primaryHeadResult.stdout.trim()) {
+    throw new WorktreePromoteError(gitMessage(primaryHeadResult, "Failed to resolve primary worktree HEAD"));
+  }
+  const previousHead = primaryHeadResult.stdout.trim();
+  const candidateHead = candidate.head;
+  if (previousHead === candidateHead) {
+    return Object.freeze({
+      repository: located.primary,
+      directory: located.target,
+      strategy: options.strategy,
+      previousHead,
+      head: previousHead,
+      candidateHead,
+      changed: false,
+      commits: Object.freeze([]),
+    });
+  }
+
+  const alreadyIntegrated = await git(located.primary, ["merge-base", "--is-ancestor", candidateHead, previousHead], options.signal);
+  if (alreadyIntegrated.code === 0) {
+    return Object.freeze({
+      repository: located.primary,
+      directory: located.target,
+      strategy: options.strategy,
+      previousHead,
+      head: previousHead,
+      candidateHead,
+      changed: false,
+      commits: Object.freeze([]),
+    });
+  }
+  if (alreadyIntegrated.code !== 1) {
+    throw new WorktreePromoteError(gitMessage(alreadyIntegrated, "Failed to compare candidate and primary history"));
+  }
+
+  const commitListResult = await git(
+    located.primary,
+    ["rev-list", "--reverse", `${previousHead}..${candidateHead}`],
+    options.signal,
+  );
+  if (commitListResult.code !== 0) throw new WorktreePromoteError(gitMessage(commitListResult, "Failed to resolve candidate commits"));
+  const commits = commitListResult.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  if (commits.length === 0) throw new WorktreePromoteError("Candidate does not contain any promotable commits");
+
+  if (options.strategy === "merge") {
+    const merged = await git(
+      located.primary,
+      ["-c", "core.hooksPath=/dev/null", "merge", "--ff-only", candidateHead],
+      options.signal,
+    );
+    if (merged.code !== 0) {
+      throw new WorktreePromoteError(`Fast-forward merge failed: ${gitMessage(merged, "use cherry-pick for a diverged primary branch")}`);
+    }
+  } else {
+    const picked = await git(
+      located.primary,
+      [
+        "-c", "core.hooksPath=/dev/null",
+        "-c", "commit.gpgsign=false",
+        "-c", "user.name=FRIDAY",
+        "-c", "user.email=friday@localhost",
+        "cherry-pick", "--no-gpg-sign", ...commits,
+      ],
+      options.signal,
+    );
+    if (picked.code !== 0) {
+      const failure = `Cherry-pick promotion failed: ${gitMessage(picked, "unknown Git failure")}`;
+      const aborted = await git(located.primary, ["cherry-pick", "--abort"]);
+      if (aborted.code !== 0) {
+        throw new WorktreePromoteError(`${failure}; cherry-pick abort also failed: ${gitMessage(aborted, "unknown abort failure")}`);
+      }
+      throw new WorktreePromoteError(`${failure}; cherry-pick was aborted`);
+    }
+  }
+
+  const afterHeadResult = await git(located.primary, ["rev-parse", "--verify", "HEAD^{commit}"], options.signal);
+  if (afterHeadResult.code !== 0 || !afterHeadResult.stdout.trim()) {
+    throw new WorktreePromoteError(gitMessage(afterHeadResult, "Promotion completed but primary HEAD could not be resolved"));
+  }
+  const afterStatus = await git(
+    located.primary,
+    ["-c", "core.fsmonitor=false", "status", "--porcelain=v1", "--untracked-files=all"],
+    options.signal,
+  );
+  if (afterStatus.code !== 0 || afterStatus.stdout.trim()) {
+    throw new WorktreePromoteError("Promotion completed but the primary worktree is not clean");
+  }
+  const head = afterHeadResult.stdout.trim();
+  if (head === previousHead) throw new WorktreePromoteError("Promotion did not advance primary HEAD");
+  return Object.freeze({
+    repository: located.primary,
+    directory: located.target,
+    strategy: options.strategy,
+    previousHead,
+    head,
+    candidateHead,
+    changed: true,
+    commits: Object.freeze([...commits]),
+  });
 }

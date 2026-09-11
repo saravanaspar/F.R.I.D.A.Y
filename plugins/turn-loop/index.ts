@@ -11,6 +11,7 @@ import { MODEL_CAPABILITY } from "../model/contract.js";
 import { OBSERVABILITY_CAPABILITY } from "../observability/contract.js";
 import { PERMISSIONS_TRUSTED_CAPABILITY } from "../permissions/trusted-contract.js";
 import { PROMPTS_CAPABILITY } from "../prompts/contract.js";
+import { PROJECTS_CAPABILITY } from "../projects/contract.js";
 import { RLM_CAPABILITY } from "../rlm/contract.js";
 import { ROUTING_CAPABILITY } from "../routing/contract.js";
 import { SANDBOX_CAPABILITY } from "../sandbox/contract.js";
@@ -60,6 +61,7 @@ const turnLoopPlugin: FridayPlugin = definePlugin({
     SUBAGENTS_CAPABILITY,
     AGENT_PROFILES_CAPABILITY,
     CONVERSATIONS_CAPABILITY,
+    PROJECTS_CAPABILITY,
   ],
   provides: [TURN_LOOP_CAPABILITY],
 }, (ctx) => {
@@ -84,6 +86,7 @@ const turnLoopPlugin: FridayPlugin = definePlugin({
       subagents: () => ctx.services.optional(SUBAGENTS_CAPABILITY),
       sandbox: () => ctx.services.optional(SANDBOX_CAPABILITY),
       profiles: () => ctx.services.optional(AGENT_PROFILES_CAPABILITY),
+      projects: () => ctx.services.optional(PROJECTS_CAPABILITY),
     },
   });
   ctx.effect(() => executor.dispose());
@@ -191,6 +194,8 @@ const turnLoopPlugin: FridayPlugin = definePlugin({
           senderId: turn.principal.senderId,
           ...(turn.principal.threadId === undefined ? {} : { threadId: turn.principal.threadId }),
           sharedConversationId,
+          ...(turn.projectId === undefined ? {} : { projectId: turn.projectId }),
+          ...(turn.projectTargetId === undefined ? {} : { projectTargetId: turn.projectTargetId }),
         },
         notify: target.notificationPreference === "muted"
           ? async () => undefined

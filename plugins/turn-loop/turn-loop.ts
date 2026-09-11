@@ -162,6 +162,8 @@ function normalizeTurn(turn: InboundTurn): InboundTurn {
     timestamp: Number.isFinite(turn.timestamp) && !Number.isNaN(new Date(turn.timestamp).getTime())
       ? turn.timestamp
       : Date.now(),
+    ...(turn.projectId === undefined ? {} : { projectId: boundedOpaque(turn.projectId, "turn projectId", 96) }),
+    ...(turn.projectTargetId === undefined ? {} : { projectTargetId: boundedOpaque(turn.projectTargetId, "turn projectTargetId", 128) }),
     ...(turn.resumeDestinationId === undefined
       ? {}
       : { resumeDestinationId: boundedOpaque(turn.resumeDestinationId, "turn resumeDestinationId", 264) }),
@@ -594,6 +596,8 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
                   senderId: turn.principal.senderId,
                   ...(turn.principal.threadId === undefined ? {} : { threadId: turn.principal.threadId }),
                   ...(turn.principal.sharedConversationId === undefined ? {} : { sharedConversationId: turn.principal.sharedConversationId }),
+                  ...(turn.projectId === undefined ? {} : { projectId: turn.projectId }),
+                  ...(turn.projectTargetId === undefined ? {} : { projectTargetId: turn.projectTargetId }),
                 },
                 run: async (signal, report, jobContext) => {
                   const findings = await collaborationReady;
@@ -670,6 +674,8 @@ export function createTurnRuntime(options: TurnRuntimeOptions): TurnRuntimeServi
                       senderId: turn.principal.senderId,
                       ...(turn.principal.threadId === undefined ? {} : { threadId: turn.principal.threadId }),
                       ...(turn.principal.sharedConversationId === undefined ? {} : { sharedConversationId: turn.principal.sharedConversationId }),
+                      ...(turn.projectId === undefined ? {} : { projectId: turn.projectId }),
+                      ...(turn.projectTargetId === undefined ? {} : { projectTargetId: turn.projectTargetId }),
                     },
                     run: async (signal, report, jobContext) => {
                       const delegatedDecision: RoutingDecision = Object.freeze({

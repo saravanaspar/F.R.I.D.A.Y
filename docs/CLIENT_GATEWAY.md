@@ -67,6 +67,30 @@ After authentication, Phase 2 resource requests use `POST` JSON bodies containin
 
 `/v1/session-jobs/redirect` accepts an active `jobId` and new instruction text. It records a durable JobDirective and returns redacted directive metadata; the existing Session Jobs runner delivers the full instruction to the Agent at its next safe steering boundary.
 
+## Project and execution-target APIs
+
+Phase 3 keeps Project identity and path policy on the server. Authenticated clients select a Project and request an operation; they do not send an arbitrary canonical checkout as an execution workspace. The first vertical slice exposes:
+
+```text
+/v1/projects/list
+/v1/projects/create
+/v1/projects/update
+/v1/projects/remove
+/v1/projects/resolve-target
+/v1/projects/worktrees/create
+/v1/projects/worktrees/inspect
+/v1/projects/worktrees/diff
+/v1/projects/worktrees/publish-diff
+/v1/projects/worktrees/commit
+/v1/projects/worktrees/remove
+```
+
+`/v1/projects/resolve-target` returns the server-side target decision and whether a write requires an isolated worktree. Coding workspace routes delegate to the existing hardened Worktrees capability; worktree directories must stay outside the canonical Project root. `/v1/projects/worktrees/publish-diff` persists the complete trusted patch through Artifacts when available.
+
+`/v1/turns` additionally accepts optional `projectId` and `projectTargetId`. If `projectId` is omitted, the selected Agent Profile may supply its `defaultProjectId`. The server validates the Project and target before admitting the turn; clients never choose an arbitrary execution directory. For Agent Session work, Turn Loop persists Project/target metadata in the detached Session Job, so closing the HTTP/WebSocket client does not own or cancel the coding job. Sandbox execution is the default; explicitly permitted Core Host targets route existing shell/edit/process/IPython tools directly through Execution while preserving Permissions. Remote Computer Node targets are represented in the shared contract but intentionally fail closed until Phase 4 implements Computer Nodes.
+
+Canonical repository integration is not exposed as an unguarded client mutation. The Agent/System `project_promote` path performs the permission check and then delegates clean fast-forward merge or cherry-pick to Worktrees.
+
 ## Verification
 
 Run the focused Phase 1 tests while developing:

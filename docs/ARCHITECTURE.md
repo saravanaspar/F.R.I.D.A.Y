@@ -18,3 +18,12 @@ Linux is first-class through a managed Sway/wlroots session, Chromium/Playwright
 See the [roadmap](ROADMAP.md), [plugin development guide](PLUGIN_DEVELOPMENT.md), and [plugin cookbook](plugins/cookbook.md) before proposing a new owner.
 
 For gateway startup, pairing, reverse-proxy, and WebSocket operations, see [`CLIENT_GATEWAY.md`](CLIENT_GATEWAY.md).
+
+## Projects and execution targets
+
+Projects are durable server-owned records, not client-side path aliases. A Project binds an identity to a canonical root, repository metadata, an optional preferred Computer Node, and an execution policy. The provider-neutral `@friday/execution-targets` package decides whether a requested shell/edit/process/Git operation is allowed on Sandbox, Core Host, or a named Computer Node and whether a write must use an isolated worktree.
+
+The Projects plugin does not reimplement Git or shell execution. It delegates coding workspace lifecycle, trusted diff/commit operations, and canonical-repository promotion to Worktrees, while Sandbox/Execution/Tools remain the authorities that actually run code. Turn Loop asks Projects for a stable job-owned workspace before constructing core tools, so shell, edit, process, and IPython automatically inherit the resolved target and working directory. Sandbox remains the default; Core Host execution must be explicitly permitted by Project policy, and Computer Node targets fail closed until Phase 4 supplies that authority.
+
+Project coding jobs are restart-safe rather than client-owned. Detached Session Jobs persist the Project and requested target, deterministic job ownership reopens the same isolated worktree after restart, configured test/build commands run through the same target-aware bash capability, and complete diffs can be stored in Artifacts while only bounded previews are added to conversational output. Candidate commits cannot change the canonical repository through the ordinary edit path. Promotion is a distinct permission-gated operation and Worktrees requires both candidate and canonical worktrees to be clean; fast-forward merge is preferred and cherry-pick is available for a diverged clean primary. This keeps authorization identity, Project/workspace identity, and execution-target selection separate.
+

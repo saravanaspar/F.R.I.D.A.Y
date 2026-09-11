@@ -2,6 +2,7 @@ import type { Capability, Contribution, Hook } from "../capabilities/protocol.js
 import { defineCapability, defineContribution, defineHook } from "../capabilities/protocol.js";
 import type { RoutingDecision } from "../routing/contract.js";
 import type { SessionJobDirectiveMessage } from "../session-jobs/contract.js";
+import type { ExecutionTarget } from "@friday/execution-targets";
 
 export type TurnPrincipalAuthority = "local" | "channel";
 
@@ -68,6 +69,10 @@ export interface InboundTurn {
   readonly delegationDepth?: number | undefined;
   /** Trusted provider/internal metadata preserved across durable ingress. */
   readonly channelContext?: TurnChannelContext | undefined;
+  /** Host-selected Project. The server validates identity/path/policy before Agent execution. */
+  readonly projectId?: string | undefined;
+  /** Optional host-selected execution target override, e.g. sandbox or core-host. */
+  readonly projectTargetId?: string | undefined;
   /** Host-selected persistent session destination for restart/internal explicit Agent work only. */
   readonly destinationId?: string | undefined;
   /** Host-owned destination override used only for durable restart resumption. */
@@ -128,6 +133,10 @@ export interface AgentToolExecutionContext {
   readonly notificationPreference?: "all" | "important" | "muted" | undefined;
   readonly approvalPolicy?: string | undefined;
   readonly permissionMode?: "ask" | "auto" | "full" | undefined;
+  readonly projectId?: string | undefined;
+  readonly projectRoot?: string | undefined;
+  readonly projectWorkspace?: string | undefined;
+  readonly projectExecutionTarget?: ExecutionTarget | undefined;
   deferAfterReply(callback: () => void | Promise<void>, durable?: TurnFinalizerDescriptor): void;
   deferOnFailure(callback: (error: unknown) => void | Promise<void>): void;
 }

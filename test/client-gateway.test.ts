@@ -1,21 +1,29 @@
+import { execFile } from "node:child_process";
 import { generateKeyPairSync, sign } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
-import { requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
+import { provideCapability, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import { CLIENT_GATEWAY_CAPABILITY } from "../plugins/clients/contract.js";
 import clientsPlugin from "../plugins/clients/index.js";
 import agentProfilesPlugin from "../plugins/agent-profiles/index.js";
 import conversationsPlugin from "../plugins/conversations/index.js";
+import sessionResourcesPlugin from "../plugins/session-resources/index.js";
+import executionPlugin from "../plugins/execution/index.js";
+import worktreesPlugin from "../plugins/worktrees/index.js";
+import projectsPlugin from "../plugins/projects/index.js";
 import { DEVICES_CAPABILITY, type DeviceDescriptor } from "../plugins/devices/contract.js";
 import devicesPlugin from "../plugins/devices/index.js";
 import { EVENTS_CAPABILITY } from "../plugins/events/contract.js";
 import { createEventsPlugin } from "../plugins/events/index.js";
+import { TURN_LOOP_CAPABILITY, type InboundTurn } from "../plugins/turn-loop/contract.js";
 import { PluginTestHost } from "./helpers/plugin-host.js";
 import { WebSocket } from "ws";
 
+const execFileAsync = promisify(execFile);
 const roots: string[] = [];
 const originalStateDir = process.env.FRIDAY_STATE_DIR;
 
@@ -195,4 +203,118 @@ describe("Phase 1 client gateway", () => {
     await gateway.stop();
     await host.dispose();
   });
+
+  it("exposes authenticated Phase 3 project resolution and isolated worktree APIs", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "friday-client-phase3-state-"));
+    const repository = await mkdtemp(join(tmpdir(), "friday-client-phase3-repo-"));
+    const worktreeRoot = await mkdtemp(join(tmpdir(), "friday-client-phase3-worktrees-"));
+    roots.push(stateDir, repository, worktreeRoot);
+    process.env.FRIDAY_STATE_DIR = stateDir;
+    await execFileAsync("git", ["init"], { cwd: repository });
+    await execFileAsync("git", ["config", "user.email", "friday-test@example.com"], { cwd: repository });
+    await execFileAsync("git", ["config", "user.name", "FRIDAY Test"], { cwd: repository });
+    await writeFile(join(repository, "base.txt"), "base\n");
+    await execFileAsync("git", ["add", "base.txt"], { cwd: repository });
+    await execFileAsync("git", ["commit", "-m", "base"], { cwd: repository });
+
+    const host = new PluginTestHost();
+    await host.activatePlugin(capabilitiesPlugin);
+    await host.activatePlugin(createEventsPlugin({ autoStartWorker: false }));
+    await host.activatePlugin(devicesPlugin);
+    await host.activatePlugin(sessionResourcesPlugin);
+    await host.activatePlugin(executionPlugin);
+    await host.activatePlugin(worktreesPlugin);
+    await host.activatePlugin(agentProfilesPlugin);
+    await host.activatePlugin(conversationsPlugin);
+    await host.activatePlugin(projectsPlugin);
+    const submittedTurns: InboundTurn[] = [];
+    provideCapability(TURN_LOOP_CAPABILITY, {
+      async submit(turn: InboundTurn) {
+        submittedTurns.push(turn);
+        return { status: "completed" as const, messageId: turn.id, sessionId: "phase3-session" };
+      },
+      status: () => ({ activeTurns: 0, queuedConversations: 0, lockedSessions: 0, completedInProcess: submittedTurns.length }),
+    });
+    await host.activatePlugin(clientsPlugin);
+    await host.completePluginBootstrap();
+
+    const devices = requireCapability(DEVICES_CAPABILITY);
+    const gateway = requireCapability(CLIENT_GATEWAY_CAPABILITY);
+    const keys = generateKeyPairSync("ed25519");
+    const descriptor: DeviceDescriptor = {
+      deviceId: "desktop-phase3",
+      name: "Phase 3 client",
+      type: "test",
+      publicKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    };
+    const pairing = await devices.beginPairing(descriptor);
+    await devices.approvePairing(pairing.pairingId);
+    const status = await gateway.start({ port: 0 });
+    const base = `http://127.0.0.1:${status.port}`;
+    const post = async (path: string, input: Record<string, unknown>) => {
+      const challenge = await devices.issueChallenge(descriptor.deviceId);
+      const signature = sign(null, Buffer.from(challenge.challenge), keys.privateKey).toString("base64url");
+      const response = await fetch(`${base}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceId: descriptor.deviceId, challenge: challenge.challenge, signature, ...input }),
+      });
+      expect(response.status).toBeLessThan(400);
+      return response.json() as Promise<Record<string, unknown>>;
+    };
+
+    const created = await post("/v1/projects/create", {
+      id: "atlas",
+      name: "Atlas",
+      rootPath: repository,
+      repositoryKind: "git",
+      validation: { test: "printf phase3-test", build: "printf phase3-build" },
+      policy: {
+        defaultTargetId: "sandbox",
+        allowedTargetIds: ["sandbox"],
+        requireWorktreeForWrites: true,
+        worktreeRoot,
+      },
+    });
+    expect(created.project).toMatchObject({ id: "atlas", rootPath: repository });
+
+    const plan = await post("/v1/projects/resolve-target", { projectId: "atlas", operation: "edit", access: "write" });
+    expect(plan.plan).toMatchObject({ projectId: "atlas", requiresWorktree: true, target: { kind: "sandbox" } });
+
+    const developer = await post("/v1/agent-profiles/create", {
+      name: "Developer",
+      roleInstructions: "Implement and validate Project changes.",
+      defaultProjectId: "atlas",
+    });
+    const developerId = (developer.profile as { id: string }).id;
+    const conversation = await post("/v1/conversations/create", {
+      type: "group",
+      title: "Atlas",
+      participants: [{ kind: "user", id: "operator" }, { kind: "agent", id: developerId }],
+    });
+    const conversationId = (conversation.conversation as { id: string }).id;
+    const turnResponse = await post("/v1/turns", {
+      conversationId,
+      agentProfileId: developerId,
+      text: "make the change and run validation",
+    });
+    expect(turnResponse.result).toMatchObject({ status: "completed", sessionId: "phase3-session" });
+    expect(submittedTurns).toHaveLength(1);
+    expect(submittedTurns[0]).toMatchObject({ projectId: "atlas", sessionAffinityId: expect.any(String) });
+
+    const workspaceResponse = await post("/v1/projects/worktrees/create", { projectId: "atlas", name: "client-slice" });
+    const directory = (workspaceResponse.workspace as { directory: string }).directory;
+    expect(directory.startsWith(worktreeRoot)).toBe(true);
+    await writeFile(join(directory, "base.txt"), "changed through client project workspace\n");
+
+    const diff = await post("/v1/projects/worktrees/diff", { projectId: "atlas", directory });
+    expect((diff.diff as { patch: string }).patch).toContain("+changed through client project workspace");
+    const published = await post("/v1/projects/worktrees/publish-diff", { projectId: "atlas", directory });
+    expect((published.report as { diff: { patch: string } }).diff.patch).toContain("+changed through client project workspace");
+    await post("/v1/projects/worktrees/remove", { projectId: "atlas", directory, force: true, deleteBranch: true });
+
+    await gateway.stop();
+    await host.dispose();
+  });
+
 });

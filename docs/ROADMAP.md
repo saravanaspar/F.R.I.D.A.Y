@@ -114,6 +114,8 @@ Implementation notes: profile selection is host-owned on `InboundTurn`; untruste
 
 Tracking: [issue #21](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/21).
 
+Status: **complete**. Project records persist canonical server-owned roots, validation commands, repository metadata, preferred Computer Node identity, and fail-closed execution policy. `@friday/execution-targets` resolves provider-neutral Sandbox/Core Host/Computer Node targets; Turn Loop resolves each Project-aware Agent job to a stable workspace and target before tool construction; existing shell, edit, process, and IPython tools execute against Sandbox or explicitly allowed Core Host targets without duplicating an executor. Write-oriented coding jobs receive deterministic isolated Git worktrees that are reused after restart, publish trusted full diffs as Artifacts, and can commit and promote clean candidate history by authorized fast-forward merge or cherry-pick. Client turns may select a Project/target directly or inherit an Agent Profile default, while detached Session Jobs preserve Project context across client disconnect/restart. Actual Computer Node execution remains Phase 4 because that machine-control authority does not exist until the Computer capability is introduced.
+
 Add `plugins/projects` and `packages/execution-targets`.
 
 A Project records identity, root path, preferred Computer Node, repository metadata, and policy. An `ExecutionTarget` routes existing shell, edit, process, and Git tools to Sandbox, Core Host, or Computer Node. Coding jobs use job-specific Git worktrees, run tests/builds, expose diffs and artifacts, and merge/cherry-pick only after authorization.

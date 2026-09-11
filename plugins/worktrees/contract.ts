@@ -12,6 +12,8 @@ export interface WorktreesService {
   readonly removeWorktree: WorktreesRuntime["removeWorktree"];
   readonly trustedWorktreeReadOnlyMounts: WorktreesRuntime["trustedWorktreeReadOnlyMounts"];
   readonly commitWorktree: WorktreesRuntime["commitWorktree"];
+  readonly diffWorktree: WorktreesRuntime["diffWorktree"];
+  readonly promoteWorktree: WorktreesRuntime["promoteWorktree"];
 }
 
 export const WORKTREES_CAPABILITY: Capability<WorktreesService> =

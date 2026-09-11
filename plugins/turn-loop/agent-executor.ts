@@ -11,6 +11,7 @@ import type { ModelService } from "../model/contract.js";
 import type { ObservabilityService } from "../observability/contract.js";
 import { conversationScope, ownerScopeAllows, ownerStateRoot, principalScope, type PrincipalOrigin } from "../principal-scope.js";
 import type { PromptsService } from "../prompts/contract.js";
+import type { ProjectsService } from "../projects/contract.js";
 import type { RlmService } from "../rlm/contract.js";
 import type { SandboxService } from "../sandbox/contract.js";
 import type { SessionResourcesService } from "../session-resources/contract.js";
@@ -100,6 +101,7 @@ export interface AgentTurnExecutorOptionalDependencies {
   subagents(): SubagentsService | undefined;
   sandbox(): SandboxService | undefined;
   profiles(): AgentProfilesService | undefined;
+  projects(): ProjectsService | undefined;
 }
 
 export interface AgentTurnExecutorDependencies {
@@ -638,7 +640,9 @@ export function createAgentTurnExecutor(
         if (enabledPlugins.length > 0 && !enabledPlugins.includes("tools")) return [];
         const recursionAllowed = enabledPlugins.length === 0 || enabledPlugins.includes("rlm") || enabledPlugins.includes("subagents");
         const permissionMode = executionContext?.permissionMode;
-        const policyKey = JSON.stringify([recursionAllowed, permissionMode ?? "default"]);
+        const toolCwd = executionContext?.cwd ?? cwd;
+        const target = executionContext?.projectExecutionTarget;
+        const policyKey = JSON.stringify([recursionAllowed, permissionMode ?? "default", toolCwd, target?.id ?? "sandbox-default"]);
         const cached = coreToolsByPolicy.get(policyKey);
         if (cached) return [...cached];
         const ipythonOptions = {
@@ -649,8 +653,9 @@ export function createAgentTurnExecutor(
         const toolOptions: ToolOptions = {
           ipython: ipythonOptions,
           ...(permissionMode === undefined ? {} : { permissionMode }),
+          ...(target === undefined ? {} : { executionTarget: target }),
         };
-        const tools = Object.freeze(Object.values(dependencies.tools.createAllTools(cwd, toolOptions)) as AgentTool[]);
+        const tools = Object.freeze(Object.values(dependencies.tools.createAllTools(toolCwd, toolOptions)) as AgentTool[]);
         coreToolsByPolicy.set(policyKey, tools);
         return [...tools];
       };
@@ -695,7 +700,7 @@ export function createAgentTurnExecutor(
             })
           : [];
         const promptOptions: Parameters<PromptsService["buildSystemPrompt"]>[0] = {
-          cwd,
+          cwd: executionContext?.cwd ?? cwd,
           selectedTools: tools.map((tool) => tool.name),
           skills: promptSkills(executionContext),
           allowRecursion: Boolean(hostHandlers) && ((executionContext?.enabledPlugins?.length ?? 0) === 0 || executionContext?.enabledPlugins?.includes("rlm") === true || executionContext?.enabledPlugins?.includes("subagents") === true),
@@ -899,20 +904,39 @@ export function createAgentTurnExecutor(
           const profileId = turnContext?.turn.agentProfileId;
           const profile = profileId === undefined ? undefined : dependencies.optional?.profiles?.()?.get(profileId);
           if (profileId !== undefined && !profile) throw new Error(`agent profile not found: ${profileId}`);
+
+          const selectedProjectId = turnContext?.turn.projectId ?? profile?.defaultProjectId;
+          const projects = dependencies.optional?.projects?.();
+          if (selectedProjectId !== undefined && !projects) throw new Error(`projects capability is unavailable for project ${selectedProjectId}`);
+          const projectWorkspace = selectedProjectId === undefined
+            ? undefined
+            : await projects!.acquireAgentWorkspace({
+                projectId: selectedProjectId,
+                ownerId: turnContext?.turn.resumedJobId ?? jobId ?? sessionId,
+                ...(turnContext?.turn.projectTargetId === undefined ? {} : { targetId: turnContext.turn.projectTargetId }),
+                ...(signal === undefined ? {} : { signal }),
+              });
+          const effectiveCwd = projectWorkspace?.workspacePath ?? cwd;
           const memoryScopes = profile === undefined
-            ? Object.freeze(["global:user", "local"])
-            : Object.freeze([...new Set(["global:user", profile.memoryScope, ...(profile.defaultProjectId ? [`project:${profile.defaultProjectId}`] : []), "local"])]);
+            ? Object.freeze(["global:user", ...(selectedProjectId ? [`project:${selectedProjectId}`] : []), "local"])
+            : Object.freeze([...new Set(["global:user", profile.memoryScope, ...(selectedProjectId ? [`project:${selectedProjectId}`] : []), "local"])]);
           const permissionMode = profile?.approvalPolicy === "ask" || profile?.approvalPolicy === "auto" || profile?.approvalPolicy === "full"
             ? profile.approvalPolicy
             : undefined;
           const turnOwnerScope = turnContext === undefined ? session.getHeader()?.ownerScope : principalScope(turnContext.turn.principal);
           const extensionContext: AgentToolExecutionContext = {
-            cwd,
+            cwd: effectiveCwd,
             sessionId,
             ...(turnOwnerScope === undefined ? {} : { ownerScope: turnOwnerScope }),
             ...(session.getSessionArtifactDir() === undefined ? {} : { sessionArtifactDir: session.getSessionArtifactDir() }),
             ...(turnContext === undefined ? {} : { turn: turnContext.turn }),
             ...(jobId === undefined ? {} : { jobId }),
+            ...(projectWorkspace === undefined ? {} : {
+              projectId: projectWorkspace.projectId,
+              projectRoot: projectWorkspace.projectRoot,
+              projectWorkspace: projectWorkspace.workspacePath,
+              projectExecutionTarget: projectWorkspace.target,
+            }),
             ...(profile === undefined ? {} : {
               agentProfileId: profile.id,
               memoryScopes,
@@ -988,7 +1012,7 @@ export function createAgentTurnExecutor(
                 }
                 for (const mount of prepared.mounts ?? []) {
                   if (!optionalSandbox) throw new Error(`Agent input ${contribution.id} requires sandbox support for ${mount.source}`);
-                  registerExternalMount(optionalSandbox, cwd, mount.source, runMountDisposers);
+                  registerExternalMount(optionalSandbox, extensionContext.cwd, mount.source, runMountDisposers);
                 }
                 if (prepared.dispose) inputDisposers.push(prepared.dispose);
               }
@@ -1059,6 +1083,29 @@ export function createAgentTurnExecutor(
                   runId: `run-${randomUUID()}`,
                   ownerKind: (runtimeOptions.depth ?? 0) > 0 ? "subagent" : "main-agent",
                 }, executePrompt);
+            let finalText = textResult;
+            if (projectWorkspace?.isolated && projects) {
+              try {
+                const report = await projects.publishCodingWorkspaceDiff(projectWorkspace.projectId, projectWorkspace.workspacePath, signal);
+                if (report.diff.patch.trim() || report.diff.status.trim()) {
+                  const maximum = 8_000;
+                  const preview = report.diff.patch.length <= maximum
+                    ? report.diff.patch
+                    : `${report.diff.patch.slice(0, maximum)}\n\n[project diff truncated; use ${report.artifactRef ?? "project_diff"} for the complete patch]`;
+                  finalText = [
+                    textResult,
+                    "",
+                    `Project workspace: ${projectWorkspace.workspacePath}`,
+                    `Project target: ${projectWorkspace.target.id}`,
+                    report.artifactRef ? `Project diff artifact: ${report.artifactRef}` : "Project diff:",
+                    preview || report.diff.status,
+                  ].join("\n");
+                }
+              } catch (error) {
+                reportOperationalError({ component: "turn-loop", operation: `publish Project diff for ${projectWorkspace.projectId}`, error, severity: "warn" });
+                finalText = `${textResult}\n\n[Project diff unavailable: ${error instanceof Error ? error.message : String(error)}]`;
+              }
+            }
             if (turnContext !== undefined) {
               const afterTurn = dependencies.afterTurnContributions?.() ?? [];
               if (afterTurn.length > 0) {
@@ -1085,7 +1132,7 @@ export function createAgentTurnExecutor(
             const afterReply = combinedAfterReply(afterReplyCallbacks);
             const afterFailure = combinedAfterFailure(afterFailureCallbacks);
             return Object.freeze({
-              text: textResult,
+              text: finalText,
               ...(afterReply === undefined ? {} : { afterReply }),
               ...(afterReplyFinalizers.length === 0 ? {} : {
                 afterReplyFinalizers: Object.freeze(afterReplyFinalizers.map((entry) => Object.freeze({

@@ -284,6 +284,8 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
         text: continuationText,
         timestamp: Date.now(),
         ...(job.agentProfileId === undefined ? {} : { agentProfileId: job.agentProfileId }),
+        ...(job.origin.projectId === undefined ? {} : { projectId: job.origin.projectId }),
+        ...(job.origin.projectTargetId === undefined ? {} : { projectTargetId: job.origin.projectTargetId }),
         resumeDestinationId: job.destinationId,
         resumedJobId: job.id,
         reply: async (text: string) => {
