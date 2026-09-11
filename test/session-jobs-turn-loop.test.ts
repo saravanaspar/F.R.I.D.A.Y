@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { EventInput, EventRecord, EventsService } from "../plugins/events/contract.js";
+import { createComputerService } from "../plugins/computer/service.js";
+import type { ComputerNodeAdapter, ComputerObservation } from "../plugins/computer/contract.js";
 import type { PermissionsTrustedService } from "../plugins/permissions/trusted-contract.js";
 import type { RoutingService } from "../plugins/routing/contract.js";
 import { SessionJobManager } from "../plugins/session-jobs/manager.js";
@@ -150,4 +152,146 @@ describe("Turn Loop detached session jobs", () => {
     await jobs.close();
     await rm(root, { recursive: true, force: true });
   });
+  it("keeps the same Session Job alive across a login-wall human takeover and resumes from the fresh hand-back observation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "friday-turn-computer-takeover-"));
+    const eventService = events();
+    let signedIn = false;
+    let browserActionCount = 0;
+    let observationCount = 0;
+    let browserStarted!: () => void;
+    const browserStartedPromise = new Promise<void>((resolve) => { browserStarted = resolve; });
+    const observation = (screenId: string): ComputerObservation => ({
+      observedAt: new Date().toISOString(),
+      screenId,
+      url: signedIn ? "https://example.com/account" : "https://example.com/login",
+      domSummary: signedIn ? "signed-in account page; protected values omitted" : "login wall; password and OTP fields omitted",
+      accessibilitySummary: signedIn ? "account main document" : "sign-in form with protected fields",
+      tabs: [{ id: "tab-1", title: signedIn ? "Account" : "Sign in", url: signedIn ? "https://example.com/account" : "https://example.com/login", active: true }],
+      screenshotArtifactRef: signedIn ? "artifact:after-login-safe" : "artifact:login-wall-safe",
+      processes: [{ pid: 123, name: "chromium" }],
+    });
+    const adapter: ComputerNodeAdapter = {
+      descriptor: {
+        id: "desk-login",
+        label: "Login test Computer",
+        platform: "test",
+        capabilities: {
+          executionOperations: ["shell", "edit", "process", "git"],
+          browser: true, playwright: true, accessibility: true, cdp: true, visualControl: true,
+          screenCapture: true, rawInput: true, virtualDisplays: true, managedLifecycle: false,
+        },
+      },
+      async snapshot() {
+        return {
+          availability: "online",
+          resources: { totalMemoryMb: 8_192, availableMemoryMb: 6_144, cpuPercent: 10, browserRendererCount: 2, screenWorkloadPercent: 10 },
+          screens: [{ id: "human-1", label: "Human", kind: "human" }, { id: "agent-1", label: "Agent", kind: "agent" }],
+          browser: {
+            running: true, profileId: "shared-profile", contextId: "shared-context", persistentProfile: true,
+            windows: [
+              { id: "window-human", owner: "human", screenId: "human-1", tabIds: [] },
+              { id: "window-friday", owner: "friday", screenId: "agent-1", tabIds: ["tab-1"] },
+            ],
+            tabs: [{ id: "tab-1", title: signedIn ? "Account" : "Sign in", url: signedIn ? "https://example.com/account" : "https://example.com/login", active: true }],
+          },
+        };
+      },
+      async observeScreen(screenId) { observationCount += 1; return observation(screenId); },
+      async runBrowserAction(request) {
+        browserActionCount += 1;
+        browserStarted();
+        await new Promise<void>((_resolve, reject) => {
+          request.signal?.addEventListener("abort", () => reject(request.signal?.reason ?? new Error("aborted")), { once: true });
+        });
+        throw new Error("unreachable");
+      },
+    };
+    const computer = createComputerService({ idFactory: (() => { let value = 0; return () => `takeover-${++value}`; })(), pollIntervalMs: 60_000 });
+    await computer.registerNode(adapter);
+    const jobs = await SessionJobManager.open({
+      stateDir: join(root, "jobs"),
+      events: eventService,
+      idFactory: () => "job-login-takeover",
+      resolveLabel: () => "Login takeover",
+      progressNotifyIntervalMs: 0,
+    });
+    const executor: TurnExecutor = {
+      id: "agent-session",
+      canHandle: () => true,
+      async execute(context) {
+        const jobId = context.jobId;
+        if (!jobId) throw new Error("expected durable Session Job id");
+        const grant = await computer.waitForScreen({ ownerId: jobId, preferredNodeId: "desk-login", requireBrowser: true }, context.signal);
+        const initial = await computer.observeScreen(grant.screenLease.id, jobId, grant.controlLease.generation, context.signal);
+        expect(initial.url).toContain("/login");
+        try {
+          await computer.runBrowserAction(
+            grant.screenLease.id, jobId, grant.controlLease.generation,
+            { kind: "click", target: "Sign in" }, context.signal,
+          );
+          throw new Error("expected human takeover to interrupt the stale browser action");
+        } catch (error) {
+          const control = computer.controlLease(grant.screenLease.id);
+          if (!control || control.generation <= grant.controlLease.generation) throw error;
+          const resumed = await computer.waitForAgentControl(grant.screenLease.id, jobId, grant.controlLease.generation, context.signal);
+          if (!resumed.resumedAfterTakeover) throw new Error("expected takeover resume");
+          expect(resumed.observation).toMatchObject({
+            url: "https://example.com/account",
+            domSummary: "signed-in account page; protected values omitted",
+            screenshotArtifactRef: "artifact:after-login-safe",
+          });
+          await computer.releaseScreen(grant.screenLease.id, jobId);
+          return { text: "Login complete; resumed from fresh observation", sessionId: "computer-login" };
+        }
+      },
+    };
+    const routing: RoutingService = {
+      async route(message) {
+        return { messageId: message.id, destination: { kind: "session", id: "session:computer-login" }, execution: { profile: "agent" }, confidence: 1 };
+      },
+      subscribe: () => () => {},
+      recentContext: () => [],
+    };
+    const replies: string[] = [];
+    const turn: InboundTurn = {
+      id: "login-turn",
+      principal: { authority: "channel", channel: "telegram", accountId: "main", conversationId: "chat", senderId: "alice" },
+      text: "finish the account setup",
+      projectId: "atlas",
+      projectTargetId: "computer:desk-login",
+      timestamp: Date.now(),
+      reply: async (text) => { replies.push(text); },
+    };
+    const runtime = createTurnRuntime({ routing, permissions: permissions(), events: eventService, executors: () => [executor], sessionJobs: () => jobs });
+
+    const submitted = await runtime.submit(turn);
+    expect(submitted.status).toBe("completed");
+    await browserStartedPromise;
+    const lease = computer.screenLeases()[0];
+    expect(lease).toBeDefined();
+    const jobBeforeTakeover = jobs.get("job-login-takeover");
+    expect(jobBeforeTakeover?.status).toBe("running");
+    const secretEnteredByHuman = "never-model-visible-password-otp";
+    await computer.takeOver(lease!.id, "client:desktop-login", null);
+    await waitUntil(() => computer.status().waitingForControl === 1, "Agent control pause");
+    expect(jobs.get("job-login-takeover")?.status).toBe("running");
+
+    signedIn = true;
+    await computer.recordHumanActivity(lease!.id, "client:desktop-login");
+    const handBack = await computer.handBack(lease!.id, "client:desktop-login");
+    expect(handBack.observation.url).toBe("https://example.com/account");
+    await waitUntil(() => jobs.get("job-login-takeover")?.status === "completed", "same Session Job completion after hand-back");
+    expect(jobs.list()).toHaveLength(1);
+    expect(jobs.get("job-login-takeover")).toMatchObject({ status: "completed", sessionId: "computer-login" });
+    expect(browserActionCount).toBe(1);
+    expect(observationCount).toBe(2);
+    expect(JSON.stringify(jobs.get("job-login-takeover"))).not.toContain(secretEnteredByHuman);
+    expect(replies.join("\n")).not.toContain(secretEnteredByHuman);
+    expect(replies.at(-1)).toContain("Login complete; resumed from fresh observation");
+
+    await jobs.close();
+    await computer.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
 });

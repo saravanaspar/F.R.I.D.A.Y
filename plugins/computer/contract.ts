@@ -94,6 +94,8 @@ export interface ComputerBrowserSupervisorSnapshot {
   readonly running: boolean;
   /** Opaque provider-owned profile identifier. Never a credential or cookie path. */
   readonly profileId: string;
+  /** Opaque id for the single live browser context. Present only while the supervisor is running. */
+  readonly contextId?: string | undefined;
   readonly persistentProfile: boolean;
   readonly windows: readonly ComputerBrowserWindowSnapshot[];
   readonly tabs: readonly ComputerBrowserTabSnapshot[];
@@ -280,6 +282,18 @@ export interface ComputerHandBackResult {
   readonly observation: ComputerObservation;
 }
 
+export type ComputerAgentControlResume =
+  | Readonly<{
+      readonly resumedAfterTakeover: false;
+      readonly controlLease: ControlLease;
+    }>
+  | Readonly<{
+      readonly resumedAfterTakeover: true;
+      readonly controlLease: ControlLease;
+      /** Fresh post-hand-back observation. The interrupted action was never replayed. */
+      readonly observation: ComputerObservation;
+    }>;
+
 export interface ComputerDoctorNodeReport {
   readonly nodeId: string;
   readonly status: "ok" | "degraded" | "unavailable";
@@ -296,6 +310,7 @@ export interface ComputerDoctorReport {
 
 export interface ComputerStatusBrowserSummary {
   readonly available: boolean;
+  readonly ready: boolean;
   readonly running: boolean;
   readonly persistentProfile?: boolean | undefined;
   readonly windows?: number | undefined;
@@ -321,6 +336,8 @@ export interface ComputerStatusSnapshot {
   readonly activeScreenLeases: number;
   readonly humanTakeovers: number;
   readonly waitingRequests: number;
+  /** Agent operations paused behind an active human ControlLease. */
+  readonly waitingForControl: number;
   readonly nodeStatus: readonly ComputerNodeStatusSummary[];
 }
 
@@ -365,6 +382,16 @@ export interface ComputerService {
   recordHumanActivity(screenLeaseId: string, humanOwnerId: string): Promise<ControlLease>;
   handBack(screenLeaseId: string, humanOwnerId: string, signal?: AbortSignal): Promise<ComputerHandBackResult>;
   sweepIdleTakeovers(now?: number): Promise<number>;
+  /**
+   * Wait for a human takeover to hand the leased screen back to the original Agent.
+   * A resumed result always carries the fresh hand-back observation; callers must replan and must not replay the interrupted action.
+   */
+  waitForAgentControl(
+    screenLeaseId: string,
+    ownerId: string,
+    afterGeneration: number,
+    signal?: AbortSignal,
+  ): Promise<ComputerAgentControlResume>;
   assertAgentControl(screenLeaseId: string, ownerId: string, generation: number): ControlLease;
   observeScreen(
     screenLeaseId: string,

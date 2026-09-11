@@ -108,7 +108,7 @@ Phase 4 keeps Computer Node/provider authority on the server. Authenticated clie
 
 Every route uses the existing paired-device challenge/signature authentication. Status refreshes provider telemetry and returns bounded Computer-owned summaries; browser status includes readiness and counts but not tab URLs/titles. `/v1/computer/observe` derives the current screen-lease owner and control generation on the server and returns the normalized observation, including at most an Artifact reference for a screenshot rather than raw screenshot bytes. It fails closed while a human owns control or after a generation change.
 
-`/v1/computer/takeover`, `/v1/computer/human-activity`, and `/v1/computer/hand-back` derive the human holder id from the authenticated device as `client:<device-id>`; caller-supplied identity cannot impersonate another controller. Hand-back retains the Computer invariant that Agent control is restored only after fresh provider observation succeeds.
+`/v1/computer/takeover`, `/v1/computer/human-activity`, and `/v1/computer/hand-back` derive the human holder id from the authenticated device as `client:<device-id>`; caller-supplied identity cannot impersonate another controller. Human activity carries control timing/identity only, not password/OTP/CAPTCHA/keystroke content. Hand-back retains the Computer invariant that Agent control is restored only after fresh provider observation succeeds; paused Agent Computer work on that lease is then resumed at the newer generation with the fresh observation, while the interrupted action remains non-replayed.
 
 ## Verification
 

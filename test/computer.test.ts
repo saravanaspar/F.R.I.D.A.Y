@@ -47,6 +47,7 @@ function healthySnapshot(): ComputerNodeRuntimeSnapshot {
     browser: Object.freeze({
       running: true,
       profileId: "shared-profile",
+      contextId: "shared-context",
       persistentProfile: true,
       windows: Object.freeze([{ id: "window-1", owner: "friday" as const, screenId: "agent-1", tabIds: Object.freeze(["tab-1"]) }]),
       tabs: Object.freeze([{ id: "tab-1", title: "Example", url: "https://example.com/", active: true }]),
@@ -156,6 +157,49 @@ describe("Phase 4 Shared Agent Computer", () => {
       requested.controlLease.generation,
       { kind: "type", target: "password", text: "never-log-this", sensitive: true },
     )).rejects.toThrow(/human takeover|protected-credential/);
+
+    await service.close();
+  });
+
+  it("enforces Browser Supervisor persistence, ownership, and profile continuity before browser admission", async () => {
+    const wrongOwner = fakeAdapter();
+    wrongOwner.setSnapshot(Object.freeze({
+      ...healthySnapshot(),
+      browser: Object.freeze({
+        ...healthySnapshot().browser!,
+        windows: Object.freeze([{ id: "window-human", owner: "human" as const, screenId: "agent-1", tabIds: Object.freeze(["tab-1"]) }]),
+      }),
+    }));
+    const invalidService = createComputerService({ idFactory: sequentialIds() });
+    await expect(invalidService.registerNode(wrongOwner)).rejects.toThrow(/human browser windows.*human screen/);
+    await invalidService.close();
+
+    const adapter = fakeAdapter();
+    const service = createComputerService({ idFactory: sequentialIds(), pollIntervalMs: 60_000 });
+    await service.registerNode(adapter);
+    expect(service.status().nodeStatus[0]?.browser).toMatchObject({ available: true, ready: true, running: true, persistentProfile: true });
+
+    adapter.setSnapshot(Object.freeze({
+      ...healthySnapshot(),
+      browser: Object.freeze({
+        running: false,
+        profileId: "shared-profile",
+        persistentProfile: true,
+        windows: Object.freeze([]),
+        tabs: Object.freeze([]),
+      }),
+    }));
+    await service.refreshNode("node-1");
+    const waiting = await service.requestScreen({ ownerId: "job-browser", requireBrowser: true });
+    expect(waiting).toMatchObject({ state: "waiting", reasons: expect.arrayContaining(["browser-unavailable"]) });
+
+    adapter.setSnapshot(Object.freeze({
+      ...healthySnapshot(),
+      browser: Object.freeze({ ...healthySnapshot().browser!, profileId: "replacement-profile", contextId: "replacement-context" }),
+    }));
+    const degraded = await service.refreshNode("node-1");
+    expect(degraded.availability).toBe("degraded");
+    expect(degraded.browser?.profileId).toBe("shared-profile");
 
     await service.close();
   });
@@ -280,7 +324,21 @@ describe("Phase 4 Shared Agent Computer", () => {
     await expect(pendingAction).rejects.toThrow();
     expect(() => service.assertAgentControl(grant.screenLease.id, "job-takeover", grant.controlLease.generation)).toThrow(/human control|stale/);
 
+    let resumeSettled = false;
+    const resume = service.waitForAgentControl(grant.screenLease.id, "job-takeover", grant.controlLease.generation);
+    void resume.finally(() => { resumeSettled = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(resumeSettled).toBe(false);
+    expect(service.status().waitingForControl).toBe(1);
+
     const handedBack = await service.handBack(grant.screenLease.id, "human:operator");
+    const resumed = await resume;
+    expect(resumed).toMatchObject({
+      resumedAfterTakeover: true,
+      controlLease: { holder: "agent", holderId: "job-takeover", generation: handedBack.controlLease.generation },
+      observation: { screenId: "agent-1", screenshotArtifactRef: "artifact:screen-safe" },
+    });
+    expect(service.status().waitingForControl).toBe(0);
     expect(handedBack.controlLease).toMatchObject({ holder: "agent", holderId: "job-takeover" });
     expect(handedBack.observation).toMatchObject({ screenId: "agent-1", screenshotArtifactRef: "artifact:screen-safe" });
     expect(adapter.observations).toBe(1);
@@ -424,7 +482,24 @@ describe("Phase 4 Shared Agent Computer", () => {
     ]);
 
     await service.takeOver(grant.screenLease.id, "human:operator", null);
-    await expect(observe.execute({}, undefined, executionContext)).rejects.toThrow(/human control|stale/);
+    const pausedObserve = observe.execute({}, undefined, executionContext);
+    for (let attempt = 0; service.status().waitingForControl === 0 && attempt < 50; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(service.status().waitingForControl).toBe(1);
+    const handBack = await service.handBack(grant.screenLease.id, "human:operator");
+    await expect(pausedObserve).resolves.toMatchObject({
+      output: {
+        resumedAfterHumanTakeover: true,
+        staleActionReplayed: false,
+        controlGeneration: handBack.controlLease.generation,
+        observation: { screenId: "agent-1", screenshotArtifactRef: "artifact:screen-safe" },
+      },
+    });
+    await expect(browser.execute({ action: "click", target: "Continue after login" }, undefined, executionContext)).resolves.toMatchObject({
+      output: { mode: "playwright-dom", observation: { screenId: "agent-1" } },
+    });
+    expect(adapter.browserRequests.at(-1)?.controlGeneration).toBe(handBack.controlLease.generation);
     await friday.dispose();
   });
 

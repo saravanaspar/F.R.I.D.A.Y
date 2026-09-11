@@ -352,6 +352,7 @@ describe("Phase 1 client gateway", () => {
           browser: {
             running: true,
             profileId: "shared-profile",
+            contextId: "shared-context",
             persistentProfile: true,
             windows: [{ id: "window-1", owner: "friday", screenId: "agent-1", tabIds: ["tab-1"] }],
             tabs: [{ id: "tab-1", title: "Example", url: "https://example.com/", active: true }],

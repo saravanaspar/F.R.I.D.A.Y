@@ -10,7 +10,12 @@ import {
 } from "@friday/tools";
 import type { FridayPlugin } from "../../src/plugin.js";
 import { definePlugin } from "../capabilities/protocol.js";
-import { COMPUTER_CAPABILITY, type ComputerService } from "../computer/contract.js";
+import {
+  COMPUTER_CAPABILITY,
+  type ComputerAgentControlResume,
+  type ComputerExecutionBinding,
+  type ComputerService,
+} from "../computer/contract.js";
 import { EXECUTION_CAPABILITY } from "../execution/contract.js";
 import { PERMISSIONS_CAPABILITY, type PermissionMode } from "../permissions/contract.js";
 import { sandboxNetworkEnabled, SANDBOX_CAPABILITY } from "../sandbox/contract.js";
@@ -27,6 +32,37 @@ function executionTarget(options: SecureToolOptions): ExecutionTarget | undefine
 
 function usesSandbox(target: ExecutionTarget | undefined): boolean {
   return target === undefined || target.kind === "sandbox";
+}
+
+function currentComputerExecutionBinding(service: ComputerService, binding: ComputerExecutionBinding): ComputerExecutionBinding {
+  const control = service.controlLease(binding.screenLeaseId);
+  if (!control) throw new Error("Computer execution requires an active leased screen");
+  if (control.nodeId !== binding.nodeId || control.screenId !== binding.screenId || control.agentOwnerId !== binding.ownerId) {
+    throw new Error("Computer control lease does not match the execution binding");
+  }
+  if (control.holder === "agent" && control.holderId === binding.ownerId && control.generation >= binding.generation) {
+    return control.generation === binding.generation ? binding : Object.freeze({ ...binding, generation: control.generation });
+  }
+  return binding;
+}
+
+async function resumeComputerExecutionAfterTakeover(
+  service: ComputerService,
+  binding: ComputerExecutionBinding,
+  error: unknown,
+  signal?: AbortSignal,
+): Promise<Extract<ComputerAgentControlResume, { resumedAfterTakeover: true }>> {
+  const control = service.controlLease(binding.screenLeaseId);
+  if (!control
+    || control.nodeId !== binding.nodeId
+    || control.screenId !== binding.screenId
+    || control.agentOwnerId !== binding.ownerId
+    || control.generation <= binding.generation) {
+    throw error;
+  }
+  const resume = await service.waitForAgentControl(binding.screenLeaseId, binding.ownerId, binding.generation, signal);
+  if (!resume.resumedAfterTakeover) throw error;
+  return resume;
 }
 
 const toolsPlugin: FridayPlugin = definePlugin({
@@ -124,14 +160,32 @@ const toolsPlugin: FridayPlugin = definePlugin({
           });
         }
 
-        const result = await computerService().runTool(binding, { workspace: cwd, tool: name, input }, signal);
-        return {
-          content: result.content.map((item) => item.type === "text"
-            ? { type: "text" as const, text: item.text }
-            : { type: "image" as const, data: item.data, mimeType: item.mimeType }),
-          details: result.details,
-          ...(result.terminate === undefined ? {} : { terminate: result.terminate }),
-        };
+        const service = computerService();
+        const activeBinding = currentComputerExecutionBinding(service, binding);
+        try {
+          const result = await service.runTool(activeBinding, { workspace: cwd, tool: name, input }, signal);
+          return {
+            content: result.content.map((item) => item.type === "text"
+              ? { type: "text" as const, text: item.text }
+              : { type: "image" as const, data: item.data, mimeType: item.mimeType }),
+            details: result.details,
+            ...(result.terminate === undefined ? {} : { terminate: result.terminate }),
+          };
+        } catch (error) {
+          const resume = await resumeComputerExecutionAfterTakeover(service, activeBinding, error, signal);
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Human takeover interrupted Computer ${name} execution. The interrupted operation was not replayed and may have partially executed. Re-check current state before acting again.`,
+            }],
+            details: {
+              interruptedByHumanTakeover: true,
+              staleActionReplayed: false,
+              controlGeneration: resume.controlLease.generation,
+              observation: resume.observation,
+            },
+          };
+        }
       },
     };
     return remote;

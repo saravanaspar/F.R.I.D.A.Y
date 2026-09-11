@@ -3,6 +3,7 @@ import { reportOperationalError } from "@friday/operational-errors";
 import {
   type ComputerAdmissionPolicy,
   type ComputerAdmissionReason,
+  type ComputerAgentControlResume,
   type ComputerAutomationMode,
   type ComputerBrowserAction,
   type ComputerBrowserActionResult,
@@ -26,6 +27,7 @@ import {
   type ComputerResourceSnapshot,
   type ComputerScreenDescriptor,
   type ComputerScreenGrant,
+  type ComputerScreenKind,
   type ComputerScreenRequest,
   type ComputerScreenRequestResult,
   type ComputerService,
@@ -59,6 +61,8 @@ const TRANSCRIPT_POLICY = Object.freeze({
 interface NodeState {
   readonly adapter: ComputerNodeAdapter;
   node: ComputerNode;
+  /** Stable opaque profile identity for the shared persistent browser profile. */
+  browserProfileId?: string | undefined;
 }
 
 interface MutableScreenLease {
@@ -91,6 +95,22 @@ interface WaitingRequest {
   readonly reject: (error: unknown) => void;
   readonly signal?: AbortSignal | undefined;
   readonly abortListener?: (() => void) | undefined;
+}
+
+interface AgentControlWaiter {
+  readonly id: string;
+  readonly screenLeaseId: string;
+  readonly ownerId: string;
+  readonly afterGeneration: number;
+  readonly resolve: (resume: ComputerAgentControlResume) => void;
+  readonly reject: (error: unknown) => void;
+  readonly signal?: AbortSignal | undefined;
+  readonly abortListener?: (() => void) | undefined;
+}
+
+interface AgentControlResumeRecord {
+  readonly generation: number;
+  readonly observation: ComputerObservation;
 }
 
 export interface ComputerServiceOptions {
@@ -288,21 +308,34 @@ function normalizeTab(input: ComputerBrowserTabSnapshot): ComputerBrowserTabSnap
   });
 }
 
-function normalizeWindow(input: ComputerBrowserWindowSnapshot, screens: ReadonlySet<string>): ComputerBrowserWindowSnapshot {
+function normalizeWindow(
+  input: ComputerBrowserWindowSnapshot,
+  screens: ReadonlyMap<string, ComputerScreenKind>,
+): ComputerBrowserWindowSnapshot {
   if (input.owner !== "human" && input.owner !== "developer" && input.owner !== "research" && input.owner !== "friday") {
     throw new Error(`unsupported browser window owner: ${String(input.owner)}`);
   }
   const screenId = input.screenId === undefined ? undefined : id(input.screenId, "browser window screen id");
-  if (screenId !== undefined && !screens.has(screenId)) throw new Error(`browser window references unavailable screen: ${screenId}`);
+  if (screenId !== undefined) {
+    const screenKind = screens.get(screenId);
+    if (screenKind === undefined) throw new Error(`browser window references unavailable screen: ${screenId}`);
+    if (input.owner === "human" && screenKind !== "human") throw new Error("human browser windows must be assigned to a human screen");
+    if (input.owner !== "human" && screenKind !== "agent") throw new Error(`${input.owner} browser windows must be assigned to an Agent screen`);
+  }
+  const tabIds = input.tabIds.map((tabId) => id(tabId, "browser window tab id"));
+  if (new Set(tabIds).size !== tabIds.length) throw new Error("browser window has duplicate tab ids");
   return Object.freeze({
     id: id(input.id, "browser window id"),
     owner: input.owner,
     ...(screenId === undefined ? {} : { screenId }),
-    tabIds: Object.freeze([...new Set(input.tabIds.map((tabId) => id(tabId, "browser window tab id")))]),
+    tabIds: Object.freeze(tabIds),
   });
 }
 
-function normalizeBrowser(input: ComputerBrowserSupervisorSnapshot, screens: ReadonlySet<string>): ComputerBrowserSupervisorSnapshot {
+function normalizeBrowser(
+  input: ComputerBrowserSupervisorSnapshot,
+  screens: ReadonlyMap<string, ComputerScreenKind>,
+): ComputerBrowserSupervisorSnapshot {
   if (input.windows.length > MAX_BROWSER_WINDOWS) throw new Error("browser supervisor exceeds window limit");
   if (input.tabs.length > MAX_BROWSER_TABS) throw new Error("browser supervisor exceeds tab limit");
   const tabs = Object.freeze(input.tabs.map(normalizeTab));
@@ -311,12 +344,25 @@ function normalizeBrowser(input: ComputerBrowserSupervisorSnapshot, screens: Rea
   const windows = Object.freeze(input.windows.map((window) => normalizeWindow(window, screens)));
   const windowIds = new Set(windows.map((window) => window.id));
   if (windowIds.size !== windows.length) throw new Error("browser supervisor has duplicate window ids");
+  const assignedTabs = new Set<string>();
   for (const window of windows) {
-    for (const tabId of window.tabIds) if (!tabIds.has(tabId)) throw new Error(`browser window references unavailable tab: ${tabId}`);
+    for (const tabId of window.tabIds) {
+      if (!tabIds.has(tabId)) throw new Error(`browser window references unavailable tab: ${tabId}`);
+      if (assignedTabs.has(tabId)) throw new Error(`browser tab is assigned to multiple windows: ${tabId}`);
+      assignedTabs.add(tabId);
+    }
+  }
+  const running = Boolean(input.running);
+  const contextId = input.contextId === undefined ? undefined : id(input.contextId, "browser context id", 160);
+  if (running && contextId === undefined) throw new Error("running browser supervisor must report its single live context id");
+  if (!running && contextId !== undefined) throw new Error("stopped browser supervisor must not report a live context id");
+  if (!running && (windows.length > 0 || tabs.length > 0)) {
+    throw new Error("stopped browser supervisor must not report live windows or tabs");
   }
   return Object.freeze({
-    running: Boolean(input.running),
+    running,
     profileId: id(input.profileId, "browser profile id", 160),
+    ...(contextId === undefined ? {} : { contextId }),
     persistentProfile: Boolean(input.persistentProfile),
     windows,
     tabs,
@@ -331,7 +377,8 @@ function normalizeRuntimeSnapshot(input: ComputerNodeRuntimeSnapshot, capabiliti
   const screens = Object.freeze(input.screens.map(normalizeScreen));
   const screenIds = new Set(screens.map((screen) => screen.id));
   if (screenIds.size !== screens.length) throw new Error("Computer node has duplicate screen ids");
-  const browser = input.browser === undefined ? undefined : normalizeBrowser(input.browser, screenIds);
+  const screenKinds = new Map(screens.map((screen) => [screen.id, screen.kind] as const));
+  const browser = input.browser === undefined ? undefined : normalizeBrowser(input.browser, screenKinds);
   if (browser !== undefined && !capabilities.browser) throw new Error("Computer node reported browser state without browser capability");
   return Object.freeze({
     availability: input.availability,
@@ -339,6 +386,10 @@ function normalizeRuntimeSnapshot(input: ComputerNodeRuntimeSnapshot, capabiliti
     screens,
     ...(browser === undefined ? {} : { browser }),
   });
+}
+
+function browserSupervisorReady(node: ComputerNode): boolean {
+  return node.capabilities.browser && node.browser?.running === true && node.browser.persistentProfile === true;
 }
 
 function cloneNode(node: ComputerNode): ComputerNode {
@@ -496,6 +547,8 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
   const controlLeases = new Map<string, MutableControlLease>();
   const actionsByScreenLease = new Map<string, Set<AbortController>>();
   const waiters = new Map<string, WaitingRequest>();
+  const agentControlWaiters = new Map<string, AgentControlWaiter>();
+  const agentControlResumes = new Map<string, AgentControlResumeRecord>();
   let timer: NodeJS.Timeout | undefined;
   let closed = false;
   let mutationTail: Promise<void> = Promise.resolve();
@@ -541,6 +594,63 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
     if (active?.size === 0) actionsByScreenLease.delete(screenLeaseId);
   };
 
+  const removeAgentControlWaiter = (waiter: AgentControlWaiter): void => {
+    agentControlWaiters.delete(waiter.id);
+    if (waiter.signal && waiter.abortListener) waiter.signal.removeEventListener("abort", waiter.abortListener);
+  };
+
+  const rejectAgentControlWaiters = (screenLeaseId: string, error: Error): void => {
+    for (const waiter of [...agentControlWaiters.values()]) {
+      if (waiter.screenLeaseId !== screenLeaseId) continue;
+      removeAgentControlWaiter(waiter);
+      waiter.reject(error);
+    }
+  };
+
+  const agentControlResumeSnapshot = (
+    screenLeaseIdInput: string,
+    ownerIdInput: string,
+    afterGeneration: number,
+  ): ComputerAgentControlResume | undefined => {
+    if (!Number.isSafeInteger(afterGeneration) || afterGeneration < 1) throw new Error("Computer prior control generation must be a positive integer");
+    const screenLease = requireScreenLease(screenLeaseIdInput);
+    const ownerId = id(ownerIdInput, "Computer screen owner id", 160);
+    const control = requireControlLease(screenLease.id);
+    if (screenLease.ownerId !== ownerId || control.agentOwnerId !== ownerId) throw new Error("Computer screen lease owner mismatch");
+    if (control.generation < afterGeneration) throw new Error("Computer control generation moved backwards");
+    if (control.holder !== "agent" || control.holderId !== ownerId) return undefined;
+    const controlLease = cloneControlLease(control);
+    if (control.generation === afterGeneration) {
+      return Object.freeze({ resumedAfterTakeover: false as const, controlLease });
+    }
+    const resume = agentControlResumes.get(screenLease.id);
+    if (!resume || resume.generation !== control.generation) {
+      throw new Error("fresh Computer hand-back observation is unavailable for the current control generation");
+    }
+    return Object.freeze({
+      resumedAfterTakeover: true as const,
+      controlLease,
+      observation: resume.observation,
+    });
+  };
+
+  const resolveAgentControlWaiters = (
+    screenLeaseId: string,
+    controlLease: ControlLease,
+    observation: ComputerObservation,
+  ): void => {
+    for (const waiter of [...agentControlWaiters.values()]) {
+      if (waiter.screenLeaseId !== screenLeaseId || waiter.ownerId !== controlLease.agentOwnerId) continue;
+      if (controlLease.generation <= waiter.afterGeneration) continue;
+      removeAgentControlWaiter(waiter);
+      waiter.resolve(Object.freeze({
+        resumedAfterTakeover: true as const,
+        controlLease,
+        observation,
+      }));
+    }
+  };
+
   const nodeLeaseCount = (nodeId: string): number => [...screenLeases.values()].filter((lease) => lease.nodeId === nodeId).length;
 
   const activeScreenIds = (nodeId: string): ReadonlySet<string> => new Set(
@@ -578,6 +688,12 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
     signal?.throwIfAborted();
     try {
       const snapshot = normalizeRuntimeSnapshot(await state.adapter.snapshot(signal), state.node.capabilities);
+      if (snapshot.browser?.persistentProfile === true) {
+        if (state.browserProfileId !== undefined && state.browserProfileId !== snapshot.browser.profileId) {
+          throw new Error(`Computer browser profile identity changed for node ${state.node.id}; refusing to treat the replacement profile as the shared persistent profile`);
+        }
+        state.browserProfileId ??= snapshot.browser.profileId;
+      }
       const updatedAt = iso(now());
       state.node = Object.freeze({
         ...state.node,
@@ -601,7 +717,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
     const reasons: ComputerAdmissionReason[] = [];
     const node = state.node;
     if (node.availability !== "online") reasons.push("node-unavailable");
-    if (request.requireBrowser === true && !node.capabilities.browser) reasons.push("browser-unavailable");
+    if (request.requireBrowser === true && !browserSupervisorReady(node)) reasons.push("browser-unavailable");
     const demandMemory = request.demand?.memoryMb ?? 0;
     const demandRenderers = request.demand?.browserRenderers ?? 0;
     if (!Number.isFinite(demandMemory) || demandMemory < 0) throw new Error("computer demand.memoryMb must be non-negative");
@@ -740,6 +856,8 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
     const lease = screenLeases.get(screenLeaseId);
     if (!lease) return false;
     abortScreenActions(screenLeaseId, `Computer screen lease ${reason}`);
+    rejectAgentControlWaiters(screenLeaseId, new Error(`Computer screen lease ${reason}`));
+    agentControlResumes.delete(screenLeaseId);
     screenLeases.delete(screenLeaseId);
     ownerLeaseIds.delete(lease.ownerId);
     controlLeases.delete(screenLeaseId);
@@ -808,7 +926,11 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
           registeredAt: timestamp,
           updatedAt: timestamp,
         });
-        nodes.set(node.id, { adapter, node });
+        nodes.set(node.id, {
+          adapter,
+          node,
+          ...(snapshot.browser?.persistentProfile === true ? { browserProfileId: snapshot.browser.profileId } : {}),
+        });
         publish("computer.node.registered", `computer:${node.id}`, { nodeId: node.id, platform: node.platform });
         void drainWaiters();
         return cloneNode(node);
@@ -874,6 +996,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         activeScreenLeases: activeLeases.length,
         humanTakeovers: activeLeases.filter((lease) => controlLeases.get(lease.id)?.holder === "human").length,
         waitingRequests: waiters.size,
+        waitingForControl: agentControlWaiters.size,
         nodeStatus: Object.freeze(nodeValues.map((node) => Object.freeze({
           id: node.id,
           label: node.label,
@@ -882,9 +1005,10 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
           agentScreens: node.screens.filter((screen) => screen.kind === "agent").length,
           leasedScreens: activeLeases.filter((lease) => lease.nodeId === node.id).length,
           browser: node.browser === undefined
-            ? Object.freeze({ available: node.capabilities.browser, running: false })
+            ? Object.freeze({ available: node.capabilities.browser, ready: false, running: false })
             : Object.freeze({
               available: node.capabilities.browser,
+              ready: browserSupervisorReady(node),
               running: node.browser.running,
               persistentProfile: node.browser.persistentProfile,
               windows: node.browser.windows.length,
@@ -1014,6 +1138,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         const control = requireControlLease(screenLease.id);
         if (control.holder === "human" && control.holderId !== humanOwnerId) throw new Error("Computer screen is already under another human takeover");
         abortScreenActions(screenLease.id, "Human takeover invalidated pending Computer actions");
+        agentControlResumes.delete(screenLease.id);
         const timestamp = iso(now());
         control.holder = "human";
         control.holderId = humanOwnerId;
@@ -1082,14 +1207,24 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         control.acquiredAt = timestamp;
         control.lastActivityAt = timestamp;
         control.handBackAfterMs = null;
+        const resumedLease = cloneControlLease(control);
+        agentControlResumes.set(prepared.screenLeaseId, Object.freeze({ generation: resumedLease.generation, observation }));
+        resolveAgentControlWaiters(prepared.screenLeaseId, resumedLease, observation);
         publish("computer.control.handed-back", `computer:${control.nodeId}:screen:${control.screenId}`, {
           nodeId: control.nodeId,
           screenId: control.screenId,
           screenLeaseId: control.screenLeaseId,
           generation: control.generation,
         });
+        publish("computer.control.agent-resumed", `computer:${control.nodeId}:screen:${control.screenId}`, {
+          nodeId: control.nodeId,
+          screenId: control.screenId,
+          screenLeaseId: control.screenLeaseId,
+          generation: control.generation,
+          reObserved: true,
+        });
         stopTimerIfIdle();
-        return cloneControlLease(control);
+        return resumedLease;
       });
       return Object.freeze({ controlLease, observation });
     },
@@ -1112,6 +1247,56 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
       }
       stopTimerIfIdle();
       return handedBack;
+    },
+
+    async waitForAgentControl(screenLeaseIdInput, ownerIdInput, afterGeneration, signal) {
+      signal?.throwIfAborted();
+      const screenLeaseId = id(screenLeaseIdInput, "screen lease id");
+      const ownerId = id(ownerIdInput, "Computer screen owner id", 160);
+      if (!Number.isSafeInteger(afterGeneration) || afterGeneration < 1) throw new Error("Computer prior control generation must be a positive integer");
+
+      const immediate = await serialize(() => agentControlResumeSnapshot(screenLeaseId, ownerId, afterGeneration));
+      if (immediate) return immediate;
+      if (agentControlWaiters.size >= MAX_WAITERS) throw new Error(`Computer control wait limit reached (${MAX_WAITERS})`);
+
+      return new Promise<ComputerAgentControlResume>((resolve, reject) => {
+        const waiterId = id(idFactory(), "Computer control waiter id");
+        let waiter: AgentControlWaiter;
+        const abortListener = signal === undefined ? undefined : () => {
+          const active = agentControlWaiters.get(waiterId);
+          if (!active) return;
+          removeAgentControlWaiter(active);
+          reject(signal.reason ?? new Error("Computer control wait aborted"));
+        };
+        waiter = Object.freeze({
+          id: waiterId,
+          screenLeaseId,
+          ownerId,
+          afterGeneration,
+          resolve,
+          reject,
+          ...(signal === undefined ? {} : { signal }),
+          ...(abortListener === undefined ? {} : { abortListener }),
+        });
+        void serialize(() => {
+          signal?.throwIfAborted();
+          const ready = agentControlResumeSnapshot(screenLeaseId, ownerId, afterGeneration);
+          if (ready) {
+            resolve(ready);
+            return;
+          }
+          agentControlWaiters.set(waiterId, waiter);
+          signal?.addEventListener("abort", abortListener!, { once: true });
+          publish("computer.control.agent-paused", `computer-control-wait:${waiterId}`, {
+            screenLeaseId,
+            ownerId,
+            afterGeneration,
+          });
+        }).catch((error: unknown) => {
+          removeAgentControlWaiter(waiter);
+          reject(error);
+        });
+      });
     },
 
     assertAgentControl(screenLeaseIdInput, ownerIdInput, generation) {
@@ -1221,7 +1406,8 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         const control = service.assertAgentControl(screenLeaseIdInput, ownerIdInput, generation);
         const screenLease = requireScreenLease(control.screenLeaseId);
         const state = requireNodeState(screenLease.nodeId);
-        if (!state.node.capabilities.browser || !state.adapter.runBrowserAction) throw new Error(`Computer node ${state.node.id} does not provide browser automation`);
+        if (!browserSupervisorReady(state.node)) throw new Error(`Computer node ${state.node.id} browser supervisor is not ready`);
+        if (!state.adapter.runBrowserAction) throw new Error(`Computer node ${state.node.id} does not provide browser automation`);
         const order = automationOrder(state.node.capabilities);
         if (order.length === 0) throw new Error(`Computer node ${state.node.id} has no browser automation mode`);
         const pending = beginScreenAction(screenLease.id, signal);
@@ -1303,6 +1489,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         if (node.availability !== "online") issues.push(`node is ${node.availability}`);
         const availableAgentScreens = node.screens.filter((screen) => screen.kind === "agent" && !activeScreenIds(node.id).has(screen.id)).length;
         if (node.screens.every((screen) => screen.kind !== "agent")) issues.push("node has no Agent screen");
+        if (node.capabilities.browser && node.browser?.running !== true) issues.push("browser supervisor is not running");
         if (node.capabilities.browser && node.browser?.persistentProfile !== true) issues.push("persistent browser profile is not ready");
         if (node.resources.availableMemoryMb < node.admission.minAvailableMemoryMb) issues.push("available memory is below admission threshold");
         if (node.resources.cpuPercent > node.admission.maxCpuPercent) issues.push("CPU utilization exceeds admission threshold");
@@ -1342,6 +1529,11 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         removeWaiter(waiter);
         waiter.reject(new Error("computer service is closing"));
       }
+      for (const waiter of [...agentControlWaiters.values()]) {
+        removeAgentControlWaiter(waiter);
+        waiter.reject(new Error("computer service is closing"));
+      }
+      agentControlResumes.clear();
       await Promise.allSettled([...nodes.values()].map((state) => Promise.resolve(state.adapter.close?.())));
       nodes.clear();
       screenLeases.clear();

@@ -52,7 +52,7 @@ Each leased screen also has a `ControlLease`. Agent actions must present the cur
 
 ## Browser Supervisor
 
-Providers expose one persistent browser-profile snapshot containing windows and tabs. Status surfaces report only readiness/counts; they do not publish tab URLs/titles or browser content in generic Computer status.
+Providers expose one Browser Supervisor snapshot for the node's shared persistent browser profile and one opaque live context identity. The Computer core rejects stopped supervisors that claim live windows/tabs, duplicate tab ownership across windows, Human windows bound to Agent screens, Agent-role windows bound to Human screens, and replacement persistent-profile identities after registration. Browser-required admission and browser actions proceed only while that supervisor is running with the persistent shared profile ready. Status surfaces report only readiness/counts; they do not publish tab URLs/titles, browser content, profile paths, cookies, or credentials in generic Computer status.
 
 Higher-level orchestration should use API/MCP before Computer browser automation. Once Computer is selected, the provider fallback order is:
 
@@ -70,7 +70,7 @@ When Turn Loop has an active `ComputerExecutionBinding`, the Computer plugin con
 - `computer_observe` authorizes a private read through Permissions and returns a fresh bounded `ComputerObservation` for the currently leased screen.
 - `computer_browser` authorizes an external write through Permissions, accepts only the provider-neutral navigate/click/type/press action contract, and dispatches through the current screen/control generation.
 
-Both tools fail closed without an active Computer binding. Observation and browser execution are tracked as in-flight screen actions, so takeover, lease expiry, or release aborts them. Sensitive browser typing is rejected before provider dispatch; passwords, OTPs, CAPTCHA solutions, and similar secrets require human takeover or a dedicated protected-credential flow. The active-screen prompt section instructs the Agent to observe before making GUI decisions and to re-observe after takeover rather than replaying stale actions.
+Both tools fail closed without an active Computer binding. Observation and browser execution are tracked as in-flight screen actions, so takeover, lease expiry, or release aborts them. If human takeover advances the generation while an Agent Computer action is in flight, the trusted adapter waits for Agent control to return instead of replaying that action. Successful hand-back supplies the fresh re-observation that caused the resume, marks the interrupted action as `staleActionReplayed: false`, and refreshes later tool calls to the new host-owned control generation. Sensitive browser typing is rejected before provider dispatch; passwords, OTPs, CAPTCHA solutions, and similar secrets require human takeover or a dedicated protected-credential flow. The active-screen prompt section tells the Agent that the original generation is only the initial binding and that a takeover resume must replan from the attached fresh observation.
 
 ## Client Gateway Computer APIs
 
@@ -105,14 +105,14 @@ On takeover, the Computer core:
 
 The default idle grace is eight seconds. Configured values must be at least five seconds; `null` means manual-only hand-back. Human activity refreshes the grace period without sending key/text/screenshot content through this API.
 
-Hand-back increments the generation again and requires `observeScreen()` to succeed before Agent control is restored. If re-observation fails or the user interacts again during hand-back, the Agent remains paused. This prevents replay of stale clicks after a login, CAPTCHA, OTP, or other human intervention.
+Hand-back increments the generation again and requires `observeScreen()` to succeed before Agent control is restored. The fresh observation and resumed control generation are published atomically to paused Agent waiters; if re-observation fails or the user interacts again during hand-back, the Agent remains paused. The Computer API accepts only human activity timing/identity here—never the password, OTP, CAPTCHA solution, or keystroke stream itself. Interrupted browser and execution actions are explicitly not replayed; the Agent receives the fresh observation and must replan before issuing a new action.
 
 ## Managed lifecycle
 
 Computer Node `restart`, `update`, and `resetManagedState` operations delegate to the platform provider. The core refuses these operations while screen leases are active. `resetManagedState` means FRIDAY-managed Agent/browser/display state only; it must never silently reset the person's operating system.
 
-## Current Phase 4 slice
+## Phase 4 completion
 
-The first slice established the provider contract, admission, lease expiry/waiting, browser-action generation checks, takeover/hand-back behavior, status/doctor surfaces, and managed lifecycle guards. The second slice connected Project/Turn Loop execution to Computer targets and routed the existing bash/edit/process/IPython tool surfaces through the leased node while preserving Permissions and stale-generation checks. The third slice made Computer admission a durable Session Job state and reused the existing restart/resume path rather than introducing Computer-owned durable scheduling. The fourth slice adds permission-gated Agent observe/browser tools plus authenticated Client Gateway status/observation/takeover APIs over the same Computer authority.
+The first slice established the provider contract, admission, lease expiry/waiting, browser-action generation checks, takeover/hand-back behavior, status/doctor surfaces, and managed lifecycle guards. The second slice connected Project/Turn Loop execution to Computer targets and routed the existing bash/edit/process/IPython tool surfaces through the leased node while preserving Permissions and stale-generation checks. The third slice made Computer admission a durable Session Job state and reused the existing restart/resume path rather than introducing Computer-owned durable scheduling. The fourth slice added permission-gated Agent observe/browser tools plus authenticated Client Gateway status/observation/takeover APIs over the same Computer authority. The fifth slice completes the provider-neutral Browser Supervisor invariants and the human-takeover continuation path: a login-wall action may be interrupted, the user controls the same leased screen without secret capture, hand-back re-observes current state, and the same Session Job resumes without replaying the interrupted action.
 
-Still pending in Phase 4 are Browser Supervisor orchestration beyond the provider contract and the full login-wall → human takeover → fresh observation → same-job continuation acceptance path. Linux/Sway/Chromium and Windows platform providers remain Phase 5/8 work.
+Phase 4 provider-neutral implementation is complete and has passed the repository verification gate. Linux/Sway/Chromium and Windows platform providers remain Phase 5/8 work.

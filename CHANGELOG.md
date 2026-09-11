@@ -48,6 +48,10 @@ published release artifacts and generated release notes.
 - Added permission-gated Agent `computer_observe` and `computer_browser` tools over the active leased screen. Observation is bounded/provider-neutral, browser actions remain generation-bound, and sensitive typing is rejected before provider execution so credentials/OTP/CAPTCHA values stay on the human-takeover path.
 - Added authenticated Client Gateway Computer APIs for safe status, node/screen/lease discovery, observation, human takeover/activity, and hand-back. Human controller identity is derived from the authenticated device rather than caller input, and generic status surfaces expose browser readiness/counts instead of tab content.
 - Reused typed Computer status/lease summaries across System and Client surfaces so external consumers receive one bounded representation without bypassing the Computer capability or provider boundary.
+- Hardened Browser Supervisor orchestration with one opaque live browser-context identity, persistent shared-profile continuity, role-to-screen ownership checks for Human/Developer/Research/F.R.I.D.A.Y windows, unique tab assignment, and browser-ready admission that fails closed when the supervisor is stopped or its persistent profile is unavailable.
+- Added takeover-aware Agent pause/resume semantics: interrupted Computer browser/tool actions are never replayed, the same leased Session Job waits for human hand-back, a fresh provider observation is attached to the resume result, and subsequent actions refresh to the new control generation.
+- Added a provider-neutral login-wall acceptance path proving one Session Job survives human takeover, excludes human password/OTP content from durable/model-visible state, re-observes the signed-in browser after hand-back, and completes without replaying the interrupted GUI action.
+- Completed the provider-neutral Phase 4 Shared Agent Computer implementation after the repository verification gate passed; concrete Linux/Sway/Chromium and Windows native providers remain tracked for Phases 5 and 8.
 
 ## [1.0.4] - 2026-09-09
 

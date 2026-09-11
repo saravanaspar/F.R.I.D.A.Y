@@ -100,7 +100,16 @@ describe("tools plugin", () => {
     await friday.activatePlugin(executionPlugin);
     const approvals: PermissionRequest[] = [];
     let sandboxCalls = 0;
-    const remoteCalls: Array<{ tool: string; workspace: string; input: Readonly<Record<string, unknown>> }> = [];
+    const remoteCalls: Array<{ tool: string; workspace: string; input: Readonly<Record<string, unknown>>; generation: number }> = [];
+    let controlGeneration = 7;
+    let humanControl = false;
+    let interruptNext = false;
+    const controlLeaseSnapshot = () => ({
+      id: "control-1", screenLeaseId: "lease-1", nodeId: "desk-1", screenId: "agent-1",
+      holder: humanControl ? "human" as const : "agent" as const, holderId: humanControl ? "client:desktop" : "job-1",
+      agentOwnerId: "job-1", generation: controlGeneration, acquiredAt: new Date().toISOString(), lastActivityAt: new Date().toISOString(),
+      handBackAfterMs: null, transcriptPolicy: { captureKeystrokes: false as const, captureSecrets: false as const, captureSensitiveScreenshots: false as const },
+    });
     const permissionController = createPermissionsController({
       approve: async (request) => { approvals.push(request); return true; },
     });
@@ -114,8 +123,30 @@ describe("tools plugin", () => {
       sandboxKernel(request) { sandboxCalls += 1; return { command: "true", args: [], cwd: request.cwd, env: request.env }; },
     });
     provideCapability(COMPUTER_CAPABILITY, {
-      async runTool(_binding: ComputerExecutionBinding, request: ComputerToolExecutionRequest) {
-        remoteCalls.push({ tool: request.tool, workspace: request.workspace, input: request.input });
+      controlLease() {
+        return controlLeaseSnapshot();
+      },
+      async waitForAgentControl() {
+        if (!humanControl) throw new Error("expected simulated human takeover");
+        humanControl = false;
+        controlGeneration += 1;
+        return {
+          resumedAfterTakeover: true as const,
+          controlLease: controlLeaseSnapshot(),
+          observation: {
+            observedAt: new Date().toISOString(), screenId: "agent-1", url: "https://example.com/after-login",
+            domSummary: "signed in", accessibilitySummary: "main", tabs: [], processes: [],
+          },
+        };
+      },
+      async runTool(binding: ComputerExecutionBinding, request: ComputerToolExecutionRequest) {
+        if (interruptNext) {
+          interruptNext = false;
+          humanControl = true;
+          controlGeneration += 1;
+          throw new Error("Human takeover invalidated pending Computer actions");
+        }
+        remoteCalls.push({ tool: request.tool, workspace: request.workspace, input: request.input, generation: binding.generation });
         return { content: [{ type: "text", text: `remote:${request.tool}` }] };
       },
     } as unknown as ComputerService);
@@ -156,6 +187,18 @@ describe("tools plugin", () => {
     expect(approvals.find((entry) => entry.action.id === "tools.process.start")?.action.network).toBe(true);
     expect(approvals.find((entry) => entry.action.id === "tools.ipython.execute")?.action.network).toBe(true);
     expect(approvals.find((entry) => entry.action.id === "tools.edit.write")?.action.network).toBe(false);
+
+    interruptNext = true;
+    const interrupted = await permissionController.trusted.runAsLocal(() => remoteTools.bash.execute("computer-bash-takeover", { command: "git status" }));
+    expect(interrupted.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("not replayed") });
+    expect(interrupted.details).toMatchObject({
+      interruptedByHumanTakeover: true,
+      staleActionReplayed: false,
+      controlGeneration: 9,
+      observation: { domSummary: "signed in" },
+    });
+    await permissionController.trusted.runAsLocal(() => remoteTools.bash.execute("computer-bash-after-takeover", { command: "pwd" }));
+    expect(remoteCalls.at(-1)?.generation).toBe(9);
 
     expect(() => service.createTool("bash", dir, { permissionMode: "ask", executionTarget: target }))
       .toThrow(/leased Computer screen/);

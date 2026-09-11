@@ -16,6 +16,7 @@ import {
 } from "../system/contract.js";
 import {
   COMPUTER_CAPABILITY,
+  type ComputerAgentControlResume,
   type ComputerBrowserAction,
   type ComputerExecutionBinding,
   type ComputerNodeAdapter,
@@ -67,6 +68,48 @@ function activeComputerBinding(context?: AgentToolExecutionContext): ComputerExe
   return binding;
 }
 
+function currentComputerBinding(service: ComputerService, context?: AgentToolExecutionContext): ComputerExecutionBinding {
+  const binding = activeComputerBinding(context);
+  const control = service.controlLease(binding.screenLeaseId);
+  if (!control) throw new Error("Computer tool requires an active leased Computer screen");
+  if (control.nodeId !== binding.nodeId || control.screenId !== binding.screenId || control.agentOwnerId !== binding.ownerId) {
+    throw new Error("Computer control lease does not match the active Agent binding");
+  }
+  if (control.holder === "agent" && control.holderId === binding.ownerId && control.generation >= binding.generation) {
+    if (control.generation === binding.generation) return binding;
+    return Object.freeze({ ...binding, generation: control.generation });
+  }
+  return binding;
+}
+
+async function resumeAgentComputerAfterTakeover(
+  service: ComputerService,
+  binding: ComputerExecutionBinding,
+  error: unknown,
+  signal?: AbortSignal,
+): Promise<ComputerAgentControlResume> {
+  const control = service.controlLease(binding.screenLeaseId);
+  if (!control
+    || control.nodeId !== binding.nodeId
+    || control.screenId !== binding.screenId
+    || control.agentOwnerId !== binding.ownerId
+    || control.generation <= binding.generation) {
+    throw error;
+  }
+  const resume = await service.waitForAgentControl(binding.screenLeaseId, binding.ownerId, binding.generation, signal);
+  if (!resume.resumedAfterTakeover) throw error;
+  return resume;
+}
+
+function resumedAfterHumanTakeover(resume: Extract<ComputerAgentControlResume, { resumedAfterTakeover: true }>): AgentExtensionJsonValue {
+  return {
+    resumedAfterHumanTakeover: true,
+    staleActionReplayed: false,
+    controlGeneration: resume.controlLease.generation,
+    observation: resume.observation as unknown as AgentExtensionJsonValue,
+  };
+}
+
 function browserAction(input: Readonly<Record<string, AgentExtensionJsonValue>>): ComputerBrowserAction {
   const kind = input.action;
   if (kind === "navigate") return { kind, url: agentText(input, "url", 4_096) };
@@ -113,8 +156,9 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
         "<friday_computer_context>",
         `Computer node: ${binding.nodeId}`,
         `Leased screen: ${binding.screenId}`,
-        `Control generation: ${binding.generation}`,
+        `Initial control generation: ${binding.generation}`,
         "Use computer_observe before visual/browser decisions and after any human takeover. Use computer_browser only for non-secret input. Passwords, OTPs, CAPTCHAs, and other sensitive input require human takeover; never place those values in tool arguments.",
+        "If a Computer tool reports resumedAfterHumanTakeover=true, the interrupted action was not replayed. Treat the attached fresh observation as the new source of truth and replan before acting again.",
         "</friday_computer_context>",
       ].join("\n");
     },
@@ -129,11 +173,17 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
     parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
     async execute(_input, signal, executionContext) {
       const context = executionContext;
-      const binding = activeComputerBinding(context);
+      const binding = currentComputerBinding(service, context);
       await authorizeAgentComputer(permissions, context!, binding, "observe");
-      return {
-        output: await service.observeScreen(binding.screenLeaseId, binding.ownerId, binding.generation, signal) as unknown as AgentExtensionJsonValue,
-      };
+      try {
+        return {
+          output: await service.observeScreen(binding.screenLeaseId, binding.ownerId, binding.generation, signal) as unknown as AgentExtensionJsonValue,
+        };
+      } catch (error) {
+        const resume = await resumeAgentComputerAfterTakeover(service, binding, error, signal);
+        if (!resume.resumedAfterTakeover) throw error;
+        return { output: resumedAfterHumanTakeover(resume) };
+      }
     },
   });
 
@@ -158,11 +208,17 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
     }),
     async execute(input, signal, executionContext) {
       const context = executionContext;
-      const binding = activeComputerBinding(context);
+      const binding = currentComputerBinding(service, context);
       const action = browserAction(input);
       await authorizeAgentComputer(permissions, context!, binding, "browser");
-      const result = await service.runBrowserAction(binding.screenLeaseId, binding.ownerId, binding.generation, action, signal);
-      return { output: result as unknown as AgentExtensionJsonValue };
+      try {
+        const result = await service.runBrowserAction(binding.screenLeaseId, binding.ownerId, binding.generation, action, signal);
+        return { output: result as unknown as AgentExtensionJsonValue };
+      } catch (error) {
+        const resume = await resumeAgentComputerAfterTakeover(service, binding, error, signal);
+        if (!resume.resumedAfterTakeover) throw error;
+        return { output: resumedAfterHumanTakeover(resume) };
+      }
     },
   });
 }
