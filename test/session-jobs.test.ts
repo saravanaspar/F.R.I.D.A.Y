@@ -185,6 +185,102 @@ describe("SessionJobManager", () => {
     gates[1]!.resolve();
   });
 
+  it("persists WAITING_FOR_COMPUTER as active durable work and reconstructs it after restart", async () => {
+    const root = await tempDir();
+    const stateDir = join(root, "jobs");
+    const manager = await SessionJobManager.open({
+      stateDir,
+      progressNotifyIntervalMs: 0,
+      idFactory: () => "job-computer-wait",
+    });
+    managers.push(manager);
+    const job = await manager.start({
+      destinationId: "session:computer-wait",
+      text: "continue the project on desk one",
+      timestamp: Date.now(),
+      origin: {
+        authority: "channel",
+        channel: "telegram",
+        accountId: "main",
+        conversationId: "chat",
+        senderId: "alice",
+        projectId: "atlas",
+        projectTargetId: "computer:desk-1",
+      },
+      notify: async () => undefined,
+      async run(signal, report) {
+        await report({
+          kind: "status",
+          message: "Waiting for Computer desk-1: cpu-pressure",
+          jobStatus: "waiting-for-computer",
+          computerWait: { code: "WAITING_FOR_COMPUTER", nodeId: "desk-1", reasons: ["cpu-pressure"] },
+        });
+        return await rejectOnAbort(signal);
+      },
+    });
+    await waitUntil(() => manager.get(job.id)?.status === "waiting-for-computer", "durable Computer wait state");
+    expect(manager.get(job.id)).toMatchObject({
+      status: "waiting-for-computer",
+      computerWait: {
+        code: "WAITING_FOR_COMPUTER",
+        nodeId: "desk-1",
+        reasons: ["cpu-pressure"],
+      },
+      origin: { projectId: "atlas", projectTargetId: "computer:desk-1" },
+    });
+    expect(manager.list({ activeOnly: true }).map((entry) => entry.id)).toContain(job.id);
+
+    await manager.close();
+    managers.splice(managers.indexOf(manager), 1);
+    const reopened = await SessionJobManager.open({ stateDir });
+    managers.push(reopened);
+    expect(reopened.get(job.id)).toMatchObject({
+      status: "queued",
+      currentStatus: "Paused by FRIDAY restart; automatic resume pending",
+      computerWait: {
+        code: "WAITING_FOR_COMPUTER",
+        nodeId: "desk-1",
+        reasons: ["cpu-pressure"],
+      },
+    });
+    expect(reopened.resumable()).toMatchObject([{
+      id: job.id,
+      destinationId: "session:computer-wait",
+      requestText: "continue the project on desk one",
+      origin: { projectId: "atlas", projectTargetId: "computer:desk-1" },
+    }]);
+  });
+
+  it("cancels work while it is waiting for Computer admission", async () => {
+    const root = await tempDir();
+    const manager = await SessionJobManager.open({
+      stateDir: join(root, "jobs"),
+      idFactory: () => "job-cancel-computer-wait",
+    });
+    managers.push(manager);
+    const job = await manager.start({
+      destinationId: "session:computer-cancel",
+      text: "wait for a Computer and then continue",
+      timestamp: Date.now(),
+      origin: { authority: "local", channel: "local-test", accountId: "local", conversationId: "local-test", senderId: "operator" },
+      notify: async () => undefined,
+      async run(signal, report) {
+        await report({
+          kind: "status",
+          message: "Waiting for Computer: screen-unavailable",
+          jobStatus: "waiting-for-computer",
+          computerWait: { code: "WAITING_FOR_COMPUTER", reasons: ["screen-unavailable"] },
+        });
+        return await rejectOnAbort(signal);
+      },
+    });
+    await waitUntil(() => manager.get(job.id)?.status === "waiting-for-computer", "cancellable Computer wait state");
+    const cancelled = await manager.cancel(job.id, "No longer needed");
+    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.computerWait).toBeUndefined();
+    expect(manager.list({ activeOnly: true })).toHaveLength(0);
+  });
+
   it("does not report quiesced until aborted executions actually settle", async () => {
     const root = await tempDir();
     const gate = deferred();

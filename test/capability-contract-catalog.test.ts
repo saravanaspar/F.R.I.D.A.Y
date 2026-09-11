@@ -165,6 +165,33 @@ describe("self-improvement plugin contract catalog", () => {
     expect(catalog.issues.join(" ")).toMatch(/missing.*contract\.ts/i);
   });
 
+  it("keeps public-type discovery bounded above current large contracts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "friday-contract-type-limit-"));
+    temporaryRoots.push(root);
+    await mkdir(join(root, "plugins", "demo"), { recursive: true });
+    await writeFile(
+      join(root, "friday.config.json"),
+      `${JSON.stringify({ plugins: ["./plugins/demo/index.ts"] }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    const extraTypes = Array.from({ length: 64 }, (_, index) => `export type PublicType${index + 1} = string;`);
+    await writeFile(
+      join(root, "plugins", "demo", "contract.ts"),
+      [
+        "export interface DemoService { status(): string; }",
+        ...extraTypes,
+        "export const DEMO_CAPABILITY = defineCapability<DemoService>(\"demo\");",
+        "",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+    await writeFile(join(root, "plugins", "demo", "index.ts"), "export {};\n", { mode: 0o600 });
+
+    const catalog = await buildCapabilityContractCatalog(root, "reuse demo");
+    expect(catalog.complete).toBe(false);
+    expect(catalog.issues.join(" ")).toMatch(/exported public type count exceeds the discovery limit of 64/i);
+  });
+
   it("fails closed when a semantic public API is exported but never connected to a surface", async () => {
     const root = await mkdtemp(join(tmpdir(), "friday-contract-orphan-"));
     temporaryRoots.push(root);

@@ -226,7 +226,14 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
           type: "session-job.resume-requested",
           source: "session-jobs",
           subject: `job:${job.id}`,
-          data: { jobId: job.id },
+          data: {
+            jobId: job.id,
+            ...(job.computerWait === undefined ? {} : {
+              computerWaitCode: job.computerWait.code,
+              ...(job.computerWait.nodeId === undefined ? {} : { computerNodeId: job.computerWait.nodeId }),
+              computerWaitReasons: [...job.computerWait.reasons],
+            }),
+          },
         });
       }
     };
@@ -269,6 +276,9 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
         "Continue the user request that was interrupted by a FRIDAY restart.",
         "Resume from the last durable session transcript and persisted tool outputs. Do not repeat successful side effects already recorded in that transcript.",
         "Any private model thinking that had not yet been written to the transcript was intentionally not preserved.",
+        ...(job.computerWait === undefined ? [] : [
+          `The previous run was waiting for Computer${job.computerWait.nodeId ? ` ${job.computerWait.nodeId}` : ""} (${job.computerWait.reasons.join(", ")}). Re-enter Computer admission; do not assume the old process-local waiter or screen lease survived the restart.`,
+        ]),
         "",
         "Original user request:",
         job.requestText,
@@ -328,6 +338,7 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
           active: active.length,
           queued: active.filter((job) => job.status === "queued").length,
           running: active.filter((job) => job.status === "running").length,
+          waitingForComputer: active.filter((job) => job.status === "waiting-for-computer").length,
           retrying: active.filter((job) => job.status === "retrying").length,
           pendingDeliveries: manager.pendingDeliveries().length,
           activeJobs: active.map((job) => ({
@@ -336,6 +347,7 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
             status: job.status,
             ...(job.currentStatus === undefined ? {} : { currentStatus: job.currentStatus }),
             ...(job.sessionId === undefined ? {} : { sessionId: job.sessionId }),
+            ...(job.computerWait === undefined ? {} : { computerWait: job.computerWait }),
             ...(job.deliveryStatus === undefined ? {} : { deliveryStatus: job.deliveryStatus }),
             updatedAt: job.updatedAt,
           })),
@@ -374,7 +386,7 @@ export function createSessionJobsPlugin(options: SessionJobsPluginOptions = {}):
     ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
       id: "session.jobs.cancel",
       label: "Cancel background session work",
-      description: "Resolve a natural-language job/session selector, disambiguate similar active jobs, require confirmation bound to the originating channel principal, then cancel only that exact running or queued job. This never deletes session history.",
+      description: "Resolve a natural-language job/session selector, disambiguate similar active jobs, require confirmation bound to the originating channel principal, then cancel only that exact active job, including work waiting for a Computer. This never deletes session history.",
       parameters: Object.freeze({
         type: "object",
         properties: { query: { type: "string" } },

@@ -3,6 +3,7 @@ import type { FridayPlugin } from "../../src/plugin.js";
 import { AGENT_CAPABILITY } from "../agent/contract.js";
 import { AGENT_PROFILES_CAPABILITY } from "../agent-profiles/contract.js";
 import { CONVERSATIONS_CAPABILITY } from "../conversations/contract.js";
+import { COMPUTER_CAPABILITY } from "../computer/contract.js";
 import { MODEL_CREDENTIALS_CAPABILITY } from "../auth/contract.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { EVENTS_CAPABILITY } from "../events/contract.js";
@@ -62,6 +63,7 @@ const turnLoopPlugin: FridayPlugin = definePlugin({
     AGENT_PROFILES_CAPABILITY,
     CONVERSATIONS_CAPABILITY,
     PROJECTS_CAPABILITY,
+    COMPUTER_CAPABILITY,
   ],
   provides: [TURN_LOOP_CAPABILITY],
 }, (ctx) => {
@@ -87,6 +89,7 @@ const turnLoopPlugin: FridayPlugin = definePlugin({
       sandbox: () => ctx.services.optional(SANDBOX_CAPABILITY),
       profiles: () => ctx.services.optional(AGENT_PROFILES_CAPABILITY),
       projects: () => ctx.services.optional(PROJECTS_CAPABILITY),
+      computer: () => ctx.services.optional(COMPUTER_CAPABILITY),
     },
   });
   ctx.effect(() => executor.dispose());

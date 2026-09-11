@@ -5,6 +5,7 @@ import type { ConversationsService } from "../conversations/contract.js";
 import type { TurnRuntimeService } from "../turn-loop/contract.js";
 import type { SessionJobsService } from "../session-jobs/contract.js";
 import type { ProjectsService } from "../projects/contract.js";
+import type { ComputerService } from "../computer/contract.js";
 
 /** Wire-compatible event envelope. The canonical generated schemas live in @friday/client-protocol. */
 export interface ClientEventMessage {
@@ -54,6 +55,7 @@ export interface ClientGatewayResources {
   readonly turnRuntime?: TurnRuntimeService | undefined;
   readonly sessionJobs?: SessionJobsService | undefined;
   readonly projects?: ProjectsService | undefined;
+  readonly computer?: ComputerService | undefined;
 }
 
 export interface ClientGatewayListenOptions {

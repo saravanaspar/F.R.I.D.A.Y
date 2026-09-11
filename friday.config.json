@@ -49,6 +49,7 @@
     "./plugins/voice/index.ts",
     "./plugins/webhooks/index.ts",
     "./plugins/worktrees/index.ts",
+    "./plugins/computer/index.ts",
     "./plugins/projects/index.ts"
   ]
 }

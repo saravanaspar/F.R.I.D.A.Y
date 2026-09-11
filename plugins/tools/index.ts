@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import * as tools from "@friday/tools";
 import { reportOperationalError } from "@friday/operational-errors";
 import type { ExecutionTarget } from "@friday/execution-targets";
@@ -9,6 +10,12 @@ import {
 } from "@friday/tools";
 import type { FridayPlugin } from "../../src/plugin.js";
 import { definePlugin } from "../capabilities/protocol.js";
+import {
+  COMPUTER_CAPABILITY,
+  type ComputerAgentControlResume,
+  type ComputerExecutionBinding,
+  type ComputerService,
+} from "../computer/contract.js";
 import { EXECUTION_CAPABILITY } from "../execution/contract.js";
 import { PERMISSIONS_CAPABILITY, type PermissionMode } from "../permissions/contract.js";
 import { sandboxNetworkEnabled, SANDBOX_CAPABILITY } from "../sandbox/contract.js";
@@ -20,18 +27,50 @@ function effectiveMode(requested: PermissionMode | undefined, normalize: (value?
 }
 
 function executionTarget(options: SecureToolOptions): ExecutionTarget | undefined {
-  const target = options.executionTarget;
-  if (target?.kind === "computer-node") {
-    throw new Error(`Execution target ${target.id} requires the Computer capability (Phase 4)`);
-  }
-  return target;
+  return options.executionTarget;
 }
 
 function usesSandbox(target: ExecutionTarget | undefined): boolean {
   return target === undefined || target.kind === "sandbox";
 }
 
-const toolsPlugin: FridayPlugin = definePlugin({ id: "tools", requires: [EXECUTION_CAPABILITY, PERMISSIONS_CAPABILITY, SANDBOX_CAPABILITY], provides: [TOOLS_CAPABILITY] }, (ctx) => {
+function currentComputerExecutionBinding(service: ComputerService, binding: ComputerExecutionBinding): ComputerExecutionBinding {
+  const control = service.controlLease(binding.screenLeaseId);
+  if (!control) throw new Error("Computer execution requires an active leased screen");
+  if (control.nodeId !== binding.nodeId || control.screenId !== binding.screenId || control.agentOwnerId !== binding.ownerId) {
+    throw new Error("Computer control lease does not match the execution binding");
+  }
+  if (control.holder === "agent" && control.holderId === binding.ownerId && control.generation >= binding.generation) {
+    return control.generation === binding.generation ? binding : Object.freeze({ ...binding, generation: control.generation });
+  }
+  return binding;
+}
+
+async function resumeComputerExecutionAfterTakeover(
+  service: ComputerService,
+  binding: ComputerExecutionBinding,
+  error: unknown,
+  signal?: AbortSignal,
+): Promise<Extract<ComputerAgentControlResume, { resumedAfterTakeover: true }>> {
+  const control = service.controlLease(binding.screenLeaseId);
+  if (!control
+    || control.nodeId !== binding.nodeId
+    || control.screenId !== binding.screenId
+    || control.agentOwnerId !== binding.ownerId
+    || control.generation <= binding.generation) {
+    throw error;
+  }
+  const resume = await service.waitForAgentControl(binding.screenLeaseId, binding.ownerId, binding.generation, signal);
+  if (!resume.resumedAfterTakeover) throw error;
+  return resume;
+}
+
+const toolsPlugin: FridayPlugin = definePlugin({
+  id: "tools",
+  requires: [EXECUTION_CAPABILITY, PERMISSIONS_CAPABILITY, SANDBOX_CAPABILITY],
+  optional: [COMPUTER_CAPABILITY],
+  provides: [TOOLS_CAPABILITY],
+}, (ctx) => {
   const execution = ctx.services.require(EXECUTION_CAPABILITY);
   const permissions = ctx.services.require(PERMISSIONS_CAPABILITY);
   const sandbox = ctx.services.require(SANDBOX_CAPABILITY);
@@ -60,9 +99,102 @@ const toolsPlugin: FridayPlugin = definePlugin({ id: "tools", requires: [EXECUTI
     }
   });
 
+  const computerService = (): ComputerService => {
+    const computer = ctx.services.optional(COMPUTER_CAPABILITY);
+    if (!computer) throw new Error("Computer capability is unavailable for computer-node execution");
+    return computer;
+  };
+
+  const createComputerTool = (name: ToolName, cwd: string, options: SecureToolOptions, target: ExecutionTarget, mode: PermissionMode): Tool => {
+    const nodeId = target.computerNodeId;
+    if (target.kind !== "computer-node" || !nodeId) throw new Error(`Execution target ${target.id} is not a valid Computer Node target`);
+    const binding = options.computer;
+    if (!binding) throw new Error(`Execution target ${target.id} requires a leased Computer screen from Turn Loop`);
+    if (binding.nodeId !== nodeId) throw new Error(`Computer execution binding targets ${binding.nodeId}, not ${nodeId}`);
+
+    const base = tools.createTool(name, cwd);
+    const remote: Tool = {
+      ...base,
+      async execute(_toolCallId, rawInput, signal) {
+        signal?.throwIfAborted();
+        if (!rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) throw new Error(`${name} input must be an object`);
+        const input = rawInput as Readonly<Record<string, unknown>>;
+
+        if (name === "bash") {
+          const command = typeof input.command === "string" ? input.command : "";
+          await permissions.authorize({
+            mode,
+            workspace: cwd,
+            access: "write",
+            action: { id: "tools.bash.execute", effect: "workspace-write", resource: cwd, network: true },
+            reason: `bash on Computer ${nodeId}: ${command}`,
+          });
+        } else if (name === "edit") {
+          const path = typeof input.path === "string" ? input.path : "";
+          const absolutePath = resolve(cwd, path);
+          await permissions.authorize({
+            mode,
+            workspace: cwd,
+            access: "write",
+            path: absolutePath,
+            action: { id: "tools.edit.write", effect: "workspace-write", resource: absolutePath, network: false },
+            reason: `edit ${absolutePath} on Computer ${nodeId}`,
+          });
+        } else if (name === "process" && input.action === "start") {
+          if (binding.ownerKind !== "main-agent") throw new Error("Subagents cannot start persistent background processes");
+          const command = typeof input.command === "string" ? input.command : "";
+          await permissions.authorize({
+            mode,
+            workspace: cwd,
+            access: "write",
+            action: { id: "tools.process.start", effect: "workspace-write", resource: cwd, network: true },
+            reason: `background process on Computer ${nodeId}: ${command}`,
+          });
+        } else if (name === "ipython") {
+          await permissions.authorize({
+            mode,
+            workspace: cwd,
+            access: "write",
+            action: { id: "tools.ipython.execute", effect: "workspace-write", resource: cwd, network: true },
+            reason: `ipython execution on Computer ${nodeId} in the selected workspace`,
+          });
+        }
+
+        const service = computerService();
+        const activeBinding = currentComputerExecutionBinding(service, binding);
+        try {
+          const result = await service.runTool(activeBinding, { workspace: cwd, tool: name, input }, signal);
+          return {
+            content: result.content.map((item) => item.type === "text"
+              ? { type: "text" as const, text: item.text }
+              : { type: "image" as const, data: item.data, mimeType: item.mimeType }),
+            details: result.details,
+            ...(result.terminate === undefined ? {} : { terminate: result.terminate }),
+          };
+        } catch (error) {
+          const resume = await resumeComputerExecutionAfterTakeover(service, activeBinding, error, signal);
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Human takeover interrupted Computer ${name} execution. The interrupted operation was not replayed and may have partially executed. Re-check current state before acting again.`,
+            }],
+            details: {
+              interruptedByHumanTakeover: true,
+              staleActionReplayed: false,
+              controlGeneration: resume.controlLease.generation,
+              observation: resume.observation,
+            },
+          };
+        }
+      },
+    };
+    return remote;
+  };
+
   const createTool = (name: ToolName, cwd: string, options: SecureToolOptions = {}): Tool => {
     const mode = effectiveMode(options.permissionMode, permissions.normalizeMode);
     const target = executionTarget(options);
+    if (target?.kind === "computer-node") return createComputerTool(name, cwd, options, target, mode);
     const sandboxed = usesSandbox(target);
     if (name === "bash") {
       return tools.createTool("bash", cwd, {

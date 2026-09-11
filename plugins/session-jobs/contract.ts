@@ -4,7 +4,7 @@ import type { TurnFinalizerDescriptor } from "../turn-loop/contract.js";
 
 export type SessionJobFinalizerDescriptor = TurnFinalizerDescriptor;
 
-export type SessionJobStatus = "queued" | "running" | "retrying" | "completed" | "resumed" | "error" | "cancelled";
+export type SessionJobStatus = "queued" | "running" | "waiting-for-computer" | "retrying" | "completed" | "resumed" | "error" | "cancelled";
 export type SessionJobDirectiveStatus = "pending" | "applied";
 
 export interface SessionJobDirective {
@@ -50,6 +50,21 @@ export interface SessionJobProgress {
   readonly delayMs?: number | undefined;
   readonly sessionId?: string | undefined;
   readonly notify?: boolean | undefined;
+  /** Optional durable state transition for resource admission boundaries. */
+  readonly jobStatus?: "running" | "waiting-for-computer" | undefined;
+  /** Required whenever jobStatus is waiting-for-computer. */
+  readonly computerWait?: Readonly<{
+    readonly code: "WAITING_FOR_COMPUTER";
+    readonly nodeId?: string | undefined;
+    readonly reasons: readonly string[];
+  }> | undefined;
+}
+
+export interface SessionJobComputerWait {
+  readonly code: "WAITING_FOR_COMPUTER";
+  readonly nodeId?: string | undefined;
+  readonly reasons: readonly string[];
+  readonly requestedAt: string;
 }
 
 export interface SessionJobTimelineEntry {
@@ -79,6 +94,8 @@ export interface SessionJobRecord {
   readonly currentStatus?: string | undefined;
   readonly retryAttempt?: number | undefined;
   readonly retryMax?: number | undefined;
+  /** Last durable Computer admission wait; retained across restart reconstruction. */
+  readonly computerWait?: SessionJobComputerWait | undefined;
   readonly error?: string | undefined;
   readonly resultPreview?: string | undefined;
   /** Execution is finished, but delivery or its required continuation is pending. */
@@ -95,6 +112,7 @@ export interface SessionJobResumeRecord {
   readonly requestText: string;
   readonly timestamp: number;
   readonly origin: SessionJobOrigin;
+  readonly computerWait?: SessionJobComputerWait | undefined;
   /** Host-only full directive text required to reconstruct interrupted work. */
   readonly directives: readonly SessionJobDirectiveMessage[];
 }

@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import type { EventsService } from "../events/contract.js";
 import type {
   SessionJobFinalizerDescriptor,
+  SessionJobComputerWait,
   SessionJobDirective,
   SessionJobDirectiveMessage,
   SessionJobListOptions,
@@ -55,6 +56,7 @@ type MutableJob = {
   currentStatus?: string;
   retryAttempt?: number;
   retryMax?: number;
+  computerWait?: SessionJobComputerWait;
   error?: string;
   resultPreview?: string;
   notification?: PendingNotification;
@@ -107,6 +109,7 @@ function cloneMutable(job: MutableJob): MutableJob {
   return {
     ...job,
     ...(job.notification ? { notification: structuredClone(job.notification) } : {}),
+    ...(job.computerWait ? { computerWait: { ...job.computerWait, reasons: [...job.computerWait.reasons] } } : {}),
     origin: { ...job.origin },
     timeline: job.timeline.map((entry) => ({ ...entry })),
     directives: job.directives.map((entry) => ({ ...entry })),
@@ -115,10 +118,11 @@ function cloneMutable(job: MutableJob): MutableJob {
 
 function clone(job: MutableJob): SessionJobRecord {
   const snapshot = cloneMutable(job);
-  const { requestText: _privateRequestText, notification, turnId: _turnId, directives, ...publicSnapshot } = snapshot;
+  const { requestText: _privateRequestText, notification, turnId: _turnId, directives, computerWait, ...publicSnapshot } = snapshot;
   return Object.freeze({
     ...publicSnapshot,
     ...(notification ? { deliveryStatus: notification.delivered ? "finalizing" as const : "pending" as const } : {}),
+    ...(computerWait ? { computerWait: Object.freeze({ ...computerWait, reasons: Object.freeze([...computerWait.reasons]) }) } : {}),
     origin: Object.freeze(publicSnapshot.origin),
     timeline: Object.freeze(publicSnapshot.timeline.map((entry) => Object.freeze(entry))),
     directives: Object.freeze(directives.map(({ text: _privateText, ...entry }) => Object.freeze(entry))),
@@ -126,7 +130,7 @@ function clone(job: MutableJob): SessionJobRecord {
 }
 
 function isActive(status: SessionJobRecord["status"]): boolean {
-  return status === "queued" || status === "running" || status === "retrying";
+  return status === "queued" || status === "running" || status === "waiting-for-computer" || status === "retrying";
 }
 
 function needsRetention(job: MutableJob): boolean {
@@ -162,6 +166,7 @@ function selectorText(value: string): string {
 const SESSION_JOB_STATUSES = new Set<SessionJobRecord["status"]>([
   "queued",
   "running",
+  "waiting-for-computer",
   "retrying",
   "completed",
   "resumed",
@@ -197,6 +202,26 @@ function persistedPositiveInteger(raw: Record<string, unknown>, field: string): 
     throw new Error(`Session-jobs field ${field} is invalid`);
   }
   return value as number;
+}
+
+function parseComputerWait(value: unknown): SessionJobComputerWait {
+  const raw = record(value);
+  if (!raw || raw.code !== "WAITING_FOR_COMPUTER") throw new Error("Session-jobs computer wait is invalid");
+  if (!Array.isArray(raw.reasons) || raw.reasons.length === 0 || raw.reasons.length > 16) {
+    throw new Error("Session-jobs computer wait reasons are invalid");
+  }
+  const reasons = raw.reasons.map((reason, index) => {
+    if (typeof reason !== "string" || !reason.trim() || reason.length > 64 || /[\u0000-\u001f\u007f]/.test(reason)) {
+      throw new Error(`Session-jobs computer wait reason ${index} is invalid`);
+    }
+    return reason.trim();
+  });
+  return Object.freeze({
+    code: "WAITING_FOR_COMPUTER" as const,
+    ...(raw.nodeId === undefined ? {} : { nodeId: persistedString(raw, "nodeId", 128)! }),
+    reasons: Object.freeze(reasons),
+    requestedAt: persistedTimestamp(raw, "requestedAt")!,
+  });
 }
 
 function parseOrigin(value: unknown): MutableJob["origin"] {
@@ -278,6 +303,7 @@ function parsePersistedJob(value: unknown): MutableJob {
     ...(raw.currentStatus === undefined ? {} : { currentStatus: persistedString(raw, "currentStatus", MAX_STATUS)! }),
     ...(raw.retryAttempt === undefined ? {} : { retryAttempt: persistedPositiveInteger(raw, "retryAttempt")! }),
     ...(raw.retryMax === undefined ? {} : { retryMax: persistedPositiveInteger(raw, "retryMax")! }),
+    ...(raw.computerWait === undefined ? {} : { computerWait: parseComputerWait(raw.computerWait) }),
     ...(raw.error === undefined ? {} : { error: persistedString(raw, "error", MAX_STATUS)! }),
     ...(raw.resultPreview === undefined ? {} : { resultPreview: persistedString(raw, "resultPreview", MAX_PREVIEW)! }),
     ...(raw.notification === undefined ? {} : { notification: parseNotification(raw.notification) }),
@@ -569,9 +595,11 @@ export class SessionJobManager implements SessionJobsService {
     cancelled.currentStatus = "Cancellation requested";
     cancelled.completedAt = completedAt;
     cancelled.updatedAt = completedAt;
+    delete cancelled.computerWait;
     delete cancelled.requestText;
     await this.persist([cancelled]);
     Object.assign(job, cancelled);
+    delete job.computerWait;
     delete job.requestText;
     const run = this.active.get(job.id);
     run?.controller.abort(job.error);
@@ -714,6 +742,7 @@ export class SessionJobManager implements SessionJobsService {
         requestText: job.requestText!,
         timestamp: Date.parse(job.createdAt),
         origin: Object.freeze({ ...job.origin }),
+        ...(job.computerWait === undefined ? {} : { computerWait: Object.freeze({ ...job.computerWait, reasons: Object.freeze([...job.computerWait.reasons]) }) }),
         directives: Object.freeze(job.directives.filter((directive) => directive.status === "pending").map((directive) => Object.freeze({ id: directive.id, text: directive.text }))),
       })));
   }
@@ -731,9 +760,11 @@ export class SessionJobManager implements SessionJobsService {
     resumed.completedAt = completedAt;
     resumed.updatedAt = completedAt;
     delete resumed.error;
+    delete resumed.computerWait;
     delete resumed.requestText;
     await this.persist([resumed]);
     Object.assign(job, resumed);
+    delete job.computerWait;
     delete job.requestText;
     this.publish("session-job.resumed", job);
     return clone(job);
@@ -835,11 +866,13 @@ export class SessionJobManager implements SessionJobsService {
       const startedAt = new Date(this.options.now()).toISOString();
       const running = cloneMutable(job);
       running.status = "running";
+      delete running.computerWait;
       running.startedAt = startedAt;
       running.updatedAt = startedAt;
       running.currentStatus = "Running";
       await this.persist([running]);
       Object.assign(job, running);
+      delete job.computerWait;
       this.publish("session-job.started", job);
       if (wasQueued) await this.safeNotify(run.request.notify, `Now starting ${job.label} (${job.id}).`);
 
@@ -864,6 +897,7 @@ export class SessionJobManager implements SessionJobsService {
       completed.resultPreview = clip(result.text, MAX_PREVIEW);
       completed.completedAt = completedAt;
       completed.updatedAt = completedAt;
+      delete completed.computerWait;
       completed.notification = parseNotification({
         text: clip([`Completed ${job.label} (${job.id}).`, "", result.text].join("\n"), 128_000),
         delivered: false,
@@ -873,6 +907,7 @@ export class SessionJobManager implements SessionJobsService {
       if (!completed.notification.requiresFinalization) delete completed.requestText;
       await this.persist([completed]);
       Object.assign(job, completed);
+      delete job.computerWait;
       if (completed.requestText === undefined) delete job.requestText;
       if (result.afterNotify) this.notificationFinalizers.set(job.id, result.afterNotify);
       notificationReady = true;
@@ -886,6 +921,7 @@ export class SessionJobManager implements SessionJobsService {
       failed.currentStatus = "Failed";
       failed.completedAt = completedAt;
       failed.updatedAt = completedAt;
+      delete failed.computerWait;
       delete failed.requestText;
       failed.notification = {
         text: [`${job.label} (${job.id}) failed.`, `Reason: ${failed.error}`, "The session and any work already persisted are preserved."].join("\n"),
@@ -897,6 +933,7 @@ export class SessionJobManager implements SessionJobsService {
       try {
         await this.persist([failed]);
         Object.assign(job, failed);
+        delete job.computerWait;
         delete job.requestText;
         notificationReady = true;
       } catch (persistError) {
@@ -904,6 +941,7 @@ export class SessionJobManager implements SessionJobsService {
         // Reflect that execution has stopped without pretending the terminal state is
         // durable. Recovery on restart will still detect the old active row.
         Object.assign(job, failed, { currentStatus: "Failed; terminal persistence unavailable" });
+        delete job.computerWait;
       }
       this.publish("session-job.failed", job);
       if (terminalPersistenceError !== undefined) await this.safeNotify(run.request.notify, [
@@ -969,6 +1007,9 @@ export class SessionJobManager implements SessionJobsService {
     const nowMs = progress.timestamp ?? this.options.now();
     const at = new Date(nowMs).toISOString();
     if (progress.sessionId !== undefined) this.bindSession(job, run, progress.sessionId);
+    if (progress.jobStatus !== undefined && progress.kind !== "status") {
+      throw new Error("Session job state transitions require status progress");
+    }
     const message = clip(progress.message, MAX_STATUS);
     const timeline: SessionJobTimelineEntry = {
       at,
@@ -982,8 +1023,40 @@ export class SessionJobManager implements SessionJobsService {
     if (job.timeline.length > MAX_TIMELINE) job.timeline.splice(0, job.timeline.length - MAX_TIMELINE);
     job.currentStatus = message;
     job.updatedAt = at;
-    if (progress.kind === "retry") {
+    if (progress.jobStatus === "waiting-for-computer") {
+      const wait = progress.computerWait;
+      if (!wait || wait.code !== "WAITING_FOR_COMPUTER" || wait.reasons.length === 0 || wait.reasons.length > 16) {
+        throw new Error("waiting-for-computer progress requires bounded Computer wait context");
+      }
+      const reasons = wait.reasons.map((reason) => {
+        if (typeof reason !== "string" || !reason.trim() || reason.length > 64 || /[\u0000-\u001f\u007f]/.test(reason)) {
+          throw new Error("Computer wait reasons must be bounded printable strings");
+        }
+        return reason.trim();
+      });
+      const nodeId = wait.nodeId === undefined ? undefined : wait.nodeId.trim();
+      if (nodeId !== undefined && (!nodeId || nodeId.length > 128 || /[\u0000-\u001f\u007f]/.test(nodeId))) {
+        throw new Error("Computer wait node id is invalid");
+      }
+      job.status = "waiting-for-computer";
+      job.computerWait = Object.freeze({
+        code: "WAITING_FOR_COMPUTER" as const,
+        ...(nodeId === undefined ? {} : { nodeId }),
+        reasons: Object.freeze(reasons),
+        requestedAt: at,
+      });
+      delete job.retryAttempt;
+      delete job.retryMax;
+    } else if (progress.jobStatus === "running") {
+      job.status = "running";
+      delete job.computerWait;
+      delete job.retryAttempt;
+      delete job.retryMax;
+    } else if (progress.computerWait !== undefined) {
+      throw new Error("Computer wait context requires jobStatus=waiting-for-computer");
+    } else if (progress.kind === "retry") {
       job.status = "retrying";
+      delete job.computerWait;
       if (progress.attempt === undefined) delete job.retryAttempt;
       else job.retryAttempt = progress.attempt;
       if (progress.maxRetries === undefined) delete job.retryMax;
@@ -1038,6 +1111,11 @@ export class SessionJobManager implements SessionJobsService {
           label: job.label,
           status: job.status,
           ...(job.sessionId === undefined ? {} : { sessionId: job.sessionId }),
+          ...(job.computerWait === undefined ? {} : {
+            computerWaitCode: job.computerWait.code,
+            ...(job.computerWait.nodeId === undefined ? {} : { computerNodeId: job.computerWait.nodeId }),
+            computerWaitReasons: [...job.computerWait.reasons],
+          }),
           ...(progress?.kind === undefined ? {} : { progressKind: progress.kind }),
           ...(progress?.attempt === undefined ? {} : { retryAttempt: progress.attempt }),
           ...(directiveId === undefined ? {} : { directiveId }),

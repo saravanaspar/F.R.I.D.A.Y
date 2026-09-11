@@ -6,6 +6,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AgentService } from "../agent/contract.js";
 import type { AgentProfilesService } from "../agent-profiles/contract.js";
 import type { ModelCredentialService } from "../auth/contract.js";
+import type { ComputerExecutionBinding, ComputerService, ScreenLease } from "../computer/contract.js";
 import type { MemoryRelationResult, MemorySearchResult, MemoryService } from "../memory/contract.js";
 import type { ModelService } from "../model/contract.js";
 import type { ObservabilityService } from "../observability/contract.js";
@@ -102,6 +103,7 @@ export interface AgentTurnExecutorOptionalDependencies {
   sandbox(): SandboxService | undefined;
   profiles(): AgentProfilesService | undefined;
   projects(): ProjectsService | undefined;
+  computer(): ComputerService | undefined;
 }
 
 export interface AgentTurnExecutorDependencies {
@@ -141,6 +143,67 @@ function positiveInteger(value: number | undefined, fallback: number, label: str
     throw new Error(`${label} must be an integer between 1 and 1000`);
   }
   return value;
+}
+
+const MAX_COMPUTER_LEASE_RENEW_INTERVAL_MS = 5 * 60_000;
+
+function waitForComputerLeaseRenewal(delayMs: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    timer.unref?.();
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason ?? new Error("Computer lease keeper stopped"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function startComputerLeaseKeeper(
+  service: ComputerService,
+  binding: ComputerExecutionBinding,
+  initialLease: ScreenLease,
+  parentSignal: AbortSignal | undefined,
+  onFailure: (error: unknown) => void,
+): { stop(): Promise<void> } {
+  const controller = new AbortController();
+  const stopFromParent = () => controller.abort(parentSignal?.reason ?? new Error("Computer Agent run aborted"));
+  if (parentSignal?.aborted) stopFromParent();
+  else parentSignal?.addEventListener("abort", stopFromParent, { once: true });
+  const acquiredAt = Date.parse(initialLease.acquiredAt);
+  let expiresAt = Date.parse(initialLease.expiresAt);
+  const leaseTtlMs = expiresAt - acquiredAt;
+  if (!Number.isFinite(acquiredAt) || !Number.isFinite(expiresAt) || !Number.isFinite(leaseTtlMs) || leaseTtlMs <= 0) {
+    throw new Error("Computer screen lease has an invalid lifetime");
+  }
+  let failure: unknown;
+  const running = (async () => {
+    while (!controller.signal.aborted) {
+      const remaining = expiresAt - Date.now();
+      if (!Number.isFinite(remaining) || remaining <= 0) throw new Error("Computer screen lease expired before it could be renewed");
+      const delayMs = Math.max(25, Math.min(MAX_COMPUTER_LEASE_RENEW_INTERVAL_MS, Math.floor(remaining / 3)));
+      await waitForComputerLeaseRenewal(delayMs, controller.signal);
+      const renewed = await service.renewScreenLease(binding.screenLeaseId, binding.ownerId, leaseTtlMs);
+      expiresAt = Date.parse(renewed.expiresAt);
+    }
+  })().catch((error: unknown) => {
+    if (controller.signal.aborted) return;
+    failure = error;
+    onFailure(error);
+  });
+  return {
+    async stop() {
+      parentSignal?.removeEventListener("abort", stopFromParent);
+      if (!controller.signal.aborted) controller.abort(new Error("Computer lease keeper stopped"));
+      await running;
+      if (failure !== undefined) throw failure;
+    },
+  };
 }
 
 function textFromAssistant(message: AgentMessage | undefined): string {
@@ -642,7 +705,15 @@ export function createAgentTurnExecutor(
         const permissionMode = executionContext?.permissionMode;
         const toolCwd = executionContext?.cwd ?? cwd;
         const target = executionContext?.projectExecutionTarget;
-        const policyKey = JSON.stringify([recursionAllowed, permissionMode ?? "default", toolCwd, target?.id ?? "sandbox-default"]);
+        const computerExecution = executionContext?.computerExecution;
+        const policyKey = JSON.stringify([
+          recursionAllowed,
+          permissionMode ?? "default",
+          toolCwd,
+          target?.id ?? "sandbox-default",
+          computerExecution?.screenLeaseId ?? "no-computer-lease",
+          computerExecution?.generation ?? 0,
+        ]);
         const cached = coreToolsByPolicy.get(policyKey);
         if (cached) return [...cached];
         const ipythonOptions = {
@@ -654,6 +725,7 @@ export function createAgentTurnExecutor(
           ipython: ipythonOptions,
           ...(permissionMode === undefined ? {} : { permissionMode }),
           ...(target === undefined ? {} : { executionTarget: target }),
+          ...(computerExecution === undefined ? {} : { computer: computerExecution }),
         };
         const tools = Object.freeze(Object.values(dependencies.tools.createAllTools(toolCwd, toolOptions)) as AgentTool[]);
         coreToolsByPolicy.set(policyKey, tools);
@@ -901,6 +973,7 @@ export function createAgentTurnExecutor(
           const afterReplyCallbacks: Array<() => void | Promise<void>> = [];
           const afterReplyFinalizers: TurnFinalizerDescriptor[] = [];
           const afterFailureCallbacks: Array<(error: unknown) => void | Promise<void>> = [];
+          const agentRunId = `run-${randomUUID()}`;
           const profileId = turnContext?.turn.agentProfileId;
           const profile = profileId === undefined ? undefined : dependencies.optional?.profiles?.()?.get(profileId);
           if (profileId !== undefined && !profile) throw new Error(`agent profile not found: ${profileId}`);
@@ -916,7 +989,90 @@ export function createAgentTurnExecutor(
                 ...(turnContext?.turn.projectTargetId === undefined ? {} : { targetId: turnContext.turn.projectTargetId }),
                 ...(signal === undefined ? {} : { signal }),
               });
+          const project = selectedProjectId === undefined ? undefined : projects!.get(selectedProjectId);
+          if (selectedProjectId !== undefined && !project) throw new Error(`project not found after workspace acquisition: ${selectedProjectId}`);
+          const computerAdmission = project?.policy.computerAdmission;
+          const computerDemand = computerAdmission === undefined
+            ? undefined
+            : {
+                ...(computerAdmission.memoryMb === undefined ? {} : { memoryMb: computerAdmission.memoryMb }),
+                ...(computerAdmission.browserRenderers === undefined ? {} : { browserRenderers: computerAdmission.browserRenderers }),
+                ...(computerAdmission.gpu === undefined ? {} : { gpu: computerAdmission.gpu }),
+              };
+          const hasComputerDemand = computerDemand !== undefined && Object.keys(computerDemand).length > 0;
           const effectiveCwd = projectWorkspace?.workspacePath ?? cwd;
+          const computerOwnerId = turnContext?.turn.resumedJobId ?? jobId ?? sessionId;
+          let computerService: ComputerService | undefined;
+          let computerExecution: ComputerExecutionBinding | undefined;
+          let computerLeaseKeeper: { stop(): Promise<void> } | undefined;
+          if (projectWorkspace?.target.kind === "computer-node") {
+            const nodeId = projectWorkspace.target.computerNodeId;
+            if (!nodeId) throw new Error(`Computer execution target ${projectWorkspace.target.id} is missing computerNodeId`);
+            computerService = dependencies.optional?.computer?.();
+            if (!computerService) throw new Error(`Computer capability is unavailable for execution target ${projectWorkspace.target.id}`);
+            if (!computerService.node(nodeId)) throw new Error(`Computer node is not registered: ${nodeId}`);
+            let waitedForComputer = false;
+            const grant = await computerService.waitForScreen({
+              ownerId: computerOwnerId,
+              preferredNodeId: nodeId,
+              ...(profile?.defaultComputerScreen === undefined ? {} : { preferredScreenId: profile.defaultComputerScreen }),
+              ...(computerAdmission?.requireBrowser === undefined ? {} : { requireBrowser: computerAdmission.requireBrowser }),
+              ...(hasComputerDemand ? { demand: computerDemand } : {}),
+            }, signal, async (waiting) => {
+              waitedForComputer = true;
+              await progress?.({
+                kind: "status",
+                message: `Waiting for Computer ${nodeId}: ${waiting.reasons.join(", ")}`,
+                jobStatus: "waiting-for-computer",
+                computerWait: {
+                  code: waiting.code,
+                  nodeId,
+                  reasons: waiting.reasons,
+                },
+              });
+            });
+            if (waitedForComputer) {
+              await progress?.({
+                kind: "status",
+                message: `Computer ${grant.screenLease.nodeId} screen ${grant.screenLease.screenId} acquired; resuming work`,
+                jobStatus: "running",
+                notify: false,
+              });
+            }
+            computerExecution = Object.freeze({
+              nodeId: grant.screenLease.nodeId,
+              screenId: grant.screenLease.screenId,
+              screenLeaseId: grant.screenLease.id,
+              ownerId: computerOwnerId,
+              ownerKind: (runtimeOptions.depth ?? 0) > 0 ? "subagent" : "main-agent",
+              runId: agentRunId,
+              ...((computerAdmission?.requireBrowser === undefined && !hasComputerDemand) ? {} : {
+                admission: Object.freeze({
+                  ...(computerAdmission?.requireBrowser === undefined ? {} : { requireBrowser: computerAdmission.requireBrowser }),
+                  ...(hasComputerDemand ? { demand: Object.freeze({ ...computerDemand }) } : {}),
+                }),
+              }),
+              generation: grant.controlLease.generation,
+            });
+            try {
+              computerLeaseKeeper = startComputerLeaseKeeper(
+                computerService,
+                computerExecution,
+                grant.screenLease,
+                signal,
+                (error) => {
+                  reportOperationalError({ component: "turn-loop", operation: "renew Computer screen lease", error });
+                  agent.abort();
+                },
+              );
+            } catch (error) {
+              await computerService.releaseScreen(grant.screenLease.id, computerOwnerId).catch((cleanupError: unknown) => {
+                reportOperationalError({ component: "turn-loop", operation: "release invalid Computer screen lease", error: cleanupError, severity: "warn" });
+                return false;
+              });
+              throw error;
+            }
+          }
           const memoryScopes = profile === undefined
             ? Object.freeze(["global:user", ...(selectedProjectId ? [`project:${selectedProjectId}`] : []), "local"])
             : Object.freeze([...new Set(["global:user", profile.memoryScope, ...(selectedProjectId ? [`project:${selectedProjectId}`] : []), "local"])]);
@@ -937,6 +1093,8 @@ export function createAgentTurnExecutor(
               projectWorkspace: projectWorkspace.workspacePath,
               projectExecutionTarget: projectWorkspace.target,
             }),
+            ...(computerExecution === undefined ? {} : { computerExecution }),
+            ...(progress === undefined ? {} : { reportProgress: progress }),
             ...(profile === undefined ? {} : {
               agentProfileId: profile.id,
               memoryScopes,
@@ -954,7 +1112,23 @@ export function createAgentTurnExecutor(
             },
             deferOnFailure(callback) { afterFailureCallbacks.push(callback); },
           };
-          const tools = buildTools(extensionContext);
+          let tools: AgentTool[];
+          try {
+            tools = buildTools(extensionContext);
+          } catch (error) {
+            if (computerLeaseKeeper) {
+              await computerLeaseKeeper.stop().catch((cleanupError: unknown) => {
+                reportOperationalError({ component: "turn-loop", operation: "stop Computer lease keeper after tool construction failure", error: cleanupError, severity: "warn" });
+              });
+            }
+            if (computerExecution && computerService) {
+              await computerService.releaseScreen(computerExecution.screenLeaseId, computerExecution.ownerId).catch((cleanupError: unknown) => {
+                reportOperationalError({ component: "turn-loop", operation: "release Computer screen after tool construction failure", error: cleanupError, severity: "warn" });
+                return false;
+              });
+            }
+            throw error;
+          }
           agent.state.tools = tools;
           const nextPromptPlan = buildPromptPlan(tools, extensionContext);
           agent.state.systemPrompt = nextPromptPlan.prompt;
@@ -979,6 +1153,7 @@ export function createAgentTurnExecutor(
           let progressUnsubscribe: (() => void) | undefined;
           let directiveUnsubscribe: (() => void) | undefined;
           signal?.addEventListener("abort", abort, { once: true });
+          let primaryRunError: unknown;
           try {
             if (turnContext?.onDirective) {
               directiveUnsubscribe = await turnContext.onDirective((directive) => {
@@ -1080,7 +1255,7 @@ export function createAgentTurnExecutor(
               ? await executePrompt()
               : await withManagedProcessRun({
                   sessionId: session.getSessionId(),
-                  runId: `run-${randomUUID()}`,
+                  runId: agentRunId,
                   ownerKind: (runtimeOptions.depth ?? 0) > 0 ? "subagent" : "main-agent",
                 }, executePrompt);
             let finalText = textResult;
@@ -1142,6 +1317,9 @@ export function createAgentTurnExecutor(
               }),
               ...(afterFailure === undefined ? {} : { afterFailure }),
             });
+          } catch (error) {
+            primaryRunError = error;
+            throw error;
           } finally {
             directiveUnsubscribe?.();
             activeExtensionContext = undefined;
@@ -1158,6 +1336,39 @@ export function createAgentTurnExecutor(
             for (const dispose of inputDisposers.splice(0).reverse()) {
               try { await dispose(); } catch (error) {
                 reportOperationalError({ component: "turn-loop", operation: "dispose prepared agent input", error });
+              }
+            }
+            if (computerExecution && computerService) {
+              let cleanupFailure: unknown;
+              try {
+                await computerService.cleanupRunProcesses(computerExecution);
+              } catch (error) {
+                cleanupFailure = error;
+                reportOperationalError({ component: "turn-loop", operation: "clean Computer background processes after Agent run", error });
+              }
+              if (computerLeaseKeeper) {
+                try {
+                  await computerLeaseKeeper.stop();
+                } catch (error) {
+                  cleanupFailure ??= error;
+                  reportOperationalError({ component: "turn-loop", operation: "stop Computer screen lease keeper", error });
+                }
+              }
+              try {
+                const control = computerService.controlLease(computerExecution.screenLeaseId);
+                if (control?.holder !== "human") {
+                  await computerService.releaseScreen(computerExecution.screenLeaseId, computerExecution.ownerId);
+                }
+              } catch (error) {
+                reportOperationalError({ component: "turn-loop", operation: "release Computer screen after Agent run", error, severity: "warn" });
+              }
+              if (cleanupFailure !== undefined) {
+                const cleanupError = cleanupFailure instanceof Error ? cleanupFailure : new Error(String(cleanupFailure));
+                if (primaryRunError !== undefined) {
+                  const primary = primaryRunError instanceof Error ? primaryRunError : new Error(String(primaryRunError));
+                  throw new AggregateError([primary, cleanupError], "Computer Agent run failed and cleanup also failed");
+                }
+                throw cleanupError;
               }
             }
           }

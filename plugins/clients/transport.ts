@@ -6,6 +6,7 @@ import { decodeClientMessage, encodeClientMessage, type ClientAuthenticate, type
 import { WebSocket, WebSocketServer } from "ws";
 import type { DevicesService, DeviceType } from "../devices/contract.js";
 import type { ProjectPolicy, ProjectRepositoryMetadata, ProjectValidationCommands } from "../projects/contract.js";
+import type { ComputerService } from "../computer/contract.js";
 import type { ClientConnection, ClientGatewayListenOptions, ClientGatewayResources, ClientGatewayServerStatus, ClientGatewayService } from "./contract.js";
 
 const MAX_HTTP_BODY_BYTES = 64 * 1024;
@@ -84,12 +85,28 @@ function projectPolicy(body: Record<string, unknown>): Partial<ProjectPolicy> | 
   const allowedTargetIds = stringArray(raw.allowedTargetIds, "policy.allowedTargetIds");
   if (raw.requireWorktreeForWrites !== undefined && typeof raw.requireWorktreeForWrites !== "boolean") throw new Error("policy.requireWorktreeForWrites must be a boolean");
   if (raw.allowCoreHostWrites !== undefined && typeof raw.allowCoreHostWrites !== "boolean") throw new Error("policy.allowCoreHostWrites must be a boolean");
+  let computerAdmission: ProjectPolicy["computerAdmission"];
+  if (raw.computerAdmission !== undefined) {
+    if (!raw.computerAdmission || typeof raw.computerAdmission !== "object" || Array.isArray(raw.computerAdmission)) throw new Error("policy.computerAdmission must be an object");
+    const admission = raw.computerAdmission as Record<string, unknown>;
+    if (admission.requireBrowser !== undefined && typeof admission.requireBrowser !== "boolean") throw new Error("policy.computerAdmission.requireBrowser must be a boolean");
+    if (admission.memoryMb !== undefined && (typeof admission.memoryMb !== "number" || !Number.isFinite(admission.memoryMb) || admission.memoryMb < 0)) throw new Error("policy.computerAdmission.memoryMb must be a non-negative number");
+    if (admission.browserRenderers !== undefined && (!Number.isSafeInteger(admission.browserRenderers) || (admission.browserRenderers as number) < 0)) throw new Error("policy.computerAdmission.browserRenderers must be a non-negative integer");
+    if (admission.gpu !== undefined && typeof admission.gpu !== "boolean") throw new Error("policy.computerAdmission.gpu must be a boolean");
+    computerAdmission = {
+      ...(admission.requireBrowser === undefined ? {} : { requireBrowser: admission.requireBrowser as boolean }),
+      ...(admission.memoryMb === undefined ? {} : { memoryMb: admission.memoryMb as number }),
+      ...(admission.browserRenderers === undefined ? {} : { browserRenderers: admission.browserRenderers as number }),
+      ...(admission.gpu === undefined ? {} : { gpu: admission.gpu as boolean }),
+    };
+  }
   return {
     ...(typeof raw.defaultTargetId === "string" ? { defaultTargetId: raw.defaultTargetId } : {}),
     ...(allowedTargetIds === undefined ? {} : { allowedTargetIds }),
     ...(raw.requireWorktreeForWrites === undefined ? {} : { requireWorktreeForWrites: raw.requireWorktreeForWrites }),
     ...(raw.allowCoreHostWrites === undefined ? {} : { allowCoreHostWrites: raw.allowCoreHostWrites }),
     ...(typeof raw.worktreeRoot === "string" ? { worktreeRoot: raw.worktreeRoot } : {}),
+    ...(computerAdmission === undefined ? {} : { computerAdmission }),
   };
 }
 
@@ -106,6 +123,22 @@ function cursor(value: unknown): number {
 
 function pathOf(request: IncomingMessage): string {
   try { return new URL(request.url ?? "/", "http://localhost").pathname; } catch { return "/invalid"; }
+}
+
+function clientHumanOwner(deviceId: string): string {
+  return `client:${deviceId}`;
+}
+
+function optionalHandBackAfterMs(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (!Number.isSafeInteger(value) || (value as number) < 5_000) throw new Error("handBackAfterMs must be at least 5000 or null for manual-only");
+  return value as number;
+}
+
+function requireComputer(resources: ClientGatewayResources): ComputerService {
+  if (!resources.computer) throw new Error("computer capability is unavailable");
+  return resources.computer;
 }
 
 function safeFailure(error: unknown): { readonly code: string; readonly message: string } {
@@ -172,6 +205,71 @@ export async function startClientTransport(
         await gateway.connect({ deviceId, challenge: requiredText(body, "challenge", 512), signature: requiredText(body, "signature") }).then((connection) => { connection.close(); });
         return deviceId;
       };
+      if (path === "/v1/computer/status") {
+        await authenticatedDevice();
+        const computer = requireComputer(resources);
+        const doctor = await computer.doctor();
+        json(response, 200, { status: computer.status(), doctor });
+        return;
+      }
+      if (path === "/v1/computer/nodes") {
+        await authenticatedDevice();
+        const computer = requireComputer(resources);
+        await computer.refreshAll();
+        json(response, 200, { nodes: computer.status().nodeStatus });
+        return;
+      }
+      if (path === "/v1/computer/screens") {
+        await authenticatedDevice();
+        const computer = requireComputer(resources);
+        await computer.refreshAll();
+        json(response, 200, {
+          screens: computer.nodes().flatMap((node) => node.screens.map((screen) => ({ nodeId: node.id, ...screen }))),
+        });
+        return;
+      }
+      if (path === "/v1/computer/leases") {
+        await authenticatedDevice();
+        const computer = requireComputer(resources);
+        json(response, 200, { leases: computer.leaseStatus() });
+        return;
+      }
+      if (path === "/v1/computer/observe") {
+        await authenticatedDevice();
+        const computer = requireComputer(resources);
+        const screenLeaseId = requiredText(body, "screenLeaseId", 128);
+        const screenLease = computer.screenLeases().find((lease) => lease.id === screenLeaseId);
+        const control = computer.controlLease(screenLeaseId);
+        if (!screenLease || !control) throw new Error(`Computer screen lease not found: ${screenLeaseId}`);
+        const observation = await computer.observeScreen(screenLeaseId, screenLease.ownerId, control.generation);
+        json(response, 200, { observation, control: { holder: control.holder, generation: control.generation } });
+        return;
+      }
+      if (path === "/v1/computer/takeover") {
+        const deviceId = await authenticatedDevice();
+        const computer = requireComputer(resources);
+        const control = await computer.takeOver(
+          requiredText(body, "screenLeaseId", 128),
+          clientHumanOwner(deviceId),
+          optionalHandBackAfterMs(body.handBackAfterMs),
+        );
+        json(response, 200, { control });
+        return;
+      }
+      if (path === "/v1/computer/human-activity") {
+        const deviceId = await authenticatedDevice();
+        const computer = requireComputer(resources);
+        const control = await computer.recordHumanActivity(requiredText(body, "screenLeaseId", 128), clientHumanOwner(deviceId));
+        json(response, 200, { control });
+        return;
+      }
+      if (path === "/v1/computer/hand-back") {
+        const deviceId = await authenticatedDevice();
+        const computer = requireComputer(resources);
+        const result = await computer.handBack(requiredText(body, "screenLeaseId", 128), clientHumanOwner(deviceId));
+        json(response, 200, result);
+        return;
+      }
       if (path === "/v1/agent-profiles/list") {
         await authenticatedDevice();
         if (!resources.agentProfiles) throw new Error("agent profiles capability is unavailable");

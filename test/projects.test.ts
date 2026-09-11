@@ -68,6 +68,7 @@ describe("Phase 3 Projects and Execution Targets", () => {
           requireWorktreeForWrites: true,
           allowCoreHostWrites: false,
           worktreeRoot,
+          computerAdmission: { requireBrowser: true, memoryMb: 768, browserRenderers: 2, gpu: true },
         },
       });
       expect(created.rootPath).toBe(repository);
@@ -77,9 +78,51 @@ describe("Phase 3 Projects and Execution Targets", () => {
 
       const secondHost = await host();
       const second = requireCapability(PROJECTS_CAPABILITY);
-      expect(second.get("atlas")).toMatchObject({ id: "atlas", rootPath: repository });
+      expect(second.get("atlas")).toMatchObject({
+        id: "atlas",
+        rootPath: repository,
+        policy: { computerAdmission: { requireBrowser: true, memoryMb: 768, browserRenderers: 2, gpu: true } },
+      });
       expect(second.list()).toHaveLength(1);
       await secondHost.dispose();
+    } finally {
+      await rm(repository, { recursive: true, force: true });
+      await rm(state, { recursive: true, force: true });
+      await rm(worktreeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("allows Project workspace selection to resolve a preferred Computer Node target for Phase 4 execution", async () => {
+    const repository = await gitRepository();
+    const state = await mkdtemp(join(tmpdir(), "friday-project-state-"));
+    const worktreeRoot = await mkdtemp(join(tmpdir(), "friday-project-worktrees-"));
+    process.env.FRIDAY_STATE_DIR = state;
+    try {
+      const friday = await host();
+      const projects = requireCapability(PROJECTS_CAPABILITY);
+      await projects.create({
+        id: "atlas-computer",
+        name: "Atlas Computer",
+        rootPath: repository,
+        preferredComputerNodeId: "desk-1",
+        repository: { kind: "git" },
+        policy: {
+          defaultTargetId: "computer:desk-1",
+          allowedTargetIds: ["computer:desk-1"],
+          requireWorktreeForWrites: true,
+          worktreeRoot,
+        },
+      });
+
+      const workspace = await projects.acquireAgentWorkspace({ projectId: "atlas-computer", ownerId: "job-computer" });
+      expect(workspace).toMatchObject({
+        projectId: "atlas-computer",
+        isolated: true,
+        target: { id: "computer:desk-1", kind: "computer-node", computerNodeId: "desk-1" },
+      });
+      expect(workspace.workspacePath.startsWith(worktreeRoot)).toBe(true);
+      await projects.removeCodingWorkspace("atlas-computer", workspace.workspacePath, { force: true, deleteBranch: true });
+      await friday.dispose();
     } finally {
       await rm(repository, { recursive: true, force: true });
       await rm(state, { recursive: true, force: true });
@@ -132,6 +175,12 @@ describe("Phase 3 Projects and Execution Targets", () => {
       const friday = await host();
       const projects = requireCapability(PROJECTS_CAPABILITY);
       await expect(projects.create({ id: "relative", name: "Relative", rootPath: "./relative" })).rejects.toThrow(/absolute path/);
+      await expect(projects.create({
+        id: "bad-computer-demand",
+        name: "Bad Computer demand",
+        rootPath: repository,
+        policy: { computerAdmission: { memoryMb: -1 } },
+      })).rejects.toThrow(/computerAdmission.memoryMb/);
       await expect(projects.create({
         id: "overlap",
         name: "Overlap",
