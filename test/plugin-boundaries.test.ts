@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import alertsPlugin from "../plugins/alerts/index.js";
 import artifactsPlugin from "../plugins/artifacts/index.js";
+import computerPlugin from "../plugins/computer/index.js";
 import auditPlugin from "../plugins/audit/index.js";
 import diagnosticsPlugin from "../plugins/diagnostics/index.js";
 import hostDoctorPlugin from "../plugins/host-doctor/index.js";
@@ -19,6 +20,7 @@ import sessionJobsPlugin from "../plugins/session-jobs/index.js";
 import selfImprovementPlugin from "../plugins/self-improvement/index.js";
 import skillsPlugin from "../plugins/skills/index.js";
 import systemPlugin from "../plugins/system/index.js";
+import toolsPlugin from "../plugins/tools/index.js";
 import turnLoopPlugin from "../plugins/turn-loop/index.js";
 import voicePlugin from "../plugins/voice/index.js";
 import { getPluginManifest } from "../plugins/capabilities/protocol.js";
@@ -147,6 +149,38 @@ describe("plugin boundaries", () => {
     const observability = await readFile(resolve("plugins/observability/index.ts"), "utf8");
     expect(observability).toContain('installOperationalErrorSink');
     expect(observability).toContain('@friday/operational-errors');
+  });
+
+  it("keeps Shared Agent Computer as a provider-neutral capability owner instead of duplicating execution, jobs, or platform providers", async () => {
+    const contract = await readFile(resolve("plugins/computer/contract.ts"), "utf8");
+    const service = await readFile(resolve("plugins/computer/service.ts"), "utf8");
+    const entry = await readFile(resolve("plugins/computer/index.ts"), "utf8");
+
+    expect(contract).toContain('defineCapability<ComputerService>("computer")');
+    expect(contract).toContain("ComputerNodeAdapter");
+    expect(contract).toContain("ScreenLease");
+    expect(contract).toContain("ControlLease");
+    expect(contract).toContain("WAITING_FOR_COMPUTER");
+    expect(contract).toContain("ComputerExecutionBinding");
+    expect(contract).toContain("ComputerNodeToolExecutionRequest");
+    expect(contract).toContain("runTool?");
+    expect(service).not.toMatch(/(?:from|import\()\s*["']\.\.\/(?:execution|session-jobs|tools|projects|vault|subagents)\//);
+    expect(entry).toContain("SYSTEM_STATUS_CONTRIBUTION");
+    expect(entry).toContain('id: "computer.takeover"');
+    expect(entry).toContain('id: "computer.hand-back"');
+    expect(entry).toContain('id: "computer.node.reset-managed"');
+
+    const manifest = getPluginManifest(computerPlugin)!;
+    expect(manifest.requires.map((capability) => capability.id)).toEqual(["events"]);
+    expect(manifest.optional.map((capability) => capability.id)).toEqual([]);
+    expect(manifest.provides.map((capability) => capability.id)).toEqual(["computer"]);
+
+    const toolsManifest = getPluginManifest(toolsPlugin)!;
+    expect(toolsManifest.optional.map((capability) => capability.id)).toContain("computer");
+    const turnLoopManifest = getPluginManifest(turnLoopPlugin)!;
+    expect(turnLoopManifest.optional.map((capability) => capability.id)).toContain("computer");
+    const projectsEntry = await readFile(resolve("plugins/projects/index.ts"), "utf8");
+    expect(projectsEntry).not.toContain("COMPUTER_CAPABILITY");
   });
 
   it("keeps execution-targets as a provider-neutral shared package rather than a plugin", async () => {
@@ -898,6 +932,7 @@ describe("plugin boundaries", () => {
     ]);
     expect(manifest.optional.map((capability) => capability.id).sort()).toEqual([
       "agent-profiles",
+      "computer",
       "conversations",
       "memory",
       "model-credentials",
@@ -1077,6 +1112,7 @@ describe("plugin boundaries", () => {
     expect(names).toContain("system");
     expect(names).toContain("runtime-settings");
     expect(names).toContain("integrations");
+    expect(names).toContain("computer");
     expect(names[0]).toBe("capabilities");
     const selfImprovementManifest = getPluginManifest(selfImprovementPlugin)!;
     expect(selfImprovementManifest.activation).toBe("last");

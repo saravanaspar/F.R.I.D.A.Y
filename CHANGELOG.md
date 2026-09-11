@@ -23,6 +23,25 @@ published release artifacts and generated release notes.
 - Added durable `JobDirective` redirection: active jobs persist user directions, expose redacted directive metadata, and apply them through the Agent steering boundary; interrupted jobs include pending directions during restart reconstruction.
 - Added authenticated client gateway APIs for Agent Profile CRUD, Conversation CRUD/read state, mentions, Threads, Reactions, profile-targeted turn submission, and durable active-job redirection.
 
+### Projects and Execution Targets
+
+- Added persistent server-owned Projects with canonical roots, repository metadata, validation commands, preferred Computer Node identity, and fail-closed execution policy.
+- Added the provider-neutral `@friday/execution-targets` contract for Sandbox, Core Host, and future Computer Node targets, with Project-aware Turn Loop routing and target-aware shell/edit/process/IPython execution.
+- Added restart-safe isolated coding worktrees, trusted diff Artifacts, deterministic validation, commit/promotion flows, authenticated Client Gateway Project APIs, and Session Job preservation of Project/target context.
+- Added permission-gated canonical repository promotion by clean fast-forward merge or cherry-pick while keeping Computer Node execution fail-closed until Phase 4.
+
+### Shared Agent Computer
+
+- Started Phase 4 with a provider-neutral `computer` capability and `ComputerNodeAdapter` boundary for future Linux and Windows platform providers instead of adding a second executor or job system.
+- Added resource-aware Computer admission across RAM, CPU, browser renderer count, GPU load, screen workload, browser requirements, and free Agent screens. Overloaded requests return `WAITING_FOR_COMPUTER`, and queued waits are retried when node telemetry or lease availability changes.
+- Added exclusive expiring `ScreenLease` records plus generation-bound `ControlLease` ownership so stale GUI actions cannot survive lease changes or human takeover.
+- Added human takeover with the roadmap's eight-second default idle hand-back (minimum five seconds or manual-only), zero keystroke/secret/sensitive-screenshot transcript capture, pending-action cancellation, and mandatory fresh screen/browser/process re-observation before Agent control resumes.
+- Added a Browser Supervisor contract with persistent-profile/window/tab snapshots and the Computer-layer automation order of Playwright DOM, accessibility, CDP, then visual control; API/MCP remains an upstream preference.
+- Added safe Computer status/doctor surfaces and provider-managed update, restart, and FRIDAY-managed-state reset operations that refuse to interrupt active screen leases and never imply resetting the person's operating system.
+- Connected Phase 3 `computer:<node-id>` execution targets to the Computer capability: Projects now allow Computer-target workspaces, Turn Loop leases the selected Agent screen, and the existing bash/edit/process/IPython tools carry that lease and control generation into the provider instead of creating a parallel executor.
+- Preserved the existing Permissions boundary for Computer execution, including the same tool action IDs, explicit write authorization, conservative network classification for remote shell/process/IPython work, and the existing subagent ban on persistent background-process starts.
+- Added provider-bounded Computer tool execution with capability checks, output bounds, screen/owner/generation validation, and takeover/lease cancellation so a stale Computer tool call cannot continue after control changes.
+
 ## [1.0.4] - 2026-09-09
 
 ### Memory correctness and retrieval

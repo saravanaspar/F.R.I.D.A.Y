@@ -3,6 +3,7 @@ import type { Capability } from "../capabilities/protocol.js";
 import { defineCapability } from "../capabilities/protocol.js";
 import type { PermissionMode } from "../permissions/contract.js";
 import type { ExecutionTarget } from "@friday/execution-targets";
+import type { ComputerExecutionBinding } from "../computer/contract.js";
 
 type ToolsRuntime = typeof import("@friday/tools");
 
@@ -10,6 +11,8 @@ export interface SecureToolOptions {
   permissionMode?: PermissionMode | undefined;
   /** Server-resolved execution target. Omitted means the existing Sandbox default. */
   executionTarget?: ExecutionTarget | undefined;
+  /** Required only for computer-node targets; supplied by Turn Loop after leasing an Agent screen. */
+  computer?: ComputerExecutionBinding | undefined;
   ipython?: Pick<IpythonToolOptions, "env" | "sessionId" | "hostHandlers"> | undefined;
 }
 

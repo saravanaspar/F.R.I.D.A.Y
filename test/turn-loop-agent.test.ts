@@ -6,6 +6,7 @@ import { PluginTestHost } from "./helpers/plugin-host.js";
 import agentPlugin from "../plugins/agent/index.js";
 import { AGENT_CAPABILITY } from "../plugins/agent/contract.js";
 import type { AgentProfilesService } from "../plugins/agent-profiles/contract.js";
+import type { ComputerExecutionBinding, ComputerService } from "../plugins/computer/contract.js";
 import type { AgentInputContribution, AgentModelRequestPolicyContribution, AgentToolContribution } from "../plugins/turn-loop/contract.js";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
@@ -14,6 +15,7 @@ import memoryPlugin from "../plugins/memory/index.js";
 import { MEMORY_CAPABILITY } from "../plugins/memory/contract.js";
 import type { ObservabilityService } from "../plugins/observability/contract.js";
 import * as modelRuntime from "@friday/model";
+import { computerNodeExecutionTarget } from "@friday/execution-targets";
 import { MODEL_CAPABILITY, type ModelService } from "../plugins/model/contract.js";
 import { principalScope, principalStateRoot } from "../plugins/principal-scope.js";
 import promptsPlugin from "../plugins/prompts/index.js";
@@ -809,6 +811,102 @@ describe("Turn Loop agent executor", () => {
       expect(result.text).toContain("implemented project change");
       expect(result.text).toContain("Project diff artifact: artifact:00000000-0000-0000-0000-000000000001");
       expect(result.text).toContain("+project change");
+    } finally {
+      await executor.dispose();
+      faux.unregister();
+      await friday.dispose();
+    }
+  });
+
+  it("leases the selected Computer Node for a Project turn, binds existing tools to it, and releases the screen after the run", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "faux";
+    process.env.FRIDAY_MODEL_ID = "faux-1";
+    const stateDir = tempRoot();
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(sessionsPlugin);
+    await friday.activatePlugin(promptsPlugin);
+    await friday.activatePlugin(modelPlugin);
+    await friday.activatePlugin(agentPlugin);
+
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
+    const workspace = join(stateDir, "computer-worktree");
+    const projectRoot = join(stateDir, "computer-project-root");
+    const bindings: ComputerExecutionBinding[] = [];
+    const toolCalls: Array<{ cwd: string; targetId?: string; computer?: ComputerExecutionBinding }> = [];
+    const screenRequests: Array<{ ownerId: string; preferredNodeId?: string; preferredScreenId?: string }> = [];
+    const releases: Array<{ screenLeaseId: string; ownerId: string }> = [];
+    const target = computerNodeExecutionTarget("desk-1");
+    const tools = {
+      createTool() { throw new Error("not used"); },
+      createAllTools(cwd: string, options?: { executionTarget?: { id: string }; computer?: ComputerExecutionBinding }) {
+        toolCalls.push({
+          cwd,
+          ...(options?.executionTarget?.id === undefined ? {} : { targetId: options.executionTarget.id }),
+          ...(options?.computer === undefined ? {} : { computer: options.computer }),
+        });
+        if (options?.computer) bindings.push(options.computer);
+        return {};
+      },
+    } as unknown as ToolsService;
+    const projects = {
+      async acquireAgentWorkspace() {
+        return { projectId: "atlas", projectRoot, workspacePath: workspace, target, isolated: false };
+      },
+    } as unknown as ProjectsService;
+    const computer = {
+      node(nodeId: string) { return nodeId === "desk-1" ? ({ id: "desk-1" } as never) : undefined; },
+      async waitForScreen(request: { ownerId: string; preferredNodeId?: string; preferredScreenId?: string }) {
+        screenRequests.push(request);
+        return {
+          state: "acquired" as const,
+          screenLease: { id: "screen-lease-1", nodeId: "desk-1", screenId: "agent-screen-1", ownerId: request.ownerId, acquiredAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() },
+          controlLease: {
+            id: "control-1", screenLeaseId: "screen-lease-1", nodeId: "desk-1", screenId: "agent-screen-1", holder: "agent" as const, holderId: request.ownerId, agentOwnerId: request.ownerId, generation: 4, acquiredAt: new Date().toISOString(), lastActivityAt: new Date().toISOString(), handBackAfterMs: null,
+            transcriptPolicy: { captureKeystrokes: false as const, captureSecrets: false as const, captureSensitiveScreenshots: false as const },
+          },
+        };
+      },
+      controlLease() { return { holder: "agent" } as never; },
+      async releaseScreen(screenLeaseId: string, ownerId: string) { releases.push({ screenLeaseId, ownerId }); return true; },
+    } as unknown as ComputerService;
+    const executor = createAgentTurnExecutor({
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: withTestModel(requireCapability(MODEL_CAPABILITY), faux),
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions: requireCapability(SESSIONS_CAPABILITY),
+      tools,
+      optional: { projects: () => projects, computer: () => computer },
+    }, { stateDir });
+
+    try {
+      faux.setResponses([modelRuntime.fauxAssistantMessage("computer project complete")]);
+      const projectTurn: InboundTurn = { ...turn("computer-project", "work on the computer project"), projectId: "atlas", projectTargetId: "computer:desk-1" };
+      const result = await executor.execute({ turn: projectTurn, decision: decision("session:new"), jobId: "job-computer" });
+      expect(result.text).toBe("computer project complete");
+      expect(screenRequests).toEqual([{ ownerId: "job-computer", preferredNodeId: "desk-1" }]);
+      expect(toolCalls).toContainEqual({
+        cwd: workspace,
+        targetId: "computer:desk-1",
+        computer: expect.objectContaining({
+          nodeId: "desk-1",
+          screenId: "agent-screen-1",
+          screenLeaseId: "screen-lease-1",
+          ownerId: "job-computer",
+          generation: 4,
+        }),
+      });
+      expect(bindings).toContainEqual({
+        nodeId: "desk-1",
+        screenId: "agent-screen-1",
+        screenLeaseId: "screen-lease-1",
+        ownerId: "job-computer",
+        ownerKind: "main-agent",
+        generation: 4,
+      });
+      expect(releases).toEqual([{ screenLeaseId: "screen-lease-1", ownerId: "job-computer" }]);
     } finally {
       await executor.dispose();
       faux.unregister();

@@ -351,9 +351,6 @@ export async function createProjectsService(options: ProjectsServiceOptions): Pr
         access: "write",
         ...(input.targetId === undefined ? {} : { targetId: input.targetId }),
       });
-      if (plan.target.kind === "computer-node") {
-        throw new Error("Computer Node execution requires the Computer capability from Phase 4");
-      }
       if (!plan.requiresWorktree) {
         return Object.freeze({
           projectId: project.id,
@@ -398,7 +395,6 @@ export async function createProjectsService(options: ProjectsServiceOptions): Pr
       const project = requireProject(projects, input.projectId);
       if (project.repository?.kind !== "git") throw new Error("coding workspaces require project.repository.kind=git");
       const plan = await service.resolveExecution({ projectId: project.id, operation: "edit", access: "write", ...(input.targetId === undefined ? {} : { targetId: input.targetId }) });
-      if (plan.target.kind === "computer-node") throw new Error("Computer Node execution becomes available in Phase 4; select sandbox or core-host for this Phase 3 workspace");
       const info = await options.worktrees.createWorktree({
         repository: project.rootPath,
         root: safeWorktreeRoot(options.stateDir, project),
@@ -489,6 +485,7 @@ async function runValidationCommand(
   const bash = tools.createTool("bash", active.workspace, {
     ...(context.permissionMode === undefined ? {} : { permissionMode: context.permissionMode }),
     executionTarget: active.target,
+    ...(context.computerExecution === undefined ? {} : { computer: context.computerExecution }),
   });
   const execute = bash.execute as unknown as (
     toolCallId: string,

@@ -87,6 +87,44 @@ describe("Phase 3 Projects and Execution Targets", () => {
     }
   });
 
+  it("allows Project workspace selection to resolve a preferred Computer Node target for Phase 4 execution", async () => {
+    const repository = await gitRepository();
+    const state = await mkdtemp(join(tmpdir(), "friday-project-state-"));
+    const worktreeRoot = await mkdtemp(join(tmpdir(), "friday-project-worktrees-"));
+    process.env.FRIDAY_STATE_DIR = state;
+    try {
+      const friday = await host();
+      const projects = requireCapability(PROJECTS_CAPABILITY);
+      await projects.create({
+        id: "atlas-computer",
+        name: "Atlas Computer",
+        rootPath: repository,
+        preferredComputerNodeId: "desk-1",
+        repository: { kind: "git" },
+        policy: {
+          defaultTargetId: "computer:desk-1",
+          allowedTargetIds: ["computer:desk-1"],
+          requireWorktreeForWrites: true,
+          worktreeRoot,
+        },
+      });
+
+      const workspace = await projects.acquireAgentWorkspace({ projectId: "atlas-computer", ownerId: "job-computer" });
+      expect(workspace).toMatchObject({
+        projectId: "atlas-computer",
+        isolated: true,
+        target: { id: "computer:desk-1", kind: "computer-node", computerNodeId: "desk-1" },
+      });
+      expect(workspace.workspacePath.startsWith(worktreeRoot)).toBe(true);
+      await projects.removeCodingWorkspace("atlas-computer", workspace.workspacePath, { force: true, deleteBranch: true });
+      await friday.dispose();
+    } finally {
+      await rm(repository, { recursive: true, force: true });
+      await rm(state, { recursive: true, force: true });
+      await rm(worktreeRoot, { recursive: true, force: true });
+    }
+  });
+
   it("reuses Worktrees for an isolated coding workspace and returns a trusted diff", async () => {
     const repository = await gitRepository();
     const state = await mkdtemp(join(tmpdir(), "friday-project-state-"));

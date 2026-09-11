@@ -12,7 +12,13 @@ import { TOOLS_CAPABILITY } from "../plugins/tools/contract.js";
 import { PERMISSIONS_CAPABILITY, type PermissionRequest } from "../plugins/permissions/contract.js";
 import { createPermissionsController } from "../plugins/permissions/policy.js";
 import { SANDBOX_CAPABILITY, type SandboxKernelRequest, type SandboxShellRequest } from "../plugins/sandbox/contract.js";
-import { coreHostExecutionTarget } from "@friday/execution-targets";
+import { computerNodeExecutionTarget, coreHostExecutionTarget } from "@friday/execution-targets";
+import {
+  COMPUTER_CAPABILITY,
+  type ComputerExecutionBinding,
+  type ComputerService,
+  type ComputerToolExecutionRequest,
+} from "../plugins/computer/contract.js";
 
 const tempDirs: string[] = [];
 
@@ -85,6 +91,75 @@ describe("tools plugin", () => {
       edits: [{ oldText: "before", newText: "after" }],
     }));
     expect(await readFile(join(dir, "sample.txt"), "utf8")).toBe("after\n");
+  });
+
+  it("routes Project Computer Node tools through the Computer capability without local or Sandbox execution", async () => {
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(executionPlugin);
+    const approvals: PermissionRequest[] = [];
+    let sandboxCalls = 0;
+    const remoteCalls: Array<{ tool: string; workspace: string; input: Readonly<Record<string, unknown>> }> = [];
+    const permissionController = createPermissionsController({
+      approve: async (request) => { approvals.push(request); return true; },
+    });
+    provideCapability(PERMISSIONS_CAPABILITY, permissionController.permissions);
+    provideCapability(SANDBOX_CAPABILITY, {
+      image: "test",
+      assertAvailable() {},
+      registerTrustedReadOnlyMount() { return () => {}; },
+      sandboxShell(request) { sandboxCalls += 1; return { command: request.command, cwd: request.cwd, env: request.env }; },
+      sandboxProcess(request) { sandboxCalls += 1; return { command: request.command, args: request.args, cwd: request.cwd, env: request.env }; },
+      sandboxKernel(request) { sandboxCalls += 1; return { command: "true", args: [], cwd: request.cwd, env: request.env }; },
+    });
+    provideCapability(COMPUTER_CAPABILITY, {
+      async runTool(_binding: ComputerExecutionBinding, request: ComputerToolExecutionRequest) {
+        remoteCalls.push({ tool: request.tool, workspace: request.workspace, input: request.input });
+        return { content: [{ type: "text", text: `remote:${request.tool}` }] };
+      },
+    } as unknown as ComputerService);
+    await friday.activatePlugin(toolsPlugin);
+
+    const service = requireCapability(TOOLS_CAPABILITY);
+    const dir = await mkdtemp(join(tmpdir(), "friday-tools-computer-"));
+    tempDirs.push(dir);
+    const computer = {
+      nodeId: "desk-1",
+      screenId: "agent-1",
+      screenLeaseId: "lease-1",
+      ownerId: "job-1",
+      ownerKind: "main-agent" as const,
+      generation: 7,
+    };
+    const target = computerNodeExecutionTarget("desk-1");
+    const remoteTools = service.createAllTools(dir, { permissionMode: "ask", executionTarget: target, computer });
+
+    await permissionController.trusted.runAsLocal(() => remoteTools.bash.execute("computer-bash", { command: "pwd" }));
+    await permissionController.trusted.runAsLocal(() => remoteTools.edit.execute("computer-edit", {
+      path: "sample.ts",
+      edits: [{ oldText: "before", newText: "after" }],
+    }));
+    await permissionController.trusted.runAsLocal(() => remoteTools.process.execute("computer-process", { action: "start", command: "npm run dev" }));
+    await permissionController.trusted.runAsLocal(() => remoteTools.ipython.execute("computer-python", { code: "print('ok')" }));
+
+    expect(remoteCalls.map((call) => call.tool)).toEqual(["bash", "edit", "process", "ipython"]);
+    expect(remoteCalls.every((call) => call.workspace === dir)).toBe(true);
+    expect(sandboxCalls).toBe(0);
+    expect(approvals.map((entry) => entry.action.id)).toEqual([
+      "tools.bash.execute",
+      "tools.edit.write",
+      "tools.process.start",
+      "tools.ipython.execute",
+    ]);
+    expect(approvals.find((entry) => entry.action.id === "tools.bash.execute")?.action.network).toBe(true);
+    expect(approvals.find((entry) => entry.action.id === "tools.process.start")?.action.network).toBe(true);
+    expect(approvals.find((entry) => entry.action.id === "tools.ipython.execute")?.action.network).toBe(true);
+    expect(approvals.find((entry) => entry.action.id === "tools.edit.write")?.action.network).toBe(false);
+
+    expect(() => service.createTool("bash", dir, { permissionMode: "ask", executionTarget: target }))
+      .toThrow(/leased Computer screen/);
+    await friday.dispose();
   });
 
   it("routes Project Core Host shell, edit, and process tools without entering the Sandbox", async () => {

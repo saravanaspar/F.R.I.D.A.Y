@@ -6,6 +6,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AgentService } from "../agent/contract.js";
 import type { AgentProfilesService } from "../agent-profiles/contract.js";
 import type { ModelCredentialService } from "../auth/contract.js";
+import type { ComputerExecutionBinding, ComputerService } from "../computer/contract.js";
 import type { MemoryRelationResult, MemorySearchResult, MemoryService } from "../memory/contract.js";
 import type { ModelService } from "../model/contract.js";
 import type { ObservabilityService } from "../observability/contract.js";
@@ -102,6 +103,7 @@ export interface AgentTurnExecutorOptionalDependencies {
   sandbox(): SandboxService | undefined;
   profiles(): AgentProfilesService | undefined;
   projects(): ProjectsService | undefined;
+  computer(): ComputerService | undefined;
 }
 
 export interface AgentTurnExecutorDependencies {
@@ -642,7 +644,15 @@ export function createAgentTurnExecutor(
         const permissionMode = executionContext?.permissionMode;
         const toolCwd = executionContext?.cwd ?? cwd;
         const target = executionContext?.projectExecutionTarget;
-        const policyKey = JSON.stringify([recursionAllowed, permissionMode ?? "default", toolCwd, target?.id ?? "sandbox-default"]);
+        const computerExecution = executionContext?.computerExecution;
+        const policyKey = JSON.stringify([
+          recursionAllowed,
+          permissionMode ?? "default",
+          toolCwd,
+          target?.id ?? "sandbox-default",
+          computerExecution?.screenLeaseId ?? "no-computer-lease",
+          computerExecution?.generation ?? 0,
+        ]);
         const cached = coreToolsByPolicy.get(policyKey);
         if (cached) return [...cached];
         const ipythonOptions = {
@@ -654,6 +664,7 @@ export function createAgentTurnExecutor(
           ipython: ipythonOptions,
           ...(permissionMode === undefined ? {} : { permissionMode }),
           ...(target === undefined ? {} : { executionTarget: target }),
+          ...(computerExecution === undefined ? {} : { computer: computerExecution }),
         };
         const tools = Object.freeze(Object.values(dependencies.tools.createAllTools(toolCwd, toolOptions)) as AgentTool[]);
         coreToolsByPolicy.set(policyKey, tools);
@@ -917,6 +928,29 @@ export function createAgentTurnExecutor(
                 ...(signal === undefined ? {} : { signal }),
               });
           const effectiveCwd = projectWorkspace?.workspacePath ?? cwd;
+          const computerOwnerId = turnContext?.turn.resumedJobId ?? jobId ?? sessionId;
+          let computerService: ComputerService | undefined;
+          let computerExecution: ComputerExecutionBinding | undefined;
+          if (projectWorkspace?.target.kind === "computer-node") {
+            const nodeId = projectWorkspace.target.computerNodeId;
+            if (!nodeId) throw new Error(`Computer execution target ${projectWorkspace.target.id} is missing computerNodeId`);
+            computerService = dependencies.optional?.computer?.();
+            if (!computerService) throw new Error(`Computer capability is unavailable for execution target ${projectWorkspace.target.id}`);
+            if (!computerService.node(nodeId)) throw new Error(`Computer node is not registered: ${nodeId}`);
+            const grant = await computerService.waitForScreen({
+              ownerId: computerOwnerId,
+              preferredNodeId: nodeId,
+              ...(profile?.defaultComputerScreen === undefined ? {} : { preferredScreenId: profile.defaultComputerScreen }),
+            }, signal);
+            computerExecution = Object.freeze({
+              nodeId: grant.screenLease.nodeId,
+              screenId: grant.screenLease.screenId,
+              screenLeaseId: grant.screenLease.id,
+              ownerId: computerOwnerId,
+              ownerKind: (runtimeOptions.depth ?? 0) > 0 ? "subagent" : "main-agent",
+              generation: grant.controlLease.generation,
+            });
+          }
           const memoryScopes = profile === undefined
             ? Object.freeze(["global:user", ...(selectedProjectId ? [`project:${selectedProjectId}`] : []), "local"])
             : Object.freeze([...new Set(["global:user", profile.memoryScope, ...(selectedProjectId ? [`project:${selectedProjectId}`] : []), "local"])]);
@@ -937,6 +971,7 @@ export function createAgentTurnExecutor(
               projectWorkspace: projectWorkspace.workspacePath,
               projectExecutionTarget: projectWorkspace.target,
             }),
+            ...(computerExecution === undefined ? {} : { computerExecution }),
             ...(profile === undefined ? {} : {
               agentProfileId: profile.id,
               memoryScopes,
@@ -954,7 +989,15 @@ export function createAgentTurnExecutor(
             },
             deferOnFailure(callback) { afterFailureCallbacks.push(callback); },
           };
-          const tools = buildTools(extensionContext);
+          let tools: AgentTool[];
+          try {
+            tools = buildTools(extensionContext);
+          } catch (error) {
+            if (computerExecution && computerService) {
+              await computerService.releaseScreen(computerExecution.screenLeaseId, computerExecution.ownerId).catch(() => false);
+            }
+            throw error;
+          }
           agent.state.tools = tools;
           const nextPromptPlan = buildPromptPlan(tools, extensionContext);
           agent.state.systemPrompt = nextPromptPlan.prompt;
@@ -1158,6 +1201,16 @@ export function createAgentTurnExecutor(
             for (const dispose of inputDisposers.splice(0).reverse()) {
               try { await dispose(); } catch (error) {
                 reportOperationalError({ component: "turn-loop", operation: "dispose prepared agent input", error });
+              }
+            }
+            if (computerExecution && computerService) {
+              try {
+                const control = computerService.controlLease(computerExecution.screenLeaseId);
+                if (control?.holder !== "human") {
+                  await computerService.releaseScreen(computerExecution.screenLeaseId, computerExecution.ownerId);
+                }
+              } catch (error) {
+                reportOperationalError({ component: "turn-loop", operation: "release Computer screen after Agent run", error, severity: "warn" });
               }
             }
           }

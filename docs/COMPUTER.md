@@ -1,0 +1,86 @@
+# Shared Agent Computer
+
+Phase 4 defines the provider-neutral Computer Node authority. Platform-specific Linux/Sway and Windows implementations come later; the core contract must stay usable by both.
+
+## Ownership and reuse
+
+`plugins/computer` owns Computer Node runtime registration, resource admission, screen/control leases, Browser Supervisor coordination, human takeover state, and managed node lifecycle requests. It deliberately reuses the existing architecture instead of duplicating it:
+
+- Projects and `@friday/execution-targets` continue to decide which execution target a Project may use.
+- Execution/Tools remain the shell, edit, process, and IPython authorities.
+- Session Jobs remain the durable work queue and restart/resume owner.
+- Permissions remains the authorization authority for model/operator actions.
+- Events receives Computer lifecycle/lease/takeover events.
+- Platform providers implement `ComputerNodeAdapter`; Phase 5 supplies Linux/Sway and Phase 8 supplies Windows.
+
+## Computer Node provider contract
+
+A provider registers one `ComputerNodeAdapter` with a stable node descriptor and supplies current runtime snapshots. Snapshots contain only provider-neutral state: availability, bounded resource telemetry, screen descriptors, and optional Browser Supervisor metadata.
+
+A node may declare existing execution operations (`shell`, `edit`, `process`, `git`) plus browser, Playwright, accessibility, CDP, visual-control, screen-capture, raw-input, virtual-display, and managed-lifecycle capabilities. The Computer core does not emulate a capability the provider does not declare.
+
+## Project and tool execution bridge
+
+Phase 4 reuses the Phase 3 execution path rather than adding Computer-specific Agent tools for shell/edit/process/Python. Projects still resolve `computer:<node-id>` through `@friday/execution-targets` and still own canonical/worktree selection. Turn Loop then leases an Agent screen on the resolved node and attaches a `ComputerExecutionBinding` containing the node, screen lease, Agent owner, owner kind, and current control generation.
+
+The existing Tools capability remains the policy/schema authority. For a Computer target it performs the same Permissions authorization as Sandbox/Core Host and then calls `ComputerService.runTool()`. The Computer core validates that the binding still owns the exact screen, that the control generation is current, and that the node declared the required execution operation before delegating to `ComputerNodeAdapter.runTool()`. Bash and IPython map to the node's `shell` capability, edit maps to `edit`, and process maps to `process`; Project Git/worktree lifecycle remains owned by Worktrees.
+
+Computer shell/process/IPython calls are conservatively classified as network-capable because the provider-neutral contract does not promise per-command network isolation. Remote background process starts retain the existing main-Agent-only rule. Provider tool calls share the same cancellation set as browser actions, so takeover, lease expiry, or release aborts pending execution before control can move elsewhere.
+
+## Resource admission
+
+Agent screen admission considers:
+
+- available RAM after requested demand,
+- CPU utilization,
+- current plus requested browser renderer count,
+- GPU utilization for GPU-requiring work,
+- provider-observed screen workload, and
+- availability of an unleased Agent screen.
+
+If no node can satisfy the request, the result is `WAITING_FOR_COMPUTER` with stable reason codes. `waitForScreen()` keeps the request pending and retries after telemetry refresh, lease release/expiry, or the service poll tick. This lets Session Jobs remain the durable job owner while Computer remains the resource authority.
+
+## ScreenLease and ControlLease
+
+A `ScreenLease` is exclusive to one Agent owner and expires unless renewed. Releasing or expiring it aborts pending Computer actions before the screen can be reused.
+
+Each leased screen also has a `ControlLease`. Agent actions must present the current generation. The generation changes whenever control changes or human activity invalidates pending work. Stale generations fail closed with an instruction to re-observe and replan.
+
+## Browser Supervisor
+
+Providers expose one persistent browser-profile snapshot containing windows and tabs. Status surfaces report only readiness/counts; they do not publish tab URLs/titles or browser content in generic Computer status.
+
+Higher-level orchestration should use API/MCP before Computer browser automation. Once Computer is selected, the provider fallback order is:
+
+1. Playwright DOM
+2. accessibility tree
+3. CDP
+4. visual control
+
+The provider returns which mode was used and a fresh bounded observation. Browser action contents are not written to Computer Events. Explicitly sensitive typing is rejected by the generic action path and must use human takeover or a dedicated protected-credential flow.
+
+## Human takeover and hand-back
+
+Human takeover is a control transition, not a second Agent. The screen remains leased to the original job while the user temporarily holds control.
+
+On takeover, the Computer core:
+
+1. aborts pending Computer actions,
+2. increments the control generation,
+3. switches the holder to the human identity,
+4. applies a fixed transcript policy that excludes keystrokes, secrets, and sensitive screenshots, and
+5. starts the idle hand-back grace period.
+
+The default idle grace is eight seconds. Configured values must be at least five seconds; `null` means manual-only hand-back. Human activity refreshes the grace period without sending key/text/screenshot content through this API.
+
+Hand-back increments the generation again and requires `observeScreen()` to succeed before Agent control is restored. If re-observation fails or the user interacts again during hand-back, the Agent remains paused. This prevents replay of stale clicks after a login, CAPTCHA, OTP, or other human intervention.
+
+## Managed lifecycle
+
+Computer Node `restart`, `update`, and `resetManagedState` operations delegate to the platform provider. The core refuses these operations while screen leases are active. `resetManagedState` means FRIDAY-managed Agent/browser/display state only; it must never silently reset the person's operating system.
+
+## Current Phase 4 slice
+
+The first slice established the provider contract, admission, lease expiry/waiting, browser-action generation checks, takeover/hand-back behavior, status/doctor surfaces, and managed lifecycle guards. The second slice connects Project/Turn Loop execution to Computer targets and routes the existing bash/edit/process/IPython tool surfaces through the leased node while preserving Permissions and stale-generation checks.
+
+Still pending in Phase 4 are durable Session Job `WAITING_FOR_COMPUTER` state/resume, Agent-facing Computer observe/browser-control tools, authenticated Client Gateway Computer APIs, Browser Supervisor orchestration beyond the provider contract, and the full login-wall → human takeover → fresh observation → same-job continuation acceptance path. Linux/Sway/Chromium and Windows platform providers remain Phase 5/8 work.

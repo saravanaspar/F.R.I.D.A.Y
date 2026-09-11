@@ -3,6 +3,7 @@ import { defineCapability, defineContribution, defineHook } from "../capabilitie
 import type { RoutingDecision } from "../routing/contract.js";
 import type { SessionJobDirectiveMessage } from "../session-jobs/contract.js";
 import type { ExecutionTarget } from "@friday/execution-targets";
+import type { ComputerExecutionBinding } from "../computer/contract.js";
 
 export type TurnPrincipalAuthority = "local" | "channel";
 
@@ -137,6 +138,8 @@ export interface AgentToolExecutionContext {
   readonly projectRoot?: string | undefined;
   readonly projectWorkspace?: string | undefined;
   readonly projectExecutionTarget?: ExecutionTarget | undefined;
+  /** Present when this Agent run owns a leased Computer screen for a computer-node target. */
+  readonly computerExecution?: ComputerExecutionBinding | undefined;
   deferAfterReply(callback: () => void | Promise<void>, durable?: TurnFinalizerDescriptor): void;
   deferOnFailure(callback: (error: unknown) => void | Promise<void>): void;
 }
