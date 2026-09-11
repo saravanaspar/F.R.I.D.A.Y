@@ -36,6 +36,9 @@ export interface SessionJobOrigin {
   readonly threadId?: string | undefined;
   /** Host-owned internal Conversation id used for shared continuity only. */
   readonly sharedConversationId?: string | undefined;
+  /** Server-resolved Project context preserved for restart-safe coding jobs. */
+  readonly projectId?: string | undefined;
+  readonly projectTargetId?: string | undefined;
 }
 
 export interface SessionJobProgress {

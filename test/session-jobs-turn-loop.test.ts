@@ -105,6 +105,8 @@ describe("Turn Loop detached session jobs", () => {
       id: "m1",
       principal: { authority: "channel", channel: "telegram", accountId: "main", conversationId: "chat", senderId: "alice" },
       text: "work on PSCLS brain",
+      projectId: "atlas",
+      projectTargetId: "core-host",
       timestamp: Date.now(),
       reply: async (text) => { replies.push(text); },
     };
@@ -120,6 +122,7 @@ describe("Turn Loop detached session jobs", () => {
     expect(result.status).toBe("completed");
     expect(replies[0]).toContain("Started background work: PSCLS — brain (job-1234)");
     await waitUntil(() => executions === 1 && jobs.get("job-1234")?.status === "running", "background execution");
+    expect(jobs.get("job-1234")?.origin).toMatchObject({ projectId: "atlas", projectTargetId: "core-host" });
     await waitUntil(() => replies.some((text) => text.includes("Running persistence tests")), "progress notification");
 
     release();

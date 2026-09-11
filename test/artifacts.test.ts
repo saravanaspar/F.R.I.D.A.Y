@@ -100,6 +100,16 @@ const principal: TurnPrincipal = Object.freeze({
 const attachment: TurnAttachment = Object.freeze({ kind: "document", externalId: "file-1", fileName: "skill.zip", mimeType: "application/zip" });
 
 describe("Artifacts", () => {
+  it("persists host-generated project artifacts through the same private artifact store", async () => {
+    const { service } = await assemble(Buffer.from("unused"));
+    const patch = Buffer.from("diff --git a/base.txt b/base.txt\n+changed\n");
+    const record = await service.storeGenerated({ fileName: "atlas-job.diff", mimeType: "text/x-diff", bytes: patch });
+    expect(record.fileName).toBe("atlas-job.diff");
+    expect(record.mimeType).toBe("text/x-diff");
+    expect(record.sizeBytes).toBe(patch.byteLength);
+    await expect(service.consume(record.ref, (bytes) => Buffer.from(bytes).toString("utf8"))).resolves.toBe(patch.toString("utf8"));
+  });
+
   it("persists private integrity-checked attachments and rejects a broadened artifact root", async () => {
     const bytes = await zipBytes({ "skill/SKILL.md": "# Test\n" });
     const { home, service } = await assemble(bytes);

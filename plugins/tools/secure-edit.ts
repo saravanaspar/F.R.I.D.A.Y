@@ -105,23 +105,25 @@ async function runHelper(
   relativePath: string,
   operation: "read" | "write",
   execution: ExecutionService,
-  sandbox: SandboxService,
+  sandbox?: SandboxService,
   input?: Buffer,
   expectedHash?: string,
 ): Promise<string> {
   const args = ["-c", SECURE_EDIT_HELPER, cwd, relativePath, operation, String(MAX_EDIT_FILE_BYTES)];
   if (expectedHash !== undefined) args.push(expectedHash);
-  const context = sandbox.sandboxProcess({
-    command: "python3",
-    args,
-    cwd,
-    workspace: cwd,
-    access: "write",
-    network: false,
-    env: { ...process.env },
-    interactive: input !== undefined,
-  });
-  const result = await execution.execCommand(context.command, context.args, context.cwd, {
+  const context = sandbox
+    ? sandbox.sandboxProcess({
+        command: "python3",
+        args,
+        cwd,
+        workspace: cwd,
+        access: "write",
+        network: false,
+        env: { ...process.env },
+        interactive: input !== undefined,
+      })
+    : { command: execution.defaultKernelPythonPath(), args, cwd, env: { ...process.env } };
+  const result = await execution.execCommand(context.command, [...context.args], context.cwd, {
     env: context.env,
     replaceEnv: true,
     timeout: EDIT_COMMAND_TIMEOUT_MS,
@@ -139,7 +141,7 @@ async function runHelper(
 export function createSecureEditOperations(
   cwd: string,
   execution: ExecutionService,
-  sandbox: SandboxService,
+  sandbox?: SandboxService,
 ): EditOperations {
   return Object.freeze({
     async readFile(absolutePath: string): Promise<Buffer> {

@@ -80,11 +80,16 @@ Phase 3 keeps Project identity and path policy on the server. Authenticated clie
 /v1/projects/worktrees/create
 /v1/projects/worktrees/inspect
 /v1/projects/worktrees/diff
+/v1/projects/worktrees/publish-diff
 /v1/projects/worktrees/commit
 /v1/projects/worktrees/remove
 ```
 
-`/v1/projects/resolve-target` returns the server-side target decision and whether a write requires an isolated worktree. Coding workspace routes delegate to the existing hardened Worktrees capability; worktree directories must stay outside the canonical Project root. The first slice executes coding workspaces on the local host while enforcing a Sandbox target policy. Direct Core Host tool routing and remote Computer Node execution are intentionally not claimed complete yet.
+`/v1/projects/resolve-target` returns the server-side target decision and whether a write requires an isolated worktree. Coding workspace routes delegate to the existing hardened Worktrees capability; worktree directories must stay outside the canonical Project root. `/v1/projects/worktrees/publish-diff` persists the complete trusted patch through Artifacts when available.
+
+`/v1/turns` additionally accepts optional `projectId` and `projectTargetId`. If `projectId` is omitted, the selected Agent Profile may supply its `defaultProjectId`. The server validates the Project and target before admitting the turn; clients never choose an arbitrary execution directory. For Agent Session work, Turn Loop persists Project/target metadata in the detached Session Job, so closing the HTTP/WebSocket client does not own or cancel the coding job. Sandbox execution is the default; explicitly permitted Core Host targets route existing shell/edit/process/IPython tools directly through Execution while preserving Permissions. Remote Computer Node targets are represented in the shared contract but intentionally fail closed until Phase 4 implements Computer Nodes.
+
+Canonical repository integration is not exposed as an unguarded client mutation. The Agent/System `project_promote` path performs the permission check and then delegates clean fast-forward merge or cherry-pick to Worktrees.
 
 ## Verification
 

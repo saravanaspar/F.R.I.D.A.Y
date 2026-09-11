@@ -43,6 +43,7 @@ const worktreesPlugin: FridayPlugin = definePlugin({ id: "worktrees", requires: 
     trustedWorktreeReadOnlyMounts: worktrees.trustedWorktreeReadOnlyMounts,
     commitWorktree: worktrees.commitWorktree,
     diffWorktree: worktrees.diffWorktree,
+    promoteWorktree: worktrees.promoteWorktree,
   });
   ctx.services.provide(WORKTREES_CAPABILITY, service);
 });

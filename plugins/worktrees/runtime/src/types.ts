@@ -102,3 +102,24 @@ export interface WorktreeDiff {
   patch: string;
   status: string;
 }
+
+
+export type WorktreePromotionStrategy = "merge" | "cherry-pick";
+
+export interface PromoteWorktreeOptions {
+  repository: string;
+  directory: string;
+  strategy: WorktreePromotionStrategy;
+  signal?: AbortSignal | undefined;
+}
+
+export interface PromoteWorktreeResult {
+  repository: string;
+  directory: string;
+  strategy: WorktreePromotionStrategy;
+  previousHead: string;
+  head: string;
+  candidateHead: string;
+  changed: boolean;
+  commits: readonly string[];
+}

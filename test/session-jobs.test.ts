@@ -407,7 +407,10 @@ describe("SessionJobManager", () => {
       destinationId: "session:resume-me",
       text: "continue the complete original request after restart",
       timestamp: Date.now(),
-      origin: { authority: "channel", channel: "telegram", accountId: "main", conversationId: "chat", senderId: "alice" },
+      origin: {
+        authority: "channel", channel: "telegram", accountId: "main", conversationId: "chat", senderId: "alice",
+        projectId: "atlas", projectTargetId: "core-host",
+      },
       notify: async () => undefined,
       async run() {
         await gate.promise;
@@ -427,6 +430,7 @@ describe("SessionJobManager", () => {
       id: job.id,
       destinationId: "session:resume-me",
       requestText: "continue the complete original request after restart",
+      origin: expect.objectContaining({ projectId: "atlas", projectTargetId: "core-host" }),
     })]);
     await expect(successor.markResumed(job.id, `session-job-resume:${job.id}`)).resolves.toMatchObject({ status: "resumed" });
     expect(successor.resumable()).toEqual([]);

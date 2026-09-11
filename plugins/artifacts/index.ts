@@ -15,6 +15,7 @@ import {
   type ArtifactAttachment,
   type ArtifactChannelPrincipal,
   type ArtifactRecord,
+  type GeneratedArtifactInput,
   type ArtifactCleanupPreview,
   type ArtifactStorageSummary,
   type ArtifactService,
@@ -284,7 +285,51 @@ const artifactsPlugin: FridayPlugin = definePlugin({
   const root = rootDir();
   let ingested = 0;
 
+  const persistBytes = async (input: GeneratedArtifactInput): Promise<ArtifactRecord> => {
+    const bytes = Buffer.from(input.bytes);
+    try {
+      if (bytes.byteLength === 0) throw new Error("Artifact is empty");
+      if (bytes.byteLength > MAX_MAX_BYTES) throw new Error("Artifact exceeds the maximum supported size");
+      await assertPrivateRoot(root, true);
+      const existingBytes = (await listArtifactRecords(root)).reduce((sum, record) => sum + record.sizeBytes, 0);
+      const quotaBytes = await readQuota(root);
+      if (existingBytes + bytes.byteLength > quotaBytes) {
+        throw new Error(`Artifact storage quota exceeded (${formatBytes(existingBytes)} used of ${formatBytes(quotaBytes)})`);
+      }
+      const id = randomUUID();
+      const ref = artifactRef(id);
+      const record: ArtifactRecord = Object.freeze({
+        ref,
+        id,
+        fileName: normalizedFileName(input.fileName),
+        ...(input.mimeType ? { mimeType: input.mimeType } : {}),
+        sizeBytes: bytes.byteLength,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        createdAt: new Date().toISOString(),
+      });
+      await mkdir(root, { recursive: true, mode: 0o700 });
+      const payload = payloadPath(root, id);
+      const metadata = recordPath(root, id);
+      const payloadTmp = `${payload}.${process.pid}.${Date.now()}.tmp`;
+      const metadataTmp = `${metadata}.${process.pid}.${Date.now()}.tmp`;
+      try {
+        await writeFile(payloadTmp, bytes, { mode: 0o600, flag: "wx" });
+        await writeFile(metadataTmp, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: "wx" });
+        await rename(payloadTmp, payload);
+        await rename(metadataTmp, metadata);
+      } catch (error) {
+        await Promise.allSettled([unlink(payloadTmp), unlink(metadataTmp), unlink(payload), unlink(metadata)]);
+        throw error;
+      }
+      ingested += 1;
+      return record;
+    } finally {
+      bytes.fill(0);
+    }
+  };
+
   const service: ArtifactService = Object.freeze({
+    storeGenerated: persistBytes,
     async ingestChannelAttachment(principal: ArtifactChannelPrincipal, attachment: ArtifactAttachment, options: { readonly maxBytes?: number | undefined } = {}) {
       if (principal.authority !== "channel") throw new Error("Only channel attachments can be ingested through this port");
       const maxBytes = options.maxBytes ?? DEFAULT_ATTACHMENT_MAX_BYTES;
@@ -294,7 +339,6 @@ const artifactsPlugin: FridayPlugin = definePlugin({
       if (attachment.sizeBytes !== undefined && attachment.sizeBytes > maxBytes) {
         throw new Error("Attachment exceeds the configured artifact size limit");
       }
-      await assertPrivateRoot(root, true);
       const channels = ctx.services.optional(CHANNELS_TRUSTED_CAPABILITY);
       if (!channels) throw new Error("Channel attachment ingestion requires Channels trusted interaction support");
       const downloaded = await channels.fetchAttachment(
@@ -306,38 +350,11 @@ const artifactsPlugin: FridayPlugin = definePlugin({
       try {
         if (bytes.byteLength === 0) throw new Error("Attachment is empty");
         if (bytes.byteLength > maxBytes) throw new Error("Attachment exceeds the configured artifact size limit");
-        const existingBytes = (await listArtifactRecords(root)).reduce((sum, record) => sum + record.sizeBytes, 0);
-        const quotaBytes = await readQuota(root);
-        if (existingBytes + bytes.byteLength > quotaBytes) {
-          throw new Error(`Artifact storage quota exceeded (${formatBytes(existingBytes)} used of ${formatBytes(quotaBytes)})`);
-        }
-        const id = randomUUID();
-        const ref = artifactRef(id);
-        const record: ArtifactRecord = Object.freeze({
-          ref,
-          id,
-          fileName: normalizedFileName(downloaded.fileName ?? attachment.fileName),
+        return await persistBytes({
+          fileName: downloaded.fileName ?? attachment.fileName ?? "attachment.bin",
           ...(downloaded.mimeType ?? attachment.mimeType ? { mimeType: downloaded.mimeType ?? attachment.mimeType } : {}),
-          sizeBytes: bytes.byteLength,
-          sha256: createHash("sha256").update(bytes).digest("hex"),
-          createdAt: new Date().toISOString(),
+          bytes,
         });
-        await mkdir(root, { recursive: true, mode: 0o700 });
-        const payload = payloadPath(root, id);
-        const metadata = recordPath(root, id);
-        const payloadTmp = `${payload}.${process.pid}.${Date.now()}.tmp`;
-        const metadataTmp = `${metadata}.${process.pid}.${Date.now()}.tmp`;
-        try {
-          await writeFile(payloadTmp, bytes, { mode: 0o600, flag: "wx" });
-          await writeFile(metadataTmp, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: "wx" });
-          await rename(payloadTmp, payload);
-          await rename(metadataTmp, metadata);
-        } catch (error) {
-          await Promise.allSettled([unlink(payloadTmp), unlink(metadataTmp), unlink(payload), unlink(metadata)]);
-          throw error;
-        }
-        ingested += 1;
-        return record;
       } finally {
         bytes.fill(0);
       }

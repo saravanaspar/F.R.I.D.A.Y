@@ -13,3 +13,5 @@ export class WorktreeResetError extends WorktreeError {}
 export class WorktreeListError extends WorktreeError {}
 export class WorktreeInspectError extends WorktreeError {}
 export class WorktreeCommitError extends WorktreeError {}
+
+export class WorktreePromoteError extends WorktreeError {}

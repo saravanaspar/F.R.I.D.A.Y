@@ -5,7 +5,7 @@ import { reportOperationalError, sanitizeOperationalError } from "@friday/operat
 import { decodeClientMessage, encodeClientMessage, type ClientAuthenticate, type ClientErrorMessage, type ClientSignalMessage, type ServerSignalMessage } from "@friday/client-protocol";
 import { WebSocket, WebSocketServer } from "ws";
 import type { DevicesService, DeviceType } from "../devices/contract.js";
-import type { ProjectPolicy, ProjectRepositoryMetadata } from "../projects/contract.js";
+import type { ProjectPolicy, ProjectRepositoryMetadata, ProjectValidationCommands } from "../projects/contract.js";
 import type { ClientConnection, ClientGatewayListenOptions, ClientGatewayResources, ClientGatewayServerStatus, ClientGatewayService } from "./contract.js";
 
 const MAX_HTTP_BODY_BYTES = 64 * 1024;
@@ -63,6 +63,17 @@ function stringArray(value: unknown, name: string, maximumItems = 32): readonly 
     if (typeof item !== "string" || !item.trim() || item.length > 128) throw new Error(`${name}[${index}] is invalid`);
     return item;
   });
+}
+
+function projectValidation(body: Record<string, unknown>): ProjectValidationCommands | undefined {
+  const validation = body.validation;
+  if (validation === undefined) return undefined;
+  if (!validation || typeof validation !== "object" || Array.isArray(validation)) throw new Error("validation must be an object");
+  const raw = validation as Record<string, unknown>;
+  return {
+    ...(raw.test === undefined ? {} : { test: requiredText(raw, "test", 4_096) }),
+    ...(raw.build === undefined ? {} : { build: requiredText(raw, "build", 4_096) }),
+  };
 }
 
 function projectPolicy(body: Record<string, unknown>): Partial<ProjectPolicy> | undefined {
@@ -309,6 +320,7 @@ export async function startClientTransport(
           };
         }
         const policy = projectPolicy(body);
+        const validation = projectValidation(body);
         const project = await resources.projects.create({
           ...(id === undefined ? {} : { id }),
           name: requiredText(body, "name", 160),
@@ -316,6 +328,7 @@ export async function startClientTransport(
           rootPath: requiredText(body, "rootPath", 4_096),
           ...(preferredComputerNodeId === undefined ? {} : { preferredComputerNodeId }),
           ...(repository === undefined ? {} : { repository }),
+          ...(validation === undefined ? {} : { validation }),
           ...(policy === undefined ? {} : { policy }),
         });
         json(response, 201, { project });
@@ -325,11 +338,13 @@ export async function startClientTransport(
         await authenticatedDevice();
         if (!resources.projects) throw new Error("projects capability is unavailable");
         const policy = projectPolicy(body);
+        const validation = body.validation === null ? null : projectValidation(body);
         const project = await resources.projects.update(requiredText(body, "projectId", 96), {
           ...(body.name === undefined ? {} : { name: requiredText(body, "name", 160) }),
           ...(body.description === undefined ? {} : { description: requiredText(body, "description", 4_000) }),
           ...(body.rootPath === undefined ? {} : { rootPath: requiredText(body, "rootPath", 4_096) }),
           ...(body.preferredComputerNodeId === undefined ? {} : body.preferredComputerNodeId === null ? { preferredComputerNodeId: null } : { preferredComputerNodeId: requiredText(body, "preferredComputerNodeId", 128) }),
+          ...(validation === undefined ? {} : { validation }),
           ...(policy === undefined ? {} : { policy }),
         });
         json(response, 200, { project });
@@ -375,6 +390,12 @@ export async function startClientTransport(
         json(response, 200, { diff: await resources.projects.diffCodingWorkspace(requiredText(body, "projectId", 96), requiredText(body, "directory", 4_096)) });
         return;
       }
+      if (path === "/v1/projects/worktrees/publish-diff") {
+        await authenticatedDevice();
+        if (!resources.projects) throw new Error("projects capability is unavailable");
+        json(response, 200, { report: await resources.projects.publishCodingWorkspaceDiff(requiredText(body, "projectId", 96), requiredText(body, "directory", 4_096)) });
+        return;
+      }
       if (path === "/v1/projects/worktrees/commit") {
         await authenticatedDevice();
         if (!resources.projects) throw new Error("projects capability is unavailable");
@@ -406,6 +427,20 @@ export async function startClientTransport(
         if (profileId && !conversation.participants.some((participant) => participant.kind === "agent" && participant.id === profileId)) {
           throw new Error("agent profile must participate in the conversation");
         }
+        const explicitProjectId = optionalText(body, "projectId", 96);
+        const selectedProjectId = explicitProjectId ?? profile?.defaultProjectId;
+        const projectTargetId = optionalText(body, "projectTargetId", 128);
+        if (projectTargetId !== undefined && selectedProjectId === undefined) throw new Error("projectTargetId requires projectId or an Agent Profile defaultProjectId");
+        if (selectedProjectId !== undefined) {
+          if (!resources.projects) throw new Error("projects capability is unavailable");
+          if (!resources.projects.get(selectedProjectId)) throw new Error("project not found");
+          await resources.projects.resolveExecution({
+            projectId: selectedProjectId,
+            operation: "shell",
+            access: "write",
+            ...(projectTargetId === undefined ? {} : { targetId: projectTargetId }),
+          });
+        }
         let reply = "";
         const result = await resources.turnRuntime.submit({
           id: typeof body.turnId === "string" ? body.turnId : randomUUID(),
@@ -423,6 +458,8 @@ export async function startClientTransport(
           timestamp: Date.now(),
           ...(profileId === undefined ? {} : { agentProfileId: profileId }),
           ...(profile === undefined ? {} : { agentProfileLabel: profile.title.trim() || profile.name.trim() || profile.id, agentNotificationPreference: profile.notificationPreference }),
+          ...(selectedProjectId === undefined ? {} : { projectId: selectedProjectId }),
+          ...(projectTargetId === undefined ? {} : { projectTargetId }),
           sessionAffinityId: conversation.sessionId,
           reply: async (value) => { reply = value; },
         });

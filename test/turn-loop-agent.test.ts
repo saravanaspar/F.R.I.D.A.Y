@@ -23,6 +23,7 @@ import { SESSION_RESOURCES_CAPABILITY } from "../plugins/session-resources/contr
 import sessionsPlugin from "../plugins/sessions/index.js";
 import { SESSIONS_CAPABILITY } from "../plugins/sessions/contract.js";
 import type { ToolsService } from "../plugins/tools/contract.js";
+import type { ProjectsService } from "../plugins/projects/contract.js";
 import type { RoutingDecision } from "../plugins/routing/contract.js";
 import { createAgentTurnExecutor } from "../plugins/turn-loop/agent-executor.js";
 import type { InboundTurn } from "../plugins/turn-loop/contract.js";
@@ -745,4 +746,74 @@ describe("Turn Loop agent executor", () => {
       faux.unregister();
     }
   });
+
+  it("executes Project turns in the server-resolved workspace and returns the trusted diff", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "faux";
+    process.env.FRIDAY_MODEL_ID = "faux-1";
+    const stateDir = tempRoot();
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(sessionsPlugin);
+    await friday.activatePlugin(promptsPlugin);
+    await friday.activatePlugin(modelPlugin);
+    await friday.activatePlugin(agentPlugin);
+
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
+    const workspace = join(stateDir, "project-worktree");
+    const projectRoot = join(stateDir, "project-root");
+    const toolCalls: Array<{ cwd: string; targetId?: string }> = [];
+    const acquireCalls: Array<{ projectId: string; ownerId: string; targetId?: string }> = [];
+    const tools = {
+      createTool() { throw new Error("not used"); },
+      createAllTools(cwd: string, options?: { executionTarget?: { id: string } }) {
+        toolCalls.push({ cwd, ...(options?.executionTarget?.id === undefined ? {} : { targetId: options.executionTarget.id }) });
+        return {};
+      },
+    } as unknown as ToolsService;
+    const projects = {
+      get(id: string) {
+        return id === "atlas" ? { id: "atlas", rootPath: projectRoot } : undefined;
+      },
+      async acquireAgentWorkspace(input: { projectId: string; ownerId: string; targetId?: string }) {
+        acquireCalls.push(input);
+        return {
+          projectId: "atlas",
+          projectRoot,
+          workspacePath: workspace,
+          target: { id: "core-host", kind: "core-host", label: "Core Host", operations: ["shell", "edit", "process", "git"] },
+          isolated: true,
+          worktree: { projectId: "atlas", target: { id: "core-host", kind: "core-host", label: "Core Host", operations: ["shell", "edit", "process", "git"] }, directory: workspace, baseCommit: "abc", branch: "friday/job" },
+        };
+      },
+      async publishCodingWorkspaceDiff() {
+        return { diff: { projectId: "atlas", directory: workspace, status: " M src/app.ts", patch: "diff --git a/src/app.ts b/src/app.ts\n+project change\n" }, artifactRef: "artifact:00000000-0000-0000-0000-000000000001" };
+      },
+    } as unknown as ProjectsService;
+    const executor = createAgentTurnExecutor({
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: withTestModel(requireCapability(MODEL_CAPABILITY), faux),
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions: requireCapability(SESSIONS_CAPABILITY),
+      tools,
+      optional: { projects: () => projects },
+    }, { stateDir });
+
+    try {
+      faux.setResponses([modelRuntime.fauxAssistantMessage("implemented project change")]);
+      const projectTurn: InboundTurn = { ...turn("project-1", "change the project"), projectId: "atlas", projectTargetId: "core-host" };
+      const result = await executor.execute({ turn: projectTurn, decision: decision("session:new"), jobId: "job-project" });
+      expect(acquireCalls).toEqual([{ projectId: "atlas", ownerId: "job-project", targetId: "core-host" }]);
+      expect(toolCalls).toContainEqual({ cwd: workspace, targetId: "core-host" });
+      expect(result.text).toContain("implemented project change");
+      expect(result.text).toContain("Project diff artifact: artifact:00000000-0000-0000-0000-000000000001");
+      expect(result.text).toContain("+project change");
+    } finally {
+      await executor.dispose();
+      faux.unregister();
+      await friday.dispose();
+    }
+  });
+
 });

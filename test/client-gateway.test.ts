@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
-import { requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
+import { provideCapability, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import { CLIENT_GATEWAY_CAPABILITY } from "../plugins/clients/contract.js";
 import clientsPlugin from "../plugins/clients/index.js";
 import agentProfilesPlugin from "../plugins/agent-profiles/index.js";
@@ -19,6 +19,7 @@ import { DEVICES_CAPABILITY, type DeviceDescriptor } from "../plugins/devices/co
 import devicesPlugin from "../plugins/devices/index.js";
 import { EVENTS_CAPABILITY } from "../plugins/events/contract.js";
 import { createEventsPlugin } from "../plugins/events/index.js";
+import { TURN_LOOP_CAPABILITY, type InboundTurn } from "../plugins/turn-loop/contract.js";
 import { PluginTestHost } from "./helpers/plugin-host.js";
 import { WebSocket } from "ws";
 
@@ -223,7 +224,17 @@ describe("Phase 1 client gateway", () => {
     await host.activatePlugin(sessionResourcesPlugin);
     await host.activatePlugin(executionPlugin);
     await host.activatePlugin(worktreesPlugin);
+    await host.activatePlugin(agentProfilesPlugin);
+    await host.activatePlugin(conversationsPlugin);
     await host.activatePlugin(projectsPlugin);
+    const submittedTurns: InboundTurn[] = [];
+    provideCapability(TURN_LOOP_CAPABILITY, {
+      async submit(turn: InboundTurn) {
+        submittedTurns.push(turn);
+        return { status: "completed" as const, messageId: turn.id, sessionId: "phase3-session" };
+      },
+      status: () => ({ activeTurns: 0, queuedConversations: 0, lockedSessions: 0, completedInProcess: submittedTurns.length }),
+    });
     await host.activatePlugin(clientsPlugin);
     await host.completePluginBootstrap();
 
@@ -257,6 +268,7 @@ describe("Phase 1 client gateway", () => {
       name: "Atlas",
       rootPath: repository,
       repositoryKind: "git",
+      validation: { test: "printf phase3-test", build: "printf phase3-build" },
       policy: {
         defaultTargetId: "sandbox",
         allowedTargetIds: ["sandbox"],
@@ -269,6 +281,27 @@ describe("Phase 1 client gateway", () => {
     const plan = await post("/v1/projects/resolve-target", { projectId: "atlas", operation: "edit", access: "write" });
     expect(plan.plan).toMatchObject({ projectId: "atlas", requiresWorktree: true, target: { kind: "sandbox" } });
 
+    const developer = await post("/v1/agent-profiles/create", {
+      name: "Developer",
+      roleInstructions: "Implement and validate Project changes.",
+      defaultProjectId: "atlas",
+    });
+    const developerId = (developer.profile as { id: string }).id;
+    const conversation = await post("/v1/conversations/create", {
+      type: "group",
+      title: "Atlas",
+      participants: [{ kind: "user", id: "operator" }, { kind: "agent", id: developerId }],
+    });
+    const conversationId = (conversation.conversation as { id: string }).id;
+    const turnResponse = await post("/v1/turns", {
+      conversationId,
+      agentProfileId: developerId,
+      text: "make the change and run validation",
+    });
+    expect(turnResponse.result).toMatchObject({ status: "completed", sessionId: "phase3-session" });
+    expect(submittedTurns).toHaveLength(1);
+    expect(submittedTurns[0]).toMatchObject({ projectId: "atlas", sessionAffinityId: expect.any(String) });
+
     const workspaceResponse = await post("/v1/projects/worktrees/create", { projectId: "atlas", name: "client-slice" });
     const directory = (workspaceResponse.workspace as { directory: string }).directory;
     expect(directory.startsWith(worktreeRoot)).toBe(true);
@@ -276,6 +309,8 @@ describe("Phase 1 client gateway", () => {
 
     const diff = await post("/v1/projects/worktrees/diff", { projectId: "atlas", directory });
     expect((diff.diff as { patch: string }).patch).toContain("+changed through client project workspace");
+    const published = await post("/v1/projects/worktrees/publish-diff", { projectId: "atlas", directory });
+    expect((published.report as { diff: { patch: string } }).diff.patch).toContain("+changed through client project workspace");
     await post("/v1/projects/worktrees/remove", { projectId: "atlas", directory, force: true, deleteBranch: true });
 
     await gateway.stop();

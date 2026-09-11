@@ -902,6 +902,7 @@ describe("plugin boundaries", () => {
       "memory",
       "model-credentials",
       "observability",
+      "projects",
       "rlm",
       "sandbox",
       "session-jobs",
