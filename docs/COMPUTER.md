@@ -63,6 +63,34 @@ Higher-level orchestration should use API/MCP before Computer browser automation
 
 The provider returns which mode was used and a fresh bounded observation. Browser action contents are not written to Computer Events. Explicitly sensitive typing is rejected by the generic action path and must use human takeover or a dedicated protected-credential flow.
 
+## Agent Computer tools
+
+When Turn Loop has an active `ComputerExecutionBinding`, the Computer plugin contributes two model-facing tools through the existing Agent tool extension point rather than creating a parallel Agent runtime:
+
+- `computer_observe` authorizes a private read through Permissions and returns a fresh bounded `ComputerObservation` for the currently leased screen.
+- `computer_browser` authorizes an external write through Permissions, accepts only the provider-neutral navigate/click/type/press action contract, and dispatches through the current screen/control generation.
+
+Both tools fail closed without an active Computer binding. Observation and browser execution are tracked as in-flight screen actions, so takeover, lease expiry, or release aborts them. Sensitive browser typing is rejected before provider dispatch; passwords, OTPs, CAPTCHA solutions, and similar secrets require human takeover or a dedicated protected-credential flow. The active-screen prompt section instructs the Agent to observe before making GUI decisions and to re-observe after takeover rather than replaying stale actions.
+
+## Client Gateway Computer APIs
+
+Authenticated clients use the Client Gateway as a thin adapter over the Computer capability. Phase 4 exposes:
+
+```text
+/v1/computer/status
+/v1/computer/nodes
+/v1/computer/screens
+/v1/computer/leases
+/v1/computer/observe
+/v1/computer/takeover
+/v1/computer/human-activity
+/v1/computer/hand-back
+```
+
+Status, node, screen, and lease responses use Computer-owned bounded serializers. Generic status never publishes browser tab URLs/titles or raw screenshot bytes. Observation returns only the normalized provider-neutral observation, where screenshot data may be referenced by an Artifact id rather than embedded as sensitive image bytes.
+
+Takeover, human-activity, and hand-back derive the human holder id from the authenticated device (`client:<device-id>`); a request body cannot claim another controller identity. Observe derives the active lease owner and generation server-side and therefore fails while human control is active or after a generation change. Client routes never receive a `ComputerNodeAdapter` and cannot call platform-provider methods directly.
+
 ## Human takeover and hand-back
 
 Human takeover is a control transition, not a second Agent. The screen remains leased to the original job while the user temporarily holds control.
@@ -85,6 +113,6 @@ Computer Node `restart`, `update`, and `resetManagedState` operations delegate t
 
 ## Current Phase 4 slice
 
-The first slice established the provider contract, admission, lease expiry/waiting, browser-action generation checks, takeover/hand-back behavior, status/doctor surfaces, and managed lifecycle guards. The second slice connected Project/Turn Loop execution to Computer targets and routed the existing bash/edit/process/IPython tool surfaces through the leased node while preserving Permissions and stale-generation checks. The third slice makes Computer admission a durable Session Job state and reuses the existing restart/resume path rather than introducing Computer-owned durable scheduling.
+The first slice established the provider contract, admission, lease expiry/waiting, browser-action generation checks, takeover/hand-back behavior, status/doctor surfaces, and managed lifecycle guards. The second slice connected Project/Turn Loop execution to Computer targets and routed the existing bash/edit/process/IPython tool surfaces through the leased node while preserving Permissions and stale-generation checks. The third slice made Computer admission a durable Session Job state and reused the existing restart/resume path rather than introducing Computer-owned durable scheduling. The fourth slice adds permission-gated Agent observe/browser tools plus authenticated Client Gateway status/observation/takeover APIs over the same Computer authority.
 
-Still pending in Phase 4 are Agent-facing Computer observe/browser-control tools, authenticated Client Gateway Computer APIs, Browser Supervisor orchestration beyond the provider contract, and the full login-wall → human takeover → fresh observation → same-job continuation acceptance path. Linux/Sway/Chromium and Windows platform providers remain Phase 5/8 work.
+Still pending in Phase 4 are Browser Supervisor orchestration beyond the provider contract and the full login-wall → human takeover → fresh observation → same-job continuation acceptance path. Linux/Sway/Chromium and Windows platform providers remain Phase 5/8 work.

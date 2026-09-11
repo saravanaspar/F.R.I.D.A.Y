@@ -45,6 +45,9 @@ published release artifacts and generated release notes.
 - Wired Computer admission into Turn progress so a detached Project job persists its wait before blocking, returns to `running` after a screen grant, remains cancellable while waiting, and is reconstructed through the existing restart/resume path with Project and Computer target identity intact.
 - Extended Session Job status/events/doctor surfaces with Computer wait counts and context while keeping Session Jobs provider-neutral; it stores generic wait metadata and does not import or own the Computer implementation.
 - Reported contained Computer timer, admission-retry, and idle hand-back failures through the operational-error sink instead of silently discarding provider/runtime diagnostics, while preserving fail-closed human control on hand-back failure.
+- Added permission-gated Agent `computer_observe` and `computer_browser` tools over the active leased screen. Observation is bounded/provider-neutral, browser actions remain generation-bound, and sensitive typing is rejected before provider execution so credentials/OTP/CAPTCHA values stay on the human-takeover path.
+- Added authenticated Client Gateway Computer APIs for safe status, node/screen/lease discovery, observation, human takeover/activity, and hand-back. Human controller identity is derived from the authenticated device rather than caller input, and generic status surfaces expose browser readiness/counts instead of tab content.
+- Reused typed Computer status/lease summaries across System and Client surfaces so external consumers receive one bounded representation without bypassing the Computer capability or provider boundary.
 
 ## [1.0.4] - 2026-09-09
 

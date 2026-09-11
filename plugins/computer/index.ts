@@ -1,6 +1,13 @@
 import type { FridayPlugin } from "../../src/plugin.js";
-import { definePlugin } from "../capabilities/protocol.js";
+import { definePlugin, type PluginContext } from "../capabilities/protocol.js";
 import { EVENTS_CAPABILITY } from "../events/contract.js";
+import { PERMISSIONS_CAPABILITY, type PermissionsService } from "../permissions/contract.js";
+import {
+  AGENT_PROMPT_SECTION_CONTRIBUTION,
+  AGENT_TOOL_CONTRIBUTION,
+  type AgentExtensionJsonValue,
+  type AgentToolExecutionContext,
+} from "../turn-loop/contract.js";
 import {
   SYSTEM_ACTION_CONTRIBUTION,
   SYSTEM_STATUS_CONTRIBUTION,
@@ -9,6 +16,8 @@ import {
 } from "../system/contract.js";
 import {
   COMPUTER_CAPABILITY,
+  type ComputerBrowserAction,
+  type ComputerExecutionBinding,
   type ComputerNodeAdapter,
   type ComputerService,
 } from "./contract.js";
@@ -44,56 +53,117 @@ function principalOwner(context: SystemActionExecutionContext): string {
     .slice(0, 160);
 }
 
-function statusSnapshot(service: ComputerService) {
-  const leases = service.screenLeases();
-  const nodes = service.nodes();
-  return {
-    nodes: nodes.length,
-    online: nodes.filter((node) => node.availability === "online").length,
-    degraded: nodes.filter((node) => node.availability === "degraded").length,
-    offline: nodes.filter((node) => node.availability === "offline").length,
-    activeScreenLeases: leases.length,
-    humanTakeovers: leases.filter((lease) => service.controlLease(lease.id)?.holder === "human").length,
-    nodeStatus: nodes.map((node) => ({
-      id: node.id,
-      label: node.label,
-      platform: node.platform,
-      availability: node.availability,
-      agentScreens: node.screens.filter((screen) => screen.kind === "agent").length,
-      leasedScreens: leases.filter((lease) => lease.nodeId === node.id).length,
-      browser: node.browser === undefined ? { available: node.capabilities.browser, running: false } : {
-        available: node.capabilities.browser,
-        running: node.browser.running,
-        persistentProfile: node.browser.persistentProfile,
-        windows: node.browser.windows.length,
-        tabs: node.browser.tabs.length,
-      },
-      resources: node.resources,
-    })),
-  };
+function agentText(input: Readonly<Record<string, AgentExtensionJsonValue>>, name: string, maximum = 16_384): string {
+  const value = input[name];
+  if (typeof value !== "string") throw new Error(`${name} must be a string`);
+  const normalized = value.normalize("NFKC").trim();
+  if (!normalized || normalized.length > maximum) throw new Error(`${name} is invalid`);
+  return normalized;
 }
 
-function activeLeaseSnapshot(service: ComputerService) {
-  return service.screenLeases().map((lease) => {
-    const control = service.controlLease(lease.id);
-    return {
-      screenLeaseId: lease.id,
-      nodeId: lease.nodeId,
-      screenId: lease.screenId,
-      ownerId: lease.ownerId,
-      acquiredAt: lease.acquiredAt,
-      expiresAt: lease.expiresAt,
-      ...(control === undefined ? {} : {
-        control: {
-          holder: control.holder,
-          generation: control.generation,
-          acquiredAt: control.acquiredAt,
-          lastActivityAt: control.lastActivityAt,
-          handBackAfterMs: control.handBackAfterMs,
-          transcriptPolicy: control.transcriptPolicy,
-        },
-      }),
-    };
+function activeComputerBinding(context?: AgentToolExecutionContext): ComputerExecutionBinding {
+  const binding = context?.computerExecution;
+  if (!context || !binding) throw new Error("Computer tool requires an active leased Computer screen");
+  return binding;
+}
+
+function browserAction(input: Readonly<Record<string, AgentExtensionJsonValue>>): ComputerBrowserAction {
+  const kind = input.action;
+  if (kind === "navigate") return { kind, url: agentText(input, "url", 4_096) };
+  if (kind === "click") return { kind, target: agentText(input, "target", 4_096) };
+  if (kind === "press") return { kind, key: agentText(input, "key", 128) };
+  if (kind === "type") {
+    if (input.sensitive === true) throw new Error("sensitive browser input requires human takeover or a dedicated protected-credential flow");
+    if (input.sensitive !== undefined && input.sensitive !== false) throw new Error("sensitive must be a boolean");
+    return { kind, target: agentText(input, "target", 4_096), text: agentText(input, "text", 16_384), sensitive: false };
+  }
+  throw new Error("action must be navigate, click, type, or press");
+}
+
+async function authorizeAgentComputer(
+  permissions: PermissionsService,
+  context: AgentToolExecutionContext,
+  binding: ComputerExecutionBinding,
+  kind: "observe" | "browser",
+): Promise<void> {
+  await permissions.authorize({
+    mode: context.permissionMode ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+    workspace: context.cwd,
+    access: kind === "observe" ? "read" : "write",
+    action: {
+      id: kind === "observe" ? "computer.observe" : "computer.browser.action",
+      effect: kind === "observe" ? "private-read" : "external-write",
+      resource: `computer:${binding.nodeId}:screen:${binding.screenId}`,
+      network: true,
+    },
+    reason: kind === "observe"
+      ? `observe leased Computer screen ${binding.nodeId}:${binding.screenId}`
+      : `control browser on leased Computer screen ${binding.nodeId}:${binding.screenId}`,
+    ...(context.jobId === undefined ? {} : { jobId: context.jobId }),
+  });
+}
+
+function registerAgentComputerTools(ctx: PluginContext, service: ComputerService, permissions: PermissionsService): void {
+  ctx.contribute(AGENT_PROMPT_SECTION_CONTRIBUTION, {
+    id: "computer-active-screen",
+    render(context) {
+      const binding = context.computerExecution;
+      if (!binding) return undefined;
+      return [
+        "<friday_computer_context>",
+        `Computer node: ${binding.nodeId}`,
+        `Leased screen: ${binding.screenId}`,
+        `Control generation: ${binding.generation}`,
+        "Use computer_observe before visual/browser decisions and after any human takeover. Use computer_browser only for non-secret input. Passwords, OTPs, CAPTCHAs, and other sensitive input require human takeover; never place those values in tool arguments.",
+        "</friday_computer_context>",
+      ].join("\n");
+    },
+  });
+
+  ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    id: "computer.observe",
+    sourcePluginId: "computer",
+    name: "computer_observe",
+    label: "Observe Computer screen",
+    description: "Re-observe the active leased Computer screen and browser state using the current control generation. Returns only provider-redacted bounded metadata and screenshot artifact references, never raw secret input.",
+    parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+    async execute(_input, signal, executionContext) {
+      const context = executionContext;
+      const binding = activeComputerBinding(context);
+      await authorizeAgentComputer(permissions, context!, binding, "observe");
+      return {
+        output: await service.observeScreen(binding.screenLeaseId, binding.ownerId, binding.generation, signal) as unknown as AgentExtensionJsonValue,
+      };
+    },
+  });
+
+  ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
+    id: "computer.browser",
+    sourcePluginId: "computer",
+    name: "computer_browser",
+    label: "Control Computer browser",
+    description: "Navigate, click, type non-secret text, or press a key on the active leased Computer browser. The provider uses Playwright DOM, accessibility, CDP, then visual control and returns a fresh observation. Sensitive input must use human takeover.",
+    parameters: Object.freeze({
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["navigate", "click", "type", "press"] },
+        url: { type: "string" },
+        target: { type: "string" },
+        text: { type: "string" },
+        key: { type: "string" },
+        sensitive: { type: "boolean" },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    }),
+    async execute(input, signal, executionContext) {
+      const context = executionContext;
+      const binding = activeComputerBinding(context);
+      const action = browserAction(input);
+      await authorizeAgentComputer(permissions, context!, binding, "browser");
+      const result = await service.runBrowserAction(binding.screenLeaseId, binding.ownerId, binding.generation, action, signal);
+      return { output: result as unknown as AgentExtensionJsonValue };
+    },
   });
 }
 
@@ -101,6 +171,7 @@ export function createComputerPlugin(options: ComputerPluginOptions = {}): Frida
   return definePlugin({
     id: "computer",
     requires: [EVENTS_CAPABILITY],
+    optional: [PERMISSIONS_CAPABILITY],
     provides: [COMPUTER_CAPABILITY],
   }, async (ctx) => {
     const events = ctx.services.require(EVENTS_CAPABILITY);
@@ -113,6 +184,9 @@ export function createComputerPlugin(options: ComputerPluginOptions = {}): Frida
     ctx.services.provide(COMPUTER_CAPABILITY, service);
     ctx.effect(() => service.close());
 
+    const permissions = ctx.services.optional(PERMISSIONS_CAPABILITY);
+    if (permissions) registerAgentComputerTools(ctx, service, permissions);
+
     for (const adapter of options.adapters ?? []) await service.registerNode(adapter);
 
     ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
@@ -120,7 +194,7 @@ export function createComputerPlugin(options: ComputerPluginOptions = {}): Frida
       label: "Shared Agent Computer",
       async snapshot() {
         await service.refreshAll().catch(() => Object.freeze([]));
-        return statusSnapshot(service);
+        return service.status();
       },
     });
 
@@ -132,7 +206,7 @@ export function createComputerPlugin(options: ComputerPluginOptions = {}): Frida
       permission: () => ({ id: "computer.status", effect: "private-read", resource: "computer", network: true }),
       async execute() {
         await service.refreshAll().catch(() => Object.freeze([]));
-        return { ...statusSnapshot(service), leases: activeLeaseSnapshot(service) };
+        return { ...service.status(), leases: service.leaseStatus() };
       },
     });
 

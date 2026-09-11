@@ -8,6 +8,7 @@ import { EVENTS_CAPABILITY, type EventRecord } from "../events/contract.js";
 import { TURN_LOOP_CAPABILITY } from "../turn-loop/contract.js";
 import { SESSION_JOBS_CAPABILITY } from "../session-jobs/contract.js";
 import { PROJECTS_CAPABILITY } from "../projects/contract.js";
+import { COMPUTER_CAPABILITY } from "../computer/contract.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION } from "../system/contract.js";
 import { CLIENT_GATEWAY_CAPABILITY, type ClientConnection, type ClientConnectInput, type ClientEventMessage, type ClientGatewayListenOptions, type ClientGatewayServerStatus, type ClientGatewayService } from "./contract.js";
 import { startClientTransport, type ClientTransportController } from "./transport.js";
@@ -26,7 +27,7 @@ function eventMessage(event: EventRecord, requestId: string): ClientEventMessage
 const clientsPlugin: FridayPlugin = definePlugin({
   id: "clients",
   requires: [DEVICES_CAPABILITY, EVENTS_CAPABILITY],
-  optional: [AGENT_PROFILES_CAPABILITY, CONVERSATIONS_CAPABILITY, TURN_LOOP_CAPABILITY, SESSION_JOBS_CAPABILITY, PROJECTS_CAPABILITY],
+  optional: [AGENT_PROFILES_CAPABILITY, CONVERSATIONS_CAPABILITY, TURN_LOOP_CAPABILITY, SESSION_JOBS_CAPABILITY, PROJECTS_CAPABILITY, COMPUTER_CAPABILITY],
   provides: [CLIENT_GATEWAY_CAPABILITY],
 }, (ctx) => {
   const devices = ctx.services.require(DEVICES_CAPABILITY);
@@ -79,6 +80,7 @@ const clientsPlugin: FridayPlugin = definePlugin({
         turnRuntime: ctx.services.optional(TURN_LOOP_CAPABILITY),
         sessionJobs: ctx.services.optional(SESSION_JOBS_CAPABILITY),
         projects: ctx.services.optional(PROJECTS_CAPABILITY),
+        computer: ctx.services.optional(COMPUTER_CAPABILITY),
       });
       return service.serverStatus();
     },

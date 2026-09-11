@@ -14,6 +14,7 @@ import {
   type ComputerExecutionBinding,
   type ComputerExecutionToolName,
   type ComputerHandBackResult,
+  type ComputerLeaseStatus,
   type ComputerNode,
   type ComputerNodeAdapter,
   type ComputerNodeCapabilities,
@@ -28,6 +29,7 @@ import {
   type ComputerScreenRequest,
   type ComputerScreenRequestResult,
   type ComputerService,
+  type ComputerStatusSnapshot,
   type ComputerToolExecutionRequest,
   type ComputerToolExecutionResult,
   type ControlLease,
@@ -520,6 +522,25 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
     actionsByScreenLease.delete(screenLeaseId);
   };
 
+  const beginScreenAction = (
+    screenLeaseId: string,
+    signal?: AbortSignal,
+  ): Readonly<{ controller: AbortController; unlink?: (() => void) | undefined }> => {
+    const controller = new AbortController();
+    const unlink = linkAbort(signal, controller);
+    const active = actionsByScreenLease.get(screenLeaseId) ?? new Set<AbortController>();
+    active.add(controller);
+    actionsByScreenLease.set(screenLeaseId, active);
+    return Object.freeze({ controller, ...(unlink === undefined ? {} : { unlink }) });
+  };
+
+  const finishScreenAction = (screenLeaseId: string, controller: AbortController, unlink?: () => void): void => {
+    unlink?.();
+    const active = actionsByScreenLease.get(screenLeaseId);
+    active?.delete(controller);
+    if (active?.size === 0) actionsByScreenLease.delete(screenLeaseId);
+  };
+
   const nodeLeaseCount = (nodeId: string): number => [...screenLeases.values()].filter((lease) => lease.nodeId === nodeId).length;
 
   const activeScreenIds = (nodeId: string): ReadonlySet<string> => new Set(
@@ -842,6 +863,64 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
       return Object.freeze([...nodes.values()].map((state) => cloneNode(state.node)).sort((left, right) => left.id.localeCompare(right.id)));
     },
 
+    status(): ComputerStatusSnapshot {
+      const activeLeases = [...screenLeases.values()];
+      const nodeValues = [...nodes.values()].map((state) => state.node).sort((left, right) => left.id.localeCompare(right.id));
+      return Object.freeze({
+        nodes: nodeValues.length,
+        online: nodeValues.filter((node) => node.availability === "online").length,
+        degraded: nodeValues.filter((node) => node.availability === "degraded").length,
+        offline: nodeValues.filter((node) => node.availability === "offline").length,
+        activeScreenLeases: activeLeases.length,
+        humanTakeovers: activeLeases.filter((lease) => controlLeases.get(lease.id)?.holder === "human").length,
+        waitingRequests: waiters.size,
+        nodeStatus: Object.freeze(nodeValues.map((node) => Object.freeze({
+          id: node.id,
+          label: node.label,
+          platform: node.platform,
+          availability: node.availability,
+          agentScreens: node.screens.filter((screen) => screen.kind === "agent").length,
+          leasedScreens: activeLeases.filter((lease) => lease.nodeId === node.id).length,
+          browser: node.browser === undefined
+            ? Object.freeze({ available: node.capabilities.browser, running: false })
+            : Object.freeze({
+              available: node.capabilities.browser,
+              running: node.browser.running,
+              persistentProfile: node.browser.persistentProfile,
+              windows: node.browser.windows.length,
+              tabs: node.browser.tabs.length,
+            }),
+          resources: Object.freeze({ ...node.resources }),
+        }))),
+      });
+    },
+
+    leaseStatus(): readonly ComputerLeaseStatus[] {
+      return Object.freeze([...screenLeases.values()]
+        .sort((left, right) => left.acquiredAt.localeCompare(right.acquiredAt) || left.id.localeCompare(right.id))
+        .map((lease) => {
+          const control = controlLeases.get(lease.id);
+          return Object.freeze({
+            screenLeaseId: lease.id,
+            nodeId: lease.nodeId,
+            screenId: lease.screenId,
+            ownerId: lease.ownerId,
+            acquiredAt: lease.acquiredAt,
+            expiresAt: lease.expiresAt,
+            ...(control === undefined ? {} : {
+              control: Object.freeze({
+                holder: control.holder,
+                generation: control.generation,
+                acquiredAt: control.acquiredAt,
+                lastActivityAt: control.lastActivityAt,
+                handBackAfterMs: control.handBackAfterMs,
+                transcriptPolicy: TRANSCRIPT_POLICY,
+              }),
+            }),
+          });
+        }));
+    },
+
     screenLeases() {
       return Object.freeze([...screenLeases.values()].map(cloneScreenLease).sort((left, right) => left.acquiredAt.localeCompare(right.acquiredAt)));
     },
@@ -1062,18 +1141,14 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
           throw new Error(`Computer node ${state.node.id} does not support ${operation} execution`);
         }
         if (!state.adapter.runTool) throw new Error(`Computer node ${state.node.id} does not provide tool execution`);
-        const controller = new AbortController();
-        const unlink = linkAbort(signal, controller);
-        const active = actionsByScreenLease.get(screenLease.id) ?? new Set<AbortController>();
-        active.add(controller);
-        actionsByScreenLease.set(screenLease.id, active);
+        const action = beginScreenAction(screenLease.id, signal);
         return Object.freeze({
           screenLeaseId: screenLease.id,
           screenId: screenLease.screenId,
           nodeId: screenLease.nodeId,
           adapter: state.adapter,
-          controller,
-          ...(unlink === undefined ? {} : { unlink }),
+          controller: action.controller,
+          ...(action.unlink === undefined ? {} : { unlink: action.unlink }),
         });
       });
       try {
@@ -1101,10 +1176,41 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         });
         return normalized;
       } finally {
-        prepared.unlink?.();
-        const active = actionsByScreenLease.get(prepared.screenLeaseId);
-        active?.delete(prepared.controller);
-        if (active?.size === 0) actionsByScreenLease.delete(prepared.screenLeaseId);
+        finishScreenAction(prepared.screenLeaseId, prepared.controller, prepared.unlink);
+      }
+    },
+
+    async observeScreen(screenLeaseIdInput, ownerIdInput, generation, signal) {
+      signal?.throwIfAborted();
+      const prepared = await serialize(() => {
+        const control = service.assertAgentControl(screenLeaseIdInput, ownerIdInput, generation);
+        const screenLease = requireScreenLease(control.screenLeaseId);
+        const state = requireNodeState(screenLease.nodeId);
+        const action = beginScreenAction(screenLease.id, signal);
+        return Object.freeze({
+          screenLeaseId: screenLease.id,
+          screenId: screenLease.screenId,
+          nodeId: screenLease.nodeId,
+          adapter: state.adapter,
+          controller: action.controller,
+          ...(action.unlink === undefined ? {} : { unlink: action.unlink }),
+        });
+      });
+      try {
+        const observation = normalizeObservation(
+          await prepared.adapter.observeScreen(prepared.screenId, generation, prepared.controller.signal),
+          prepared.screenId,
+        );
+        prepared.controller.signal.throwIfAborted();
+        service.assertAgentControl(prepared.screenLeaseId, ownerIdInput, generation);
+        publish("computer.screen.observed", `computer:${prepared.nodeId}:screen:${prepared.screenId}`, {
+          nodeId: prepared.nodeId,
+          screenId: prepared.screenId,
+          generation,
+        });
+        return observation;
+      } finally {
+        finishScreenAction(prepared.screenLeaseId, prepared.controller, prepared.unlink);
       }
     },
 
@@ -1118,19 +1224,15 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         if (!state.node.capabilities.browser || !state.adapter.runBrowserAction) throw new Error(`Computer node ${state.node.id} does not provide browser automation`);
         const order = automationOrder(state.node.capabilities);
         if (order.length === 0) throw new Error(`Computer node ${state.node.id} has no browser automation mode`);
-        const controller = new AbortController();
-        const unlink = linkAbort(signal, controller);
-        const active = actionsByScreenLease.get(screenLease.id) ?? new Set<AbortController>();
-        active.add(controller);
-        actionsByScreenLease.set(screenLease.id, active);
+        const pending = beginScreenAction(screenLease.id, signal);
         return Object.freeze({
           screenLeaseId: screenLease.id,
           screenId: screenLease.screenId,
           nodeId: screenLease.nodeId,
           adapter: state.adapter,
           order,
-          controller,
-          ...(unlink === undefined ? {} : { unlink }),
+          controller: pending.controller,
+          ...(pending.unlink === undefined ? {} : { unlink: pending.unlink }),
         });
       });
       try {
@@ -1157,10 +1259,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         });
         return normalizedResult;
       } finally {
-        prepared.unlink?.();
-        const active = actionsByScreenLease.get(prepared.screenLeaseId);
-        active?.delete(prepared.controller);
-        if (active?.size === 0) actionsByScreenLease.delete(prepared.screenLeaseId);
+        finishScreenAction(prepared.screenLeaseId, prepared.controller, prepared.unlink);
       }
     },
 

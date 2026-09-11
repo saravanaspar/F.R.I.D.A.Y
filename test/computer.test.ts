@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
-import { collectContributions, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
+import { collectContributions, definePlugin, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import { createComputerPlugin, createComputerService } from "../plugins/computer/index.js";
 import {
   COMPUTER_CAPABILITY,
@@ -11,6 +11,8 @@ import {
   type ComputerObservation,
 } from "../plugins/computer/contract.js";
 import { createEventsPlugin } from "../plugins/events/index.js";
+import { PERMISSIONS_CAPABILITY, type PermissionRequest, type PermissionsService } from "../plugins/permissions/contract.js";
+import { AGENT_TOOL_CONTRIBUTION } from "../plugins/turn-loop/contract.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION } from "../plugins/system/contract.js";
 import { PluginTestHost } from "./helpers/plugin-host.js";
 
@@ -365,4 +367,65 @@ describe("Phase 4 Shared Agent Computer", () => {
 
     await friday.dispose();
   });
+  it("exposes permission-gated Agent observe/browser tools only against the active leased Computer generation", async () => {
+    const adapter = fakeAdapter();
+    const authorization: PermissionRequest[] = [];
+    const permissions: PermissionsService = {
+      normalizeMode: () => "auto",
+      async authorize(request) { authorization.push(request); return { allowed: true, approvedBy: "policy" }; },
+      assertWorkspacePath: (_workspace, path) => path,
+    };
+    const permissionProvider = definePlugin(
+      { id: "test-computer-permissions", provides: [PERMISSIONS_CAPABILITY] },
+      (ctx) => { ctx.services.provide(PERMISSIONS_CAPABILITY, permissions); },
+    );
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(createEventsPlugin({ autoStartWorker: false }));
+    await friday.activatePlugin(permissionProvider);
+    await friday.activatePlugin(createComputerPlugin({ adapters: [adapter], service: { idFactory: sequentialIds(), pollIntervalMs: 60_000 } }));
+
+    const service = requireCapability(COMPUTER_CAPABILITY);
+    const grant = await service.requestScreen({ ownerId: "job-agent-tools", preferredNodeId: "node-1" });
+    if (grant.state !== "acquired") throw new Error("expected Computer screen grant");
+    const binding = {
+      nodeId: grant.screenLease.nodeId,
+      screenId: grant.screenLease.screenId,
+      screenLeaseId: grant.screenLease.id,
+      ownerId: grant.screenLease.ownerId,
+      ownerKind: "main-agent" as const,
+      generation: grant.controlLease.generation,
+    };
+    const executionContext = {
+      cwd: "/workspace/project",
+      sessionId: "session-computer-tools",
+      jobId: "job-agent-tools",
+      permissionMode: "auto" as const,
+      computerExecution: binding,
+      deferAfterReply() {},
+      deferOnFailure() {},
+    } as never;
+    const tools = collectContributions(AGENT_TOOL_CONTRIBUTION);
+    expect(tools.map((tool) => tool.name).sort()).toEqual(["computer_browser", "computer_observe"]);
+
+    const observe = tools.find((tool) => tool.name === "computer_observe")!;
+    await expect(observe.execute({}, undefined, executionContext)).resolves.toMatchObject({
+      output: { screenId: "agent-1", screenshotArtifactRef: "artifact:screen-safe" },
+    });
+    const browser = tools.find((tool) => tool.name === "computer_browser")!;
+    await expect(browser.execute({ action: "click", target: "Continue" }, undefined, executionContext)).resolves.toMatchObject({
+      output: { mode: "playwright-dom", observation: { screenId: "agent-1" } },
+    });
+    await expect(browser.execute({ action: "type", target: "password", text: "do-not-capture", sensitive: true }, undefined, executionContext))
+      .rejects.toThrow(/human takeover|protected-credential/);
+    expect(authorization.map((request) => request.action)).toEqual([
+      { id: "computer.observe", effect: "private-read", resource: "computer:node-1:screen:agent-1", network: true },
+      { id: "computer.browser.action", effect: "external-write", resource: "computer:node-1:screen:agent-1", network: true },
+    ]);
+
+    await service.takeOver(grant.screenLease.id, "human:operator", null);
+    await expect(observe.execute({}, undefined, executionContext)).rejects.toThrow(/human control|stale/);
+    await friday.dispose();
+  });
+
 });

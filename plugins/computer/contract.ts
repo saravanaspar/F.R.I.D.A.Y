@@ -294,6 +294,53 @@ export interface ComputerDoctorReport {
   readonly waitingRequests: number;
 }
 
+export interface ComputerStatusBrowserSummary {
+  readonly available: boolean;
+  readonly running: boolean;
+  readonly persistentProfile?: boolean | undefined;
+  readonly windows?: number | undefined;
+  readonly tabs?: number | undefined;
+}
+
+export interface ComputerNodeStatusSummary {
+  readonly id: string;
+  readonly label: string;
+  readonly platform: ComputerNodePlatform;
+  readonly availability: ComputerNodeAvailability;
+  readonly agentScreens: number;
+  readonly leasedScreens: number;
+  readonly browser: ComputerStatusBrowserSummary;
+  readonly resources: ComputerResourceSnapshot;
+}
+
+export interface ComputerStatusSnapshot {
+  readonly nodes: number;
+  readonly online: number;
+  readonly degraded: number;
+  readonly offline: number;
+  readonly activeScreenLeases: number;
+  readonly humanTakeovers: number;
+  readonly waitingRequests: number;
+  readonly nodeStatus: readonly ComputerNodeStatusSummary[];
+}
+
+export interface ComputerLeaseStatus {
+  readonly screenLeaseId: string;
+  readonly nodeId: string;
+  readonly screenId: string;
+  readonly ownerId: string;
+  readonly acquiredAt: string;
+  readonly expiresAt: string;
+  readonly control?: Readonly<{
+    readonly holder: "agent" | "human";
+    readonly generation: number;
+    readonly acquiredAt: string;
+    readonly lastActivityAt: string;
+    readonly handBackAfterMs: number | null;
+    readonly transcriptPolicy: ControlLeaseTranscriptPolicy;
+  }> | undefined;
+}
+
 export interface ComputerService {
   registerNode(adapter: ComputerNodeAdapter): Promise<ComputerNode>;
   unregisterNode(nodeId: string, options?: { readonly force?: boolean | undefined }): Promise<boolean>;
@@ -301,6 +348,8 @@ export interface ComputerService {
   refreshAll(signal?: AbortSignal): Promise<readonly ComputerNode[]>;
   node(nodeId: string): ComputerNode | undefined;
   nodes(): readonly ComputerNode[];
+  status(): ComputerStatusSnapshot;
+  leaseStatus(): readonly ComputerLeaseStatus[];
   screenLeases(): readonly ScreenLease[];
   controlLease(screenLeaseId: string): ControlLease | undefined;
   requestScreen(request: ComputerScreenRequest): Promise<ComputerScreenRequestResult>;
@@ -317,6 +366,12 @@ export interface ComputerService {
   handBack(screenLeaseId: string, humanOwnerId: string, signal?: AbortSignal): Promise<ComputerHandBackResult>;
   sweepIdleTakeovers(now?: number): Promise<number>;
   assertAgentControl(screenLeaseId: string, ownerId: string, generation: number): ControlLease;
+  observeScreen(
+    screenLeaseId: string,
+    ownerId: string,
+    generation: number,
+    signal?: AbortSignal,
+  ): Promise<ComputerObservation>;
   runTool(
     binding: ComputerExecutionBinding,
     request: ComputerToolExecutionRequest,

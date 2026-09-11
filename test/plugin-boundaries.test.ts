@@ -166,13 +166,16 @@ describe("plugin boundaries", () => {
     expect(contract).toContain("runTool?");
     expect(service).not.toMatch(/(?:from|import\()\s*["']\.\.\/(?:execution|session-jobs|tools|projects|vault|subagents)\//);
     expect(entry).toContain("SYSTEM_STATUS_CONTRIBUTION");
+    expect(entry).toContain("AGENT_TOOL_CONTRIBUTION");
+    expect(entry).toContain('name: "computer_observe"');
+    expect(entry).toContain('name: "computer_browser"');
     expect(entry).toContain('id: "computer.takeover"');
     expect(entry).toContain('id: "computer.hand-back"');
     expect(entry).toContain('id: "computer.node.reset-managed"');
 
     const manifest = getPluginManifest(computerPlugin)!;
     expect(manifest.requires.map((capability) => capability.id)).toEqual(["events"]);
-    expect(manifest.optional.map((capability) => capability.id)).toEqual([]);
+    expect(manifest.optional.map((capability) => capability.id)).toEqual(["permissions"]);
     expect(manifest.provides.map((capability) => capability.id)).toEqual(["computer"]);
 
     const toolsManifest = getPluginManifest(toolsPlugin)!;

@@ -87,9 +87,28 @@ Phase 3 keeps Project identity and path policy on the server. Authenticated clie
 
 `/v1/projects/resolve-target` returns the server-side target decision and whether a write requires an isolated worktree. Coding workspace routes delegate to the existing hardened Worktrees capability; worktree directories must stay outside the canonical Project root. `/v1/projects/worktrees/publish-diff` persists the complete trusted patch through Artifacts when available.
 
-`/v1/turns` additionally accepts optional `projectId` and `projectTargetId`. If `projectId` is omitted, the selected Agent Profile may supply its `defaultProjectId`. The server validates the Project and target before admitting the turn; clients never choose an arbitrary execution directory. For Agent Session work, Turn Loop persists Project/target metadata in the detached Session Job, so closing the HTTP/WebSocket client does not own or cancel the coding job. Sandbox execution is the default; explicitly permitted Core Host targets route existing shell/edit/process/IPython tools directly through Execution while preserving Permissions. Remote Computer Node targets are represented in the shared contract but intentionally fail closed until Phase 4 implements Computer Nodes.
+`/v1/turns` additionally accepts optional `projectId` and `projectTargetId`. If `projectId` is omitted, the selected Agent Profile may supply its `defaultProjectId`. The server validates the Project and target before admitting the turn; clients never choose an arbitrary execution directory. For Agent Session work, Turn Loop persists Project/target metadata in the detached Session Job, so closing the HTTP/WebSocket client does not own or cancel the coding job. Sandbox execution is the default; explicitly permitted Core Host targets route existing shell/edit/process/IPython tools directly through Execution while preserving Permissions. Phase 4 `computer:<node-id>` targets additionally enter Computer admission, lease an Agent screen, and route those existing tools through the provider under the current control generation.
 
 Canonical repository integration is not exposed as an unguarded client mutation. The Agent/System `project_promote` path performs the permission check and then delegates clean fast-forward merge or cherry-pick to Worktrees.
+
+## Computer APIs
+
+Phase 4 keeps Computer Node/provider authority on the server. Authenticated clients may inspect bounded Computer state and participate in explicit human takeover without receiving a provider adapter or supplying an arbitrary controller identity:
+
+```text
+/v1/computer/status
+/v1/computer/nodes
+/v1/computer/screens
+/v1/computer/leases
+/v1/computer/observe
+/v1/computer/takeover
+/v1/computer/human-activity
+/v1/computer/hand-back
+```
+
+Every route uses the existing paired-device challenge/signature authentication. Status refreshes provider telemetry and returns bounded Computer-owned summaries; browser status includes readiness and counts but not tab URLs/titles. `/v1/computer/observe` derives the current screen-lease owner and control generation on the server and returns the normalized observation, including at most an Artifact reference for a screenshot rather than raw screenshot bytes. It fails closed while a human owns control or after a generation change.
+
+`/v1/computer/takeover`, `/v1/computer/human-activity`, and `/v1/computer/hand-back` derive the human holder id from the authenticated device as `client:<device-id>`; caller-supplied identity cannot impersonate another controller. Hand-back retains the Computer invariant that Agent control is restored only after fresh provider observation succeeds.
 
 ## Verification
 

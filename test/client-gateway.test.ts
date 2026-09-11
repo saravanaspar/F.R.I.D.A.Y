@@ -15,6 +15,8 @@ import sessionResourcesPlugin from "../plugins/session-resources/index.js";
 import executionPlugin from "../plugins/execution/index.js";
 import worktreesPlugin from "../plugins/worktrees/index.js";
 import projectsPlugin from "../plugins/projects/index.js";
+import { createComputerPlugin } from "../plugins/computer/index.js";
+import { COMPUTER_CAPABILITY, type ComputerNodeAdapter } from "../plugins/computer/contract.js";
 import { DEVICES_CAPABILITY, type DeviceDescriptor } from "../plugins/devices/contract.js";
 import devicesPlugin from "../plugins/devices/index.js";
 import { EVENTS_CAPABILITY } from "../plugins/events/contract.js";
@@ -312,6 +314,147 @@ describe("Phase 1 client gateway", () => {
     const published = await post("/v1/projects/worktrees/publish-diff", { projectId: "atlas", directory });
     expect((published.report as { diff: { patch: string } }).diff.patch).toContain("+changed through client project workspace");
     await post("/v1/projects/worktrees/remove", { projectId: "atlas", directory, force: true, deleteBranch: true });
+
+    await gateway.stop();
+    await host.dispose();
+  });
+
+  it("exposes authenticated Phase 4 Computer status, observation, and human takeover APIs", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "friday-client-phase4-state-"));
+    roots.push(stateDir);
+    process.env.FRIDAY_STATE_DIR = stateDir;
+    const adapter: ComputerNodeAdapter = {
+      descriptor: {
+        id: "desk-1",
+        label: "Desk Computer",
+        platform: "test",
+        capabilities: {
+          executionOperations: ["shell", "edit", "process", "git"],
+          browser: true,
+          playwright: true,
+          accessibility: true,
+          cdp: true,
+          visualControl: true,
+          screenCapture: true,
+          rawInput: true,
+          virtualDisplays: true,
+          managedLifecycle: false,
+        },
+      },
+      async snapshot() {
+        return {
+          availability: "online",
+          resources: { totalMemoryMb: 8_192, availableMemoryMb: 6_144, cpuPercent: 12, browserRendererCount: 2, screenWorkloadPercent: 10 },
+          screens: [
+            { id: "human-1", label: "Human", kind: "human" },
+            { id: "agent-1", label: "Agent", kind: "agent" },
+          ],
+          browser: {
+            running: true,
+            profileId: "shared-profile",
+            persistentProfile: true,
+            windows: [{ id: "window-1", owner: "friday", screenId: "agent-1", tabIds: ["tab-1"] }],
+            tabs: [{ id: "tab-1", title: "Example", url: "https://example.com/", active: true }],
+          },
+        };
+      },
+      async observeScreen(screenId) {
+        return {
+          observedAt: new Date().toISOString(),
+          screenId,
+          url: "https://example.com/account",
+          domSummary: "account page; protected fields omitted",
+          accessibilitySummary: "main document",
+          tabs: [{ id: "tab-1", title: "Account", url: "https://example.com/account", active: true }],
+          screenshotArtifactRef: "artifact:client-safe-screen",
+          processes: [{ pid: 123, name: "chromium" }],
+        };
+      },
+    };
+
+    const host = new PluginTestHost();
+    await host.activatePlugin(capabilitiesPlugin);
+    await host.activatePlugin(createEventsPlugin({ autoStartWorker: false }));
+    await host.activatePlugin(devicesPlugin);
+    await host.activatePlugin(createComputerPlugin({ adapters: [adapter], service: { pollIntervalMs: 60_000 } }));
+    await host.activatePlugin(clientsPlugin);
+    await host.completePluginBootstrap();
+
+    const devices = requireCapability(DEVICES_CAPABILITY);
+    const computer = requireCapability(COMPUTER_CAPABILITY);
+    const grant = await computer.requestScreen({ ownerId: "job-client-phase4", preferredNodeId: "desk-1" });
+    if (grant.state !== "acquired") throw new Error("expected Computer screen grant");
+
+    const gateway = requireCapability(CLIENT_GATEWAY_CAPABILITY);
+    const keys = generateKeyPairSync("ed25519");
+    const descriptor: DeviceDescriptor = {
+      deviceId: "desktop-phase4",
+      name: "Phase 4 client",
+      type: "test",
+      publicKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    };
+    const pairing = await devices.beginPairing(descriptor);
+    await devices.approvePairing(pairing.pairingId);
+    const status = await gateway.start({ port: 0 });
+    const base = `http://127.0.0.1:${status.port}`;
+    const call = async (path: string, input: Record<string, unknown>) => {
+      const challenge = await devices.issueChallenge(descriptor.deviceId);
+      const signature = sign(null, Buffer.from(challenge.challenge), keys.privateKey).toString("base64url");
+      const response = await fetch(`${base}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceId: descriptor.deviceId, challenge: challenge.challenge, signature, ...input }),
+      });
+      const payload = await response.json() as Record<string, unknown>;
+      return { response, payload };
+    };
+    const post = async (path: string, input: Record<string, unknown>) => {
+      const result = await call(path, input);
+      expect(result.response.status).toBeLessThan(400);
+      return result.payload;
+    };
+
+    const unauthenticated = await fetch(`${base}/v1/computer/status`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(unauthenticated.status).toBeGreaterThanOrEqual(400);
+
+    const computerStatus = await post("/v1/computer/status", {});
+    expect(computerStatus.status).toMatchObject({ nodes: 1, online: 1, activeScreenLeases: 1, humanTakeovers: 0 });
+    const nodes = await post("/v1/computer/nodes", {});
+    expect(nodes.nodes).toEqual([expect.objectContaining({
+      id: "desk-1",
+      platform: "test",
+      agentScreens: 1,
+      browser: expect.objectContaining({ available: true, running: true, windows: 1, tabs: 1 }),
+    })]);
+    expect(JSON.stringify(nodes)).not.toContain("https://example.com/");
+    const screens = await post("/v1/computer/screens", {});
+    expect(screens.screens).toEqual(expect.arrayContaining([expect.objectContaining({ nodeId: "desk-1", id: "agent-1", kind: "agent" })]));
+    const leases = await post("/v1/computer/leases", {});
+    expect(leases.leases).toEqual([expect.objectContaining({ screenLeaseId: grant.screenLease.id, control: expect.objectContaining({ holder: "agent" }) })]);
+
+    const observed = await post("/v1/computer/observe", { screenLeaseId: grant.screenLease.id });
+    expect(observed.observation).toMatchObject({ screenId: "agent-1", screenshotArtifactRef: "artifact:client-safe-screen" });
+
+    const takeover = await post("/v1/computer/takeover", { screenLeaseId: grant.screenLease.id, handBackAfterMs: 5_000, humanOwnerId: "ignored" });
+    expect(takeover.control).toMatchObject({
+      holder: "human",
+      holderId: "client:desktop-phase4",
+      transcriptPolicy: { captureKeystrokes: false, captureSecrets: false, captureSensitiveScreenshots: false },
+    });
+    const blockedObservation = await call("/v1/computer/observe", { screenLeaseId: grant.screenLease.id });
+    expect(blockedObservation.response.status).toBeGreaterThanOrEqual(400);
+
+    const activity = await post("/v1/computer/human-activity", { screenLeaseId: grant.screenLease.id });
+    expect(activity.control).toMatchObject({ holder: "human", holderId: "client:desktop-phase4" });
+    const handedBack = await post("/v1/computer/hand-back", { screenLeaseId: grant.screenLease.id });
+    expect(handedBack).toMatchObject({
+      controlLease: { holder: "agent", holderId: "job-client-phase4" },
+      observation: { screenId: "agent-1", screenshotArtifactRef: "artifact:client-safe-screen" },
+    });
 
     await gateway.stop();
     await host.dispose();
