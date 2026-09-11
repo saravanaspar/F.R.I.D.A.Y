@@ -100,7 +100,7 @@ describe("tools plugin", () => {
     await friday.activatePlugin(executionPlugin);
     const approvals: PermissionRequest[] = [];
     let sandboxCalls = 0;
-    const remoteCalls: Array<{ tool: string; workspace: string; input: Readonly<Record<string, unknown>>; generation: number }> = [];
+    const remoteCalls: Array<{ tool: string; workspace: string; input: Readonly<Record<string, unknown>>; runId: string; generation: number }> = [];
     let controlGeneration = 7;
     let humanControl = false;
     let interruptNext = false;
@@ -134,8 +134,9 @@ describe("tools plugin", () => {
           resumedAfterTakeover: true as const,
           controlLease: controlLeaseSnapshot(),
           observation: {
-            observedAt: new Date().toISOString(), screenId: "agent-1", url: "https://example.com/after-login",
-            domSummary: "signed in", accessibilitySummary: "main", tabs: [], processes: [],
+            observedAt: new Date().toISOString(), screenId: "agent-1",
+            safety: { protectedInputOmitted: true, keystrokesOmitted: true, captchaOmitted: true, sensitiveScreenshotOmitted: true },
+            url: "https://example.com/after-login", domSummary: "signed in", accessibilitySummary: "main", tabs: [], processes: [],
           },
         };
       },
@@ -146,7 +147,7 @@ describe("tools plugin", () => {
           controlGeneration += 1;
           throw new Error("Human takeover invalidated pending Computer actions");
         }
-        remoteCalls.push({ tool: request.tool, workspace: request.workspace, input: request.input, generation: binding.generation });
+        remoteCalls.push({ tool: request.tool, workspace: request.workspace, input: request.input, runId: binding.runId, generation: binding.generation });
         return { content: [{ type: "text", text: `remote:${request.tool}` }] };
       },
     } as unknown as ComputerService);
@@ -161,6 +162,7 @@ describe("tools plugin", () => {
       screenLeaseId: "lease-1",
       ownerId: "job-1",
       ownerKind: "main-agent" as const,
+      runId: "run-tools-computer",
       generation: 7,
     };
     const target = computerNodeExecutionTarget("desk-1");
@@ -176,6 +178,7 @@ describe("tools plugin", () => {
 
     expect(remoteCalls.map((call) => call.tool)).toEqual(["bash", "edit", "process", "ipython"]);
     expect(remoteCalls.every((call) => call.workspace === dir)).toBe(true);
+    expect(remoteCalls.every((call) => call.runId === "run-tools-computer")).toBe(true);
     expect(sandboxCalls).toBe(0);
     expect(approvals.map((entry) => entry.action.id)).toEqual([
       "tools.bash.execute",

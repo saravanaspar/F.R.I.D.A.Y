@@ -1,3 +1,4 @@
+import { reportOperationalError } from "@friday/operational-errors";
 import type { FridayPlugin } from "../../src/plugin.js";
 import { definePlugin, type PluginContext } from "../capabilities/protocol.js";
 import { EVENTS_CAPABILITY } from "../events/contract.js";
@@ -123,6 +124,41 @@ function browserAction(input: Readonly<Record<string, AgentExtensionJsonValue>>)
   throw new Error("action must be navigate, click, type, or press");
 }
 
+async function waitForAgentBrowserAdmission(
+  service: ComputerService,
+  context: AgentToolExecutionContext,
+  binding: ComputerExecutionBinding,
+  signal?: AbortSignal,
+): Promise<ComputerExecutionBinding> {
+  let waited = false;
+  const grant = await service.waitForScreen({
+    ownerId: binding.ownerId,
+    preferredNodeId: binding.nodeId,
+    preferredScreenId: binding.screenId,
+    requireBrowser: true,
+    ...(binding.admission?.demand === undefined ? {} : { demand: binding.admission.demand }),
+  }, signal, async (waiting) => {
+    waited = true;
+    await context.reportProgress?.({
+      kind: "status",
+      message: `Waiting for Computer ${binding.nodeId} browser: ${waiting.reasons.join(", ")}`,
+      jobStatus: "waiting-for-computer",
+      computerWait: { code: waiting.code, nodeId: binding.nodeId, reasons: waiting.reasons },
+    });
+  });
+  if (waited) {
+    await context.reportProgress?.({
+      kind: "status",
+      message: `Computer ${binding.nodeId} browser is ready; resuming work`,
+      jobStatus: "running",
+      notify: false,
+    });
+  }
+  return grant.controlLease.generation === binding.generation
+    ? binding
+    : Object.freeze({ ...binding, generation: grant.controlLease.generation });
+}
+
 async function authorizeAgentComputer(
   permissions: PermissionsService,
   context: AgentToolExecutionContext,
@@ -165,7 +201,7 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
   });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
-    id: "computer.observe",
+    id: "computer-observe",
     sourcePluginId: "computer",
     name: "computer_observe",
     label: "Observe Computer screen",
@@ -188,7 +224,7 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
   });
 
   ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
-    id: "computer.browser",
+    id: "computer-browser",
     sourcePluginId: "computer",
     name: "computer_browser",
     label: "Control Computer browser",
@@ -208,14 +244,24 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
     }),
     async execute(input, signal, executionContext) {
       const context = executionContext;
-      const binding = currentComputerBinding(service, context);
+      const initialBinding = currentComputerBinding(service, context);
       const action = browserAction(input);
-      await authorizeAgentComputer(permissions, context!, binding, "browser");
+      await authorizeAgentComputer(permissions, context!, initialBinding, "browser");
+      const binding = await waitForAgentBrowserAdmission(service, context!, initialBinding, signal);
+      if (binding.generation !== initialBinding.generation) {
+        const resume = await service.waitForAgentControl(
+          initialBinding.screenLeaseId,
+          initialBinding.ownerId,
+          initialBinding.generation,
+          signal,
+        );
+        if (resume.resumedAfterTakeover) return { output: resumedAfterHumanTakeover(resume) };
+      }
       try {
         const result = await service.runBrowserAction(binding.screenLeaseId, binding.ownerId, binding.generation, action, signal);
         return { output: result as unknown as AgentExtensionJsonValue };
       } catch (error) {
-        const resume = await resumeAgentComputerAfterTakeover(service, binding, error, signal);
+        const resume = await resumeAgentComputerAfterTakeover(service, initialBinding, error, signal);
         if (!resume.resumedAfterTakeover) throw error;
         return { output: resumedAfterHumanTakeover(resume) };
       }
@@ -249,7 +295,10 @@ export function createComputerPlugin(options: ComputerPluginOptions = {}): Frida
       id: "computer",
       label: "Shared Agent Computer",
       async snapshot() {
-        await service.refreshAll().catch(() => Object.freeze([]));
+        await service.refreshAll().catch((error: unknown) => {
+          reportOperationalError({ component: "computer", operation: "refresh nodes for Computer status", error, severity: "warn" });
+          return Object.freeze([]);
+        });
         return service.status();
       },
     });
@@ -261,7 +310,10 @@ export function createComputerPlugin(options: ComputerPluginOptions = {}): Frida
       parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
       permission: () => ({ id: "computer.status", effect: "private-read", resource: "computer", network: true }),
       async execute() {
-        await service.refreshAll().catch(() => Object.freeze([]));
+        await service.refreshAll().catch((error: unknown) => {
+          reportOperationalError({ component: "computer", operation: "refresh nodes for Computer status", error, severity: "warn" });
+          return Object.freeze([]);
+        });
         return { ...service.status(), leases: service.leaseStatus() };
       },
     });

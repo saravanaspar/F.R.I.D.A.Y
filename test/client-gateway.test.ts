@@ -276,9 +276,14 @@ describe("Phase 1 client gateway", () => {
         allowedTargetIds: ["sandbox"],
         requireWorktreeForWrites: true,
         worktreeRoot,
+        computerAdmission: { requireBrowser: true, memoryMb: 1024, browserRenderers: 2, gpu: true },
       },
     });
-    expect(created.project).toMatchObject({ id: "atlas", rootPath: repository });
+    expect(created.project).toMatchObject({
+      id: "atlas",
+      rootPath: repository,
+      policy: { computerAdmission: { requireBrowser: true, memoryMb: 1024, browserRenderers: 2, gpu: true } },
+    });
 
     const plan = await post("/v1/projects/resolve-target", { projectId: "atlas", operation: "edit", access: "write" });
     expect(plan.plan).toMatchObject({ projectId: "atlas", requiresWorktree: true, target: { kind: "sandbox" } });
@@ -363,6 +368,7 @@ describe("Phase 1 client gateway", () => {
         return {
           observedAt: new Date().toISOString(),
           screenId,
+          safety: { protectedInputOmitted: true, keystrokesOmitted: true, captchaOmitted: true, sensitiveScreenshotOmitted: true },
           url: "https://example.com/account",
           domSummary: "account page; protected fields omitted",
           accessibilitySummary: "main document",

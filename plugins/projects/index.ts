@@ -28,6 +28,7 @@ import { WORKTREES_CAPABILITY, type WorktreesService } from "../worktrees/contra
 import {
   PROJECTS_CAPABILITY,
   type Project,
+  type ProjectComputerAdmission,
   type ProjectCreateInput,
   type ProjectPolicy,
   type ProjectRepositoryMetadata,
@@ -97,6 +98,30 @@ function booleanValue(value: unknown, label: string): boolean {
   return value;
 }
 
+function nonNegativeNumber(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error(`${label} must be a non-negative number`);
+  return value;
+}
+
+function nonNegativeInteger(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(`${label} must be a non-negative integer`);
+  return value as number;
+}
+
+function computerAdmission(value: unknown): ProjectComputerAdmission | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("policy.computerAdmission must be an object");
+  const raw = value as Record<string, unknown>;
+  if (raw.requireBrowser !== undefined && typeof raw.requireBrowser !== "boolean") throw new Error("policy.computerAdmission.requireBrowser must be a boolean");
+  if (raw.gpu !== undefined && typeof raw.gpu !== "boolean") throw new Error("policy.computerAdmission.gpu must be a boolean");
+  return Object.freeze({
+    ...(raw.requireBrowser === undefined ? {} : { requireBrowser: raw.requireBrowser }),
+    ...(raw.memoryMb === undefined ? {} : { memoryMb: nonNegativeNumber(raw.memoryMb, "policy.computerAdmission.memoryMb") }),
+    ...(raw.browserRenderers === undefined ? {} : { browserRenderers: nonNegativeInteger(raw.browserRenderers, "policy.computerAdmission.browserRenderers") }),
+    ...(raw.gpu === undefined ? {} : { gpu: raw.gpu }),
+  });
+}
+
 function repository(value: unknown): ProjectRepositoryMetadata | undefined {
   if (value === undefined || value === null) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("repository must be an object");
@@ -132,9 +157,11 @@ function policy(value: unknown): ProjectPolicy {
     ...(raw.requireWorktreeForWrites === undefined ? {} : { requireWorktreeForWrites: booleanValue(raw.requireWorktreeForWrites, "policy.requireWorktreeForWrites") }),
     ...(raw.allowCoreHostWrites === undefined ? {} : { allowCoreHostWrites: booleanValue(raw.allowCoreHostWrites, "policy.allowCoreHostWrites") }),
   });
+  const normalizedComputerAdmission = computerAdmission(raw.computerAdmission);
   return Object.freeze({
     ...normalized,
     ...(raw.worktreeRoot === undefined ? {} : { worktreeRoot: absolutePath(raw.worktreeRoot, "policy.worktreeRoot") }),
+    ...(normalizedComputerAdmission === undefined ? {} : { computerAdmission: normalizedComputerAdmission }),
   });
 }
 
@@ -316,7 +343,13 @@ export async function createProjectsService(options: ProjectsServiceOptions): Pr
         preferredComputerNodeId: input.preferredComputerNodeId === null ? undefined : (input.preferredComputerNodeId ?? current.preferredComputerNodeId),
         repository: input.repository === null ? undefined : (input.repository ?? current.repository),
         validation: input.validation === null ? undefined : (input.validation ?? current.validation),
-        policy: input.policy === undefined ? current.policy : { ...current.policy, ...input.policy },
+        policy: input.policy === undefined ? current.policy : {
+          ...current.policy,
+          ...input.policy,
+          ...(input.policy.computerAdmission === undefined ? {} : {
+            computerAdmission: { ...current.policy.computerAdmission, ...input.policy.computerAdmission },
+          }),
+        },
       };
       const updated = await normalizeInput(merged, current);
       if (projects.some((project) => project.id !== current.id && project.rootPath === updated.rootPath)) throw new Error("project rootPath is already registered");
@@ -671,6 +704,10 @@ const projectsPlugin: FridayPlugin = definePlugin({
         rootPath: { type: "string" },
         repositoryKind: { type: "string", enum: ["git"] },
         defaultTargetId: { type: "string" },
+        computerRequireBrowser: { type: "boolean" },
+        computerMemoryMb: { type: "number", minimum: 0 },
+        computerBrowserRenderers: { type: "integer", minimum: 0 },
+        computerGpu: { type: "boolean" },
         testCommand: { type: "string" },
         buildCommand: { type: "string" },
       },
@@ -690,7 +727,26 @@ const projectsPlugin: FridayPlugin = definePlugin({
           ...(typeof input.buildCommand === "string" ? { build: input.buildCommand } : {}),
         },
       } : {}),
-      ...(typeof input.defaultTargetId === "string" ? { policy: { defaultTargetId: input.defaultTargetId, allowedTargetIds: [input.defaultTargetId] } } : {}),
+      ...((typeof input.defaultTargetId === "string"
+        || typeof input.computerRequireBrowser === "boolean"
+        || typeof input.computerMemoryMb === "number"
+        || typeof input.computerBrowserRenderers === "number"
+        || typeof input.computerGpu === "boolean") ? {
+        policy: {
+          ...(typeof input.defaultTargetId === "string" ? { defaultTargetId: input.defaultTargetId, allowedTargetIds: [input.defaultTargetId] } : {}),
+          ...((typeof input.computerRequireBrowser === "boolean"
+            || typeof input.computerMemoryMb === "number"
+            || typeof input.computerBrowserRenderers === "number"
+            || typeof input.computerGpu === "boolean") ? {
+            computerAdmission: {
+              ...(typeof input.computerRequireBrowser === "boolean" ? { requireBrowser: input.computerRequireBrowser } : {}),
+              ...(typeof input.computerMemoryMb === "number" ? { memoryMb: input.computerMemoryMb } : {}),
+              ...(typeof input.computerBrowserRenderers === "number" ? { browserRenderers: input.computerBrowserRenderers } : {}),
+              ...(typeof input.computerGpu === "boolean" ? { gpu: input.computerGpu } : {}),
+            },
+          } : {}),
+        },
+      } : {}),
     }) as unknown as SystemJsonValue,
   });
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {

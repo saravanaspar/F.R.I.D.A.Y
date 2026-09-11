@@ -16,7 +16,7 @@ import { MEMORY_CAPABILITY } from "../plugins/memory/contract.js";
 import type { ObservabilityService } from "../plugins/observability/contract.js";
 import * as modelRuntime from "@friday/model";
 import { computerNodeExecutionTarget } from "@friday/execution-targets";
-import { MODEL_CAPABILITY, type ModelService } from "../plugins/model/contract.js";
+import { MODEL_CAPABILITY } from "../plugins/model/contract.js";
 import { principalScope, principalStateRoot } from "../plugins/principal-scope.js";
 import promptsPlugin from "../plugins/prompts/index.js";
 import { PROMPTS_CAPABILITY } from "../plugins/prompts/contract.js";
@@ -29,6 +29,7 @@ import type { ProjectsService } from "../plugins/projects/contract.js";
 import type { RoutingDecision } from "../plugins/routing/contract.js";
 import { createAgentTurnExecutor } from "../plugins/turn-loop/agent-executor.js";
 import type { InboundTurn, TurnProgressUpdate } from "../plugins/turn-loop/contract.js";
+import { withTestModel } from "./helpers/faux-model.js";
 
 const roots: string[] = [];
 const previousProvider = process.env.FRIDAY_MODEL_PROVIDER;
@@ -76,20 +77,6 @@ function channelTurn(id: string, text: string, senderId: string): InboundTurn {
       senderId,
     },
   };
-}
-
-function withTestModel(
-  models: ModelService,
-  registration: ReturnType<typeof modelRuntime.registerFauxProvider>,
-): ModelService {
-  const registered = registration.getModel();
-  return Object.freeze({
-    ...models,
-    getModel(provider: string, modelId: string) {
-      if (provider === String(registered.provider) && modelId === String(registered.id)) return registered;
-      return models.getModel(provider as never, modelId as never);
-    },
-  }) as ModelService;
 }
 
 afterEach(() => {
@@ -775,7 +762,7 @@ describe("Turn Loop agent executor", () => {
     } as unknown as ToolsService;
     const projects = {
       get(id: string) {
-        return id === "atlas" ? { id: "atlas", rootPath: projectRoot } : undefined;
+        return id === "atlas" ? { id: "atlas", rootPath: projectRoot, policy: {} } : undefined;
       },
       async acquireAgentWorkspace(input: { projectId: string; ownerId: string; targetId?: string }) {
         acquireCalls.push(input);
@@ -836,8 +823,16 @@ describe("Turn Loop agent executor", () => {
     const bindings: ComputerExecutionBinding[] = [];
     const progressUpdates: TurnProgressUpdate[] = [];
     const toolCalls: Array<{ cwd: string; targetId?: string; computer?: ComputerExecutionBinding }> = [];
-    const screenRequests: Array<{ ownerId: string; preferredNodeId?: string; preferredScreenId?: string }> = [];
+    const managedRuns: Array<{ sessionId: string; runId: string; ownerKind: "main-agent" | "subagent" }> = [];
+    const screenRequests: Array<{
+      ownerId: string; preferredNodeId?: string; preferredScreenId?: string; requireBrowser?: boolean;
+      demand?: { memoryMb?: number; browserRenderers?: number; gpu?: boolean };
+    }> = [];
     const releases: Array<{ screenLeaseId: string; ownerId: string }> = [];
+    const processCleanups: Array<{ screenLeaseId: string; ownerId: string; runId: string }> = [];
+    let cleanupFailure: Error | undefined;
+    let renewals = 0;
+    const renewalTtls: number[] = [];
     const target = computerNodeExecutionTarget("desk-1");
     const tools = {
       createTool() { throw new Error("not used"); },
@@ -850,8 +845,24 @@ describe("Turn Loop agent executor", () => {
         if (options?.computer) bindings.push(options.computer);
         return {};
       },
+      async withManagedProcessRun(
+        owner: { sessionId: string; runId: string; ownerKind: "main-agent" | "subagent" },
+        operation: () => Promise<unknown>,
+      ) {
+        managedRuns.push({ ...owner });
+        return await operation();
+      },
     } as unknown as ToolsService;
     const projects = {
+      get(projectId: string) {
+        if (projectId !== "atlas") return undefined;
+        return {
+          id: "atlas",
+          policy: {
+            computerAdmission: { requireBrowser: true, memoryMb: 512, browserRenderers: 2, gpu: true },
+          },
+        } as never;
+      },
       async acquireAgentWorkspace() {
         return { projectId: "atlas", projectRoot, workspacePath: workspace, target, isolated: false };
       },
@@ -859,15 +870,16 @@ describe("Turn Loop agent executor", () => {
     const computer = {
       node(nodeId: string) { return nodeId === "desk-1" ? ({ id: "desk-1" } as never) : undefined; },
       async waitForScreen(
-        request: { ownerId: string; preferredNodeId?: string; preferredScreenId?: string },
+        request: { ownerId: string; preferredNodeId?: string; preferredScreenId?: string; requireBrowser?: boolean; demand?: { memoryMb?: number; browserRenderers?: number; gpu?: boolean } },
         _signal?: AbortSignal,
         onWaiting?: (state: { readonly state: "waiting"; readonly code: "WAITING_FOR_COMPUTER"; readonly ownerId: string; readonly reasons: readonly string[] }) => void | Promise<void>,
       ) {
         screenRequests.push(request);
         await onWaiting?.({ state: "waiting", code: "WAITING_FOR_COMPUTER", ownerId: request.ownerId, reasons: ["cpu-pressure"] });
+        const acquiredAt = Date.now();
         return {
           state: "acquired" as const,
-          screenLease: { id: "screen-lease-1", nodeId: "desk-1", screenId: "agent-screen-1", ownerId: request.ownerId, acquiredAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() },
+          screenLease: { id: "screen-lease-1", nodeId: "desk-1", screenId: "agent-screen-1", ownerId: request.ownerId, acquiredAt: new Date(acquiredAt).toISOString(), expiresAt: new Date(acquiredAt + 90).toISOString() },
           controlLease: {
             id: "control-1", screenLeaseId: "screen-lease-1", nodeId: "desk-1", screenId: "agent-screen-1", holder: "agent" as const, holderId: request.ownerId, agentOwnerId: request.ownerId, generation: 4, acquiredAt: new Date().toISOString(), lastActivityAt: new Date().toISOString(), handBackAfterMs: null,
             transcriptPolicy: { captureKeystrokes: false as const, captureSecrets: false as const, captureSensitiveScreenshots: false as const },
@@ -875,6 +887,17 @@ describe("Turn Loop agent executor", () => {
         };
       },
       controlLease() { return { holder: "agent" } as never; },
+      async renewScreenLease(screenLeaseId: string, ownerId: string, ttlMs?: number) {
+        renewals += 1;
+        renewalTtls.push(ttlMs ?? -1);
+        const renewedAt = Date.now();
+        return { id: screenLeaseId, nodeId: "desk-1", screenId: "agent-screen-1", ownerId, acquiredAt: new Date(renewedAt).toISOString(), expiresAt: new Date(renewedAt + 90).toISOString() };
+      },
+      async cleanupRunProcesses(binding: ComputerExecutionBinding) {
+        processCleanups.push({ screenLeaseId: binding.screenLeaseId, ownerId: binding.ownerId, runId: binding.runId });
+        if (cleanupFailure) throw cleanupFailure;
+        return true;
+      },
       async releaseScreen(screenLeaseId: string, ownerId: string) { releases.push({ screenLeaseId, ownerId }); return true; },
     } as unknown as ComputerService;
     const executor = createAgentTurnExecutor({
@@ -888,7 +911,10 @@ describe("Turn Loop agent executor", () => {
     }, { stateDir });
 
     try {
-      faux.setResponses([modelRuntime.fauxAssistantMessage("computer project complete")]);
+      faux.setResponses([async () => {
+        await new Promise((resolve) => setTimeout(resolve, 110));
+        return modelRuntime.fauxAssistantMessage("computer project complete");
+      }]);
       const projectTurn: InboundTurn = { ...turn("computer-project", "work on the computer project"), projectId: "atlas", projectTargetId: "computer:desk-1" };
       const result = await executor.execute({
         turn: projectTurn,
@@ -897,7 +923,12 @@ describe("Turn Loop agent executor", () => {
         progress: async (update) => { progressUpdates.push(update); },
       });
       expect(result.text).toBe("computer project complete");
-      expect(screenRequests).toEqual([{ ownerId: "job-computer", preferredNodeId: "desk-1" }]);
+      expect(screenRequests).toEqual([{
+        ownerId: "job-computer",
+        preferredNodeId: "desk-1",
+        requireBrowser: true,
+        demand: { memoryMb: 512, browserRenderers: 2, gpu: true },
+      }]);
       expect(progressUpdates).toContainEqual(expect.objectContaining({
         jobStatus: "waiting-for-computer",
         computerWait: { code: "WAITING_FOR_COMPUTER", nodeId: "desk-1", reasons: ["cpu-pressure"] },
@@ -914,18 +945,42 @@ describe("Turn Loop agent executor", () => {
           screenId: "agent-screen-1",
           screenLeaseId: "screen-lease-1",
           ownerId: "job-computer",
+          runId: expect.stringMatching(/^run-/),
+          admission: { requireBrowser: true, demand: { memoryMb: 512, browserRenderers: 2, gpu: true } },
           generation: 4,
         }),
       });
-      expect(bindings).toContainEqual({
+      expect(bindings).toContainEqual(expect.objectContaining({
         nodeId: "desk-1",
         screenId: "agent-screen-1",
         screenLeaseId: "screen-lease-1",
         ownerId: "job-computer",
         ownerKind: "main-agent",
+        runId: expect.stringMatching(/^run-/),
+        admission: { requireBrowser: true, demand: { memoryMb: 512, browserRenderers: 2, gpu: true } },
         generation: 4,
-      });
+      }));
+      expect(renewals).toBeGreaterThan(0);
+      expect(renewalTtls.every((ttl) => ttl === 90)).toBe(true);
+      expect(managedRuns).toHaveLength(1);
+      expect(managedRuns[0]?.runId).toBe(bindings.find((binding) => binding.ownerId === "job-computer")?.runId);
+      expect(processCleanups).toEqual([{ screenLeaseId: "screen-lease-1", ownerId: "job-computer", runId: managedRuns[0]!.runId }]);
       expect(releases).toEqual([{ screenLeaseId: "screen-lease-1", ownerId: "job-computer" }]);
+
+      cleanupFailure = new Error("remote process cleanup failed");
+      faux.setResponses([modelRuntime.fauxAssistantMessage("provider cleanup must still run")]);
+      const cleanupFailureTurn: InboundTurn = { ...turn("computer-project-cleanup-failure", "run another computer job"), projectId: "atlas", projectTargetId: "computer:desk-1" };
+      await expect(executor.execute({
+        turn: cleanupFailureTurn,
+        decision: decision("session:new"),
+        jobId: "job-computer-cleanup-failure",
+      })).rejects.toThrow(/remote process cleanup failed/);
+      expect(processCleanups.at(-1)).toEqual({
+        screenLeaseId: "screen-lease-1",
+        ownerId: "job-computer-cleanup-failure",
+        runId: managedRuns.at(-1)!.runId,
+      });
+      expect(releases.at(-1)).toEqual({ screenLeaseId: "screen-lease-1", ownerId: "job-computer-cleanup-failure" });
     } finally {
       await executor.dispose();
       faux.unregister();

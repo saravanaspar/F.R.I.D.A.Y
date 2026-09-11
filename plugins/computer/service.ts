@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { reportOperationalError } from "@friday/operational-errors";
+import { redactSensitiveText, reportOperationalError } from "@friday/operational-errors";
 import {
   type ComputerAdmissionPolicy,
   type ComputerAdmissionReason,
@@ -52,6 +52,7 @@ const MAX_BROWSER_TABS = 512;
 const MAX_TOOL_CONTENT_ITEMS = 64;
 const MAX_TOOL_TEXT_CHARS = 8 * 1024 * 1024;
 const MAX_TOOL_IMAGE_CHARS = 16 * 1024 * 1024;
+const MAX_COMPUTER_PROCESS_LIFETIME_SECONDS = 3_600;
 const TRANSCRIPT_POLICY = Object.freeze({
   captureKeystrokes: false as const,
   captureSecrets: false as const,
@@ -299,11 +300,25 @@ function normalizeResources(input: ComputerResourceSnapshot): ComputerResourceSn
   });
 }
 
+const OBSERVATION_SECRET_ASSIGNMENT = /\b(otp|one[- ]time(?: password| code)?|verification(?: code)?|password|passwd|passcode|pin|captcha)\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;&#<>]+)/gi;
+const OBSERVATION_SENSITIVE_CONTEXT = /\b(password|passwd|passcode|otp|one[- ]time|verification code|pin|captcha)\b/i;
+const OBSERVATION_VALUE_ATTRIBUTE = /\bvalue\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi;
+
+function observationText(value: unknown, label: string, maximum: number): string {
+  const normalized = boundedText(value, label, maximum);
+  let safe = redactSensitiveText(normalized, maximum, "");
+  safe = safe.replace(OBSERVATION_SECRET_ASSIGNMENT, (_match, name: string) => `${name}=[REDACTED]`);
+  if (OBSERVATION_SENSITIVE_CONTEXT.test(safe)) {
+    safe = safe.replace(OBSERVATION_VALUE_ATTRIBUTE, 'value="[REDACTED]"');
+  }
+  return safe;
+}
+
 function normalizeTab(input: ComputerBrowserTabSnapshot): ComputerBrowserTabSnapshot {
   return Object.freeze({
     id: id(input.id, "browser tab id"),
-    title: boundedText(input.title, "browser tab title", 1_024),
-    url: boundedText(input.url, "browser tab url", 4_096),
+    title: observationText(input.title, "browser tab title", 1_024),
+    url: observationText(input.url, "browser tab url", 4_096),
     active: Boolean(input.active),
   });
 }
@@ -420,20 +435,25 @@ function cloneControlLease(lease: MutableControlLease): ControlLease {
 function normalizeObservation(input: ComputerObservation, expectedScreenId: string): ComputerObservation {
   const screenId = id(input.screenId, "observation screen id");
   if (screenId !== expectedScreenId) throw new Error(`Computer observation returned the wrong screen: ${screenId}`);
+  const safety = input.safety as ComputerObservation["safety"] | undefined;
+  if (safety?.protectedInputOmitted !== true || safety.keystrokesOmitted !== true || safety.captchaOmitted !== true || safety.sensitiveScreenshotOmitted !== true) {
+    throw new Error("Computer provider observation is missing the required secret/keystroke/CAPTCHA/screenshot safety attestation");
+  }
   const observedAt = text(input.observedAt, "observation timestamp", 64);
   if (!Number.isFinite(Date.parse(observedAt))) throw new Error("observation timestamp is invalid");
   if (input.tabs.length > MAX_BROWSER_TABS) throw new Error("Computer observation exceeds tab limit");
   if (input.processes.length > 512) throw new Error("Computer observation exceeds process limit");
   const processes: readonly ComputerProcessObservation[] = Object.freeze(input.processes.map((process) => Object.freeze({
     pid: nonNegativeInteger(process.pid, "observation process pid"),
-    name: text(process.name, "observation process name", 256),
+    name: observationText(process.name, "observation process name", 256),
   })));
   return Object.freeze({
     observedAt,
     screenId,
-    ...(input.url === undefined ? {} : { url: boundedText(input.url, "observation url", 4_096) }),
-    ...(input.domSummary === undefined ? {} : { domSummary: boundedText(input.domSummary, "observation DOM summary", 32_000) }),
-    ...(input.accessibilitySummary === undefined ? {} : { accessibilitySummary: boundedText(input.accessibilitySummary, "observation accessibility summary", 32_000) }),
+    safety: Object.freeze({ protectedInputOmitted: true as const, keystrokesOmitted: true as const, captchaOmitted: true as const, sensitiveScreenshotOmitted: true as const }),
+    ...(input.url === undefined ? {} : { url: observationText(input.url, "observation url", 4_096) }),
+    ...(input.domSummary === undefined ? {} : { domSummary: observationText(input.domSummary, "observation DOM summary", 32_000) }),
+    ...(input.accessibilitySummary === undefined ? {} : { accessibilitySummary: observationText(input.accessibilitySummary, "observation accessibility summary", 32_000) }),
     tabs: Object.freeze(input.tabs.map(normalizeTab)),
     ...(input.screenshotArtifactRef === undefined ? {} : { screenshotArtifactRef: id(input.screenshotArtifactRef, "observation screenshot artifact ref", 256) }),
     processes,
@@ -453,10 +473,18 @@ function normalizeToolRequest(input: ComputerToolExecutionRequest): ComputerTool
   if (!input.input || typeof input.input !== "object" || Array.isArray(input.input)) {
     throw new Error("Computer tool input must be an object");
   }
+  const normalizedInput: Record<string, unknown> = { ...input.input };
+  if (tool === "process" && normalizedInput.action === "start") {
+    const requestedLifetime = normalizedInput.maxLifetimeSeconds;
+    if (requestedLifetime === undefined) normalizedInput.maxLifetimeSeconds = MAX_COMPUTER_PROCESS_LIFETIME_SECONDS;
+    else if (!Number.isSafeInteger(requestedLifetime) || (requestedLifetime as number) < 1 || (requestedLifetime as number) > MAX_COMPUTER_PROCESS_LIFETIME_SECONDS) {
+      throw new Error(`Computer process maxLifetimeSeconds must be an integer between 1 and ${MAX_COMPUTER_PROCESS_LIFETIME_SECONDS}`);
+    }
+  }
   return Object.freeze({
     workspace: text(input.workspace, "Computer execution workspace", 4_096),
     tool,
-    input: Object.freeze({ ...input.input }),
+    input: Object.freeze(normalizedInput),
   });
 }
 
@@ -494,6 +522,7 @@ function normalizeExecutionBinding(input: ComputerExecutionBinding): ComputerExe
     screenLeaseId: id(input.screenLeaseId, "Computer execution screen lease id"),
     ownerId: id(input.ownerId, "Computer execution owner id", 160),
     ownerKind,
+    runId: id(input.runId, "Computer execution run id", 160),
     generation: input.generation,
   });
 }
@@ -675,11 +704,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
       void service.sweepIdleTakeovers().catch((error: unknown) => {
         reportOperationalError({ component: "computer", operation: "sweep idle Computer takeovers", error, severity: "warn" });
       });
-      if (waiters.size > 0) {
-        void drainWaiters().catch((error: unknown) => {
-          reportOperationalError({ component: "computer", operation: "retry waiting Computer admission", error, severity: "warn" });
-        });
-      }
+      if (waiters.size > 0) scheduleDrainWaiters("retry waiting Computer admission");
     }, intervalMs);
     timer.unref?.();
   };
@@ -713,7 +738,11 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
     }
   };
 
-  const requestReasonsForNode = (state: NodeState, request: ComputerScreenRequest): readonly ComputerAdmissionReason[] => {
+  const requestReasonsForNode = (
+    state: NodeState,
+    request: ComputerScreenRequest,
+    ownedScreenId?: string,
+  ): readonly ComputerAdmissionReason[] => {
     const reasons: ComputerAdmissionReason[] = [];
     const node = state.node;
     if (node.availability !== "online") reasons.push("node-unavailable");
@@ -725,10 +754,12 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
     if (node.resources.availableMemoryMb - demandMemory < node.admission.minAvailableMemoryMb) reasons.push("memory-pressure");
     if (node.resources.cpuPercent > node.admission.maxCpuPercent) reasons.push("cpu-pressure");
     if (node.resources.browserRendererCount + demandRenderers > node.admission.maxBrowserRenderers) reasons.push("browser-renderer-pressure");
-    if (request.demand?.gpu === true && node.resources.gpuPercent !== undefined && node.resources.gpuPercent > node.admission.maxGpuPercent) reasons.push("gpu-pressure");
+    if (request.demand?.gpu === true
+      && (node.resources.gpuPercent === undefined || node.resources.gpuPercent > node.admission.maxGpuPercent)) reasons.push("gpu-pressure");
     if (node.resources.screenWorkloadPercent > node.admission.maxScreenWorkloadPercent) reasons.push("screen-pressure");
     const occupied = activeScreenIds(node.id);
-    const candidateScreens = node.screens.filter((screen) => screen.kind === "agent" && !occupied.has(screen.id));
+    const candidateScreens = node.screens.filter((screen) =>
+      screen.kind === "agent" && (!occupied.has(screen.id) || screen.id === ownedScreenId));
     if (request.preferredScreenId !== undefined) {
       const preferredScreenId = id(request.preferredScreenId, "preferred screen id");
       if (!candidateScreens.some((screen) => screen.id === preferredScreenId)) reasons.push("screen-unavailable");
@@ -738,7 +769,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
     return Object.freeze([...new Set(reasons)]);
   };
 
-  const grantFromExisting = (request: ComputerScreenRequest): ComputerScreenGrant | undefined => {
+  const grantFromExisting = (request: ComputerScreenRequest): ComputerScreenRequestResult | undefined => {
     const existingId = ownerLeaseIds.get(request.ownerId);
     if (!existingId) return undefined;
     const screenLease = screenLeases.get(existingId);
@@ -749,6 +780,12 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
     }
     if (request.preferredScreenId !== undefined && id(request.preferredScreenId, "preferred screen id") !== screenLease.screenId) {
       throw new Error(`Computer owner ${request.ownerId} already holds screen ${screenLease.screenId}`);
+    }
+    const state = nodes.get(screenLease.nodeId);
+    if (!state) throw new Error(`Computer node not found: ${screenLease.nodeId}`);
+    const reasons = requestReasonsForNode(state, request, screenLease.screenId);
+    if (reasons.length > 0) {
+      return Object.freeze({ state: "waiting", code: "WAITING_FOR_COMPUTER", ownerId: request.ownerId, reasons });
     }
     return Object.freeze({ state: "acquired", screenLease: cloneScreenLease(screenLease), controlLease: cloneControlLease(controlLease) });
   };
@@ -835,7 +872,10 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
     if (waiterDrain) return waiterDrain;
     waiterDrain = (async () => {
       if (closed || waiters.size === 0) return;
-      await service.refreshAll().catch(() => Object.freeze([]));
+      await service.refreshAll().catch((error: unknown) => {
+        reportOperationalError({ component: "computer", operation: "refresh nodes while retrying Computer admission", error, severity: "warn" });
+        return Object.freeze([]);
+      });
       for (const waiter of [...waiters.values()]) {
         if (waiter.signal?.aborted) {
           removeWaiter(waiter);
@@ -850,6 +890,12 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
       }
     })().finally(() => { waiterDrain = undefined; });
     return waiterDrain;
+  };
+
+  const scheduleDrainWaiters = (operation: string): void => {
+    void drainWaiters().catch((error: unknown) => {
+      reportOperationalError({ component: "computer", operation, error, severity: "warn" });
+    });
   };
 
   const releaseInternal = (screenLeaseId: string, reason: "released" | "expired" | "node-unregistered"): boolean => {
@@ -932,7 +978,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
           ...(snapshot.browser?.persistentProfile === true ? { browserProfileId: snapshot.browser.profileId } : {}),
         });
         publish("computer.node.registered", `computer:${node.id}`, { nodeId: node.id, platform: node.platform });
-        void drainWaiters();
+        scheduleDrainWaiters("refresh waiting Computer admission");
         return cloneNode(node);
       });
     },
@@ -954,7 +1000,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         return true;
       });
       if (removed) await adapter?.close?.();
-      void drainWaiters();
+      scheduleDrainWaiters("refresh waiting Computer admission");
       return removed;
     },
 
@@ -962,7 +1008,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
       assertOpen();
       const state = requireNodeState(nodeIdInput);
       const refreshed = await refreshState(state, signal);
-      void drainWaiters();
+      scheduleDrainWaiters("refresh waiting Computer admission");
       return refreshed;
     },
 
@@ -1057,7 +1103,10 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
     async requestScreen(request) {
       assertOpen();
       await service.expireLeases();
-      await service.refreshAll().catch(() => Object.freeze([]));
+      await service.refreshAll().catch((error: unknown) => {
+        reportOperationalError({ component: "computer", operation: "refresh nodes before Computer admission", error, severity: "warn" });
+        return Object.freeze([]);
+      });
       return serialize(() => tryAcquire(request));
     },
 
@@ -1088,7 +1137,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         signal?.addEventListener("abort", abortListener!, { once: true });
         publish("computer.admission.waiting", `computer-wait:${waiterId}`, { ownerId: request.ownerId, code: "WAITING_FOR_COMPUTER" });
         ensureTimer();
-        void drainWaiters();
+        scheduleDrainWaiters("refresh waiting Computer admission");
       });
     },
 
@@ -1113,7 +1162,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         if (lease.ownerId !== ownerId) throw new Error("Computer screen lease owner mismatch");
         return releaseInternal(lease.id, "released");
       });
-      if (released) void drainWaiters();
+      if (released) scheduleDrainWaiters("refresh waiting Computer admission");
       return released;
     },
 
@@ -1126,7 +1175,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         }
         return count;
       });
-      if (expired > 0) void drainWaiters();
+      if (expired > 0) scheduleDrainWaiters("refresh waiting Computer admission");
       return expired;
     },
 
@@ -1326,6 +1375,9 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
           throw new Error(`Computer node ${state.node.id} does not support ${operation} execution`);
         }
         if (!state.adapter.runTool) throw new Error(`Computer node ${state.node.id} does not provide tool execution`);
+        if (request.tool === "process" && request.input.action === "start" && !state.adapter.cleanupRunProcesses) {
+          throw new Error(`Computer node ${state.node.id} cannot start background processes without run-scoped cleanup support`);
+        }
         const action = beginScreenAction(screenLease.id, signal);
         return Object.freeze({
           screenLeaseId: screenLease.id,
@@ -1346,6 +1398,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
           screenLeaseId: prepared.screenLeaseId,
           ownerId: binding.ownerId,
           ownerKind: binding.ownerKind,
+          runId: binding.runId,
           controlGeneration: binding.generation,
           signal: prepared.controller.signal,
         });
@@ -1363,6 +1416,40 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
       } finally {
         finishScreenAction(prepared.screenLeaseId, prepared.controller, prepared.unlink);
       }
+    },
+
+    async cleanupRunProcesses(rawBinding, signal) {
+      signal?.throwIfAborted();
+      const binding = normalizeExecutionBinding(rawBinding);
+      const prepared = await serialize(() => {
+        const screenLease = screenLeases.get(binding.screenLeaseId);
+        if (screenLease && (screenLease.ownerId !== binding.ownerId || screenLease.nodeId !== binding.nodeId || screenLease.screenId !== binding.screenId)) {
+          throw new Error("Computer process cleanup binding does not match the active screen lease");
+        }
+        const state = requireNodeState(binding.nodeId);
+        return Object.freeze({
+          screenLeaseId: binding.screenLeaseId,
+          screenId: binding.screenId,
+          nodeId: binding.nodeId,
+          adapter: state.adapter,
+        });
+      });
+      if (!prepared.adapter.cleanupRunProcesses) return false;
+      await prepared.adapter.cleanupRunProcesses({
+        screenId: prepared.screenId,
+        screenLeaseId: prepared.screenLeaseId,
+        ownerId: binding.ownerId,
+        ownerKind: binding.ownerKind,
+        runId: binding.runId,
+        ...(signal === undefined ? {} : { signal }),
+      });
+      publish("computer.processes.cleaned", `computer:${prepared.nodeId}:screen:${prepared.screenId}`, {
+        nodeId: prepared.nodeId,
+        screenId: prepared.screenId,
+        screenLeaseId: prepared.screenLeaseId,
+        ownerId: binding.ownerId,
+      });
+      return true;
     },
 
     async observeScreen(screenLeaseIdInput, ownerIdInput, generation, signal) {
@@ -1483,7 +1570,10 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
     },
 
     async doctor() {
-      if (!closed) await service.refreshAll().catch(() => Object.freeze([]));
+      if (!closed) await service.refreshAll().catch((error: unknown) => {
+        reportOperationalError({ component: "computer", operation: "refresh nodes for Computer doctor", error, severity: "warn" });
+        return Object.freeze([]);
+      });
       const reports: ComputerDoctorNodeReport[] = service.nodes().map((node) => {
         const issues: string[] = [];
         if (node.availability !== "online") issues.push(`node is ${node.availability}`);

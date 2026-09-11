@@ -140,6 +140,8 @@ export interface AgentToolExecutionContext {
   readonly projectExecutionTarget?: ExecutionTarget | undefined;
   /** Present when this Agent run owns a leased Computer screen for a computer-node target. */
   readonly computerExecution?: ComputerExecutionBinding | undefined;
+  /** Host-owned public progress channel reused by tools that can enter durable resource waits. */
+  readonly reportProgress?: ((update: TurnProgressUpdate) => Promise<void>) | undefined;
   deferAfterReply(callback: () => void | Promise<void>, durable?: TurnFinalizerDescriptor): void;
   deferOnFailure(callback: (error: unknown) => void | Promise<void>): void;
 }

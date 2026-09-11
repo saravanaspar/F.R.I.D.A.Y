@@ -113,9 +113,22 @@ export interface ComputerProcessObservation {
   readonly name: string;
 }
 
+export interface ComputerObservationSafety {
+  /** Provider attests that password, OTP, token, cookie, and other protected input values were omitted. */
+  readonly protectedInputOmitted: true;
+  /** Provider attests that raw human keystrokes/input history were omitted. */
+  readonly keystrokesOmitted: true;
+  /** Provider attests that CAPTCHA/challenge content was omitted from model-visible observation text. */
+  readonly captchaOmitted: true;
+  /** Provider attests that any screenshot artifact reference is safe for model-visible consumption. */
+  readonly sensitiveScreenshotOmitted: true;
+}
+
 export interface ComputerObservation {
   readonly observedAt: string;
   readonly screenId: string;
+  /** Required provider-side safety attestation; the core also applies bounded credential redaction defensively. */
+  readonly safety: ComputerObservationSafety;
   /** Current browser URL after provider-side secret redaction. */
   readonly url?: string | undefined;
   /** Bounded provider-side DOM summary. Raw password/OTP values must never appear here. */
@@ -152,12 +165,27 @@ export type ComputerExecutionToolName = "bash" | "edit" | "process" | "ipython";
 export type ComputerExecutionOwnerKind = "main-agent" | "subagent";
 
 /** Stable Agent-run binding used to prove that a Computer tool call owns the leased screen. */
+export interface ComputerResourceDemand {
+  readonly memoryMb?: number | undefined;
+  readonly browserRenderers?: number | undefined;
+  readonly gpu?: boolean | undefined;
+}
+
+export interface ComputerExecutionAdmission {
+  readonly requireBrowser?: boolean | undefined;
+  readonly demand?: ComputerResourceDemand | undefined;
+}
+
 export interface ComputerExecutionBinding {
   readonly nodeId: string;
   readonly screenId: string;
   readonly screenLeaseId: string;
   readonly ownerId: string;
   readonly ownerKind: ComputerExecutionOwnerKind;
+  /** Unique top-level Agent run identity; provider-owned resources must be scoped to this run. */
+  readonly runId: string;
+  /** Server-owned admission requirements retained so later Computer actions can re-check the same resource budget. */
+  readonly admission?: ComputerExecutionAdmission | undefined;
   readonly generation: number;
 }
 
@@ -173,6 +201,7 @@ export interface ComputerNodeToolExecutionRequest extends ComputerToolExecutionR
   readonly screenLeaseId: string;
   readonly ownerId: string;
   readonly ownerKind: ComputerExecutionOwnerKind;
+  readonly runId: string;
   readonly controlGeneration: number;
   readonly signal?: AbortSignal | undefined;
 }
@@ -187,6 +216,15 @@ export interface ComputerToolExecutionResult {
   readonly terminate?: boolean | undefined;
 }
 
+export interface ComputerRunProcessCleanupRequest {
+  readonly screenId: string;
+  readonly screenLeaseId: string;
+  readonly ownerId: string;
+  readonly ownerKind: ComputerExecutionOwnerKind;
+  readonly runId: string;
+  readonly signal?: AbortSignal | undefined;
+}
+
 /** Platform implementation boundary. Phase 5/8 providers implement this contract. */
 export interface ComputerNodeAdapter {
   readonly descriptor: ComputerNodeDescriptor;
@@ -194,6 +232,8 @@ export interface ComputerNodeAdapter {
   observeScreen(screenId: string, controlGeneration: number, signal?: AbortSignal): Promise<ComputerObservation>;
   /** Execute an existing FRIDAY tool on this node without introducing a second tool/executor stack. */
   runTool?(request: ComputerNodeToolExecutionRequest): Promise<ComputerToolExecutionResult>;
+  /** Idempotently terminate provider-owned background processes for one Agent run before that run settles. */
+  cleanupRunProcesses?(request: ComputerRunProcessCleanupRequest): Promise<void>;
   runBrowserAction?(request: ComputerBrowserActionRequest): Promise<ComputerBrowserActionResult>;
   restart?(signal?: AbortSignal): Promise<void>;
   update?(signal?: AbortSignal): Promise<void>;
@@ -254,11 +294,7 @@ export interface ComputerScreenRequest {
   readonly preferredNodeId?: string | undefined;
   readonly preferredScreenId?: string | undefined;
   readonly requireBrowser?: boolean | undefined;
-  readonly demand?: Readonly<{
-    readonly memoryMb?: number | undefined;
-    readonly browserRenderers?: number | undefined;
-    readonly gpu?: boolean | undefined;
-  }> | undefined;
+  readonly demand?: ComputerResourceDemand | undefined;
   readonly leaseTtlMs?: number | undefined;
 }
 
@@ -404,6 +440,8 @@ export interface ComputerService {
     request: ComputerToolExecutionRequest,
     signal?: AbortSignal,
   ): Promise<ComputerToolExecutionResult>;
+  /** Idempotently clean provider-owned background processes scoped to this Computer Agent run. */
+  cleanupRunProcesses(binding: ComputerExecutionBinding, signal?: AbortSignal): Promise<boolean>;
   runBrowserAction(
     screenLeaseId: string,
     ownerId: string,

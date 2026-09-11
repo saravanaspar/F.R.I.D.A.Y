@@ -27,14 +27,18 @@ The existing Tools capability remains the policy/schema authority. For a Compute
 
 Computer shell/process/IPython calls are conservatively classified as network-capable because the provider-neutral contract does not promise per-command network isolation. Remote background process starts retain the existing main-Agent-only rule. Provider tool calls share the same cancellation set as browser actions, so takeover, lease expiry, or release aborts pending execution before control can move elsewhere.
 
+Each `ComputerExecutionBinding` also carries one host-generated Agent `runId`. Provider-owned `process start` requests default to a one-hour maximum lifetime, reject larger lifetimes, and fail closed unless the provider implements run-scoped `cleanupRunProcesses`. Turn Loop invokes that cleanup before a Computer run can settle, and a cleanup failure prevents an otherwise-successful run from being reported as complete. Providers must scope every persistent process operation and cleanup decision to the supplied `runId` rather than only the Session or screen owner. Cleanup remains callable if the screen lease expired or was released first, so loss of the lease cannot strand provider-owned run processes.
+
 ## Resource admission
+
+Projects may declare provider-neutral `policy.computerAdmission` requirements (`requireBrowser`, memory MiB, browser renderer count, and GPU demand). Turn Loop carries those requirements into the initial screen request so browser/resource-heavy Project work enters `WAITING_FOR_COMPUTER` before tool construction instead of acquiring an under-provisioned screen.
 
 Agent screen admission considers:
 
 - available RAM after requested demand,
 - CPU utilization,
 - current plus requested browser renderer count,
-- GPU utilization for GPU-requiring work,
+- GPU availability/utilization for GPU-requiring work (missing GPU telemetry fails closed),
 - provider-observed screen workload, and
 - availability of an unleased Agent screen.
 
@@ -44,9 +48,13 @@ For detached Agent work, `waitForScreen()` reports its first admission failure t
 
 On FRIDAY restart, Session Jobs uses its existing resumable-request mechanism: the interrupted active row is durably returned to `queued`, its last Computer wait context remains available for status/diagnostics, and the resume turn preserves the original Project and `computer:<node-id>` target. When the reconstructed Agent run reaches admission again it either acquires a screen immediately or persists a fresh `waiting-for-computer` state. Computer therefore owns only live resource waiters; Session Jobs owns durable work and restart semantics.
 
+Browser readiness is also rechecked after a screen has already been leased. The leased `ComputerExecutionBinding` retains the server-owned Project resource demand; before a model-facing `computer_browser` action is dispatched, Computer refreshes the selected node and waits for a running persistent Browser Supervisor while reapplying that memory/renderer/GPU demand together with the configured CPU/RAM reserve and screen-workload thresholds. The same Turn Loop progress channel persists this as `waiting-for-computer` and returns the durable job to `running` before a new browser action is issued.
+
 ## ScreenLease and ControlLease
 
 A `ScreenLease` is exclusive to one Agent owner and expires unless renewed. Releasing or expiring it aborts pending Computer actions before the screen can be reused.
+
+Turn Loop keeps an active Computer lease alive with a run-scoped heartbeat at roughly one-third of the original lease lifetime. Renewal continues while a human holds manual-only takeover because the underlying Agent screen is still reserved for the same Session Job. If renewal fails, the Agent run is aborted and cannot silently continue after ownership expires.
 
 Each leased screen also has a `ControlLease`. Agent actions must present the current generation. The generation changes whenever control changes or human activity invalidates pending work. Stale generations fail closed with an instruction to re-observe and replan.
 
@@ -62,6 +70,8 @@ Higher-level orchestration should use API/MCP before Computer browser automation
 4. visual control
 
 The provider returns which mode was used and a fresh bounded observation. Browser action contents are not written to Computer Events. Explicitly sensitive typing is rejected by the generic action path and must use human takeover or a dedicated protected-credential flow.
+
+Every provider observation must carry a positive model-safety attestation that secrets, keystrokes, CAPTCHA contents, and sensitive screenshots were omitted. Computer validates that attestation at runtime and then applies defense-in-depth redaction to credential/token/OTP/PIN/CAPTCHA-shaped URL, DOM, accessibility, tab, and process text before any Agent or Client surface can consume it. Raw screenshot bytes never cross the Computer capability; providers expose only a safe Artifact reference. Phase 5/8 provider conformance tests must prove this attestation against the real browser/UI primitives they implement.
 
 ## Agent Computer tools
 
@@ -105,7 +115,7 @@ On takeover, the Computer core:
 
 The default idle grace is eight seconds. Configured values must be at least five seconds; `null` means manual-only hand-back. Human activity refreshes the grace period without sending key/text/screenshot content through this API.
 
-Hand-back increments the generation again and requires `observeScreen()` to succeed before Agent control is restored. The fresh observation and resumed control generation are published atomically to paused Agent waiters; if re-observation fails or the user interacts again during hand-back, the Agent remains paused. The Computer API accepts only human activity timing/identity here—never the password, OTP, CAPTCHA solution, or keystroke stream itself. Interrupted browser and execution actions are explicitly not replayed; the Agent receives the fresh observation and must replan before issuing a new action.
+Hand-back increments the generation again and requires `observeScreen()` to succeed before Agent control is restored. The fresh observation and resumed control generation are published atomically to paused Agent waiters; if re-observation fails or the user interacts again during hand-back, the Agent remains paused. The Computer API accepts only human activity timing/identity here—never the password, OTP, CAPTCHA solution, or keystroke stream itself. Interrupted browser and execution actions are explicitly not replayed; a browser action submitted while human control is already active also pauses before provider dispatch, then returns the fresh hand-back observation instead of replaying the stale action. The Agent must replan before issuing a new action.
 
 ## Managed lifecycle
 
@@ -113,6 +123,6 @@ Computer Node `restart`, `update`, and `resetManagedState` operations delegate t
 
 ## Phase 4 completion
 
-The first slice established the provider contract, admission, lease expiry/waiting, browser-action generation checks, takeover/hand-back behavior, status/doctor surfaces, and managed lifecycle guards. The second slice connected Project/Turn Loop execution to Computer targets and routed the existing bash/edit/process/IPython tool surfaces through the leased node while preserving Permissions and stale-generation checks. The third slice made Computer admission a durable Session Job state and reused the existing restart/resume path rather than introducing Computer-owned durable scheduling. The fourth slice added permission-gated Agent observe/browser tools plus authenticated Client Gateway status/observation/takeover APIs over the same Computer authority. The fifth slice completes the provider-neutral Browser Supervisor invariants and the human-takeover continuation path: a login-wall action may be interrupted, the user controls the same leased screen without secret capture, hand-back re-observes current state, and the same Session Job resumes without replaying the interrupted action.
+The first slice established the provider contract, admission, lease expiry/waiting, browser-action generation checks, takeover/hand-back behavior, status/doctor surfaces, and managed lifecycle guards. The second slice connected Project/Turn Loop execution to Computer targets and routed the existing bash/edit/process/IPython tool surfaces through the leased node while preserving Permissions and stale-generation checks. The third slice made Computer admission a durable Session Job state and reused the existing restart/resume path rather than introducing Computer-owned durable scheduling. The fourth slice added permission-gated Agent observe/browser tools plus authenticated Client Gateway status/observation/takeover APIs over the same Computer authority. The fifth slice completes the provider-neutral Browser Supervisor invariants and the human-takeover continuation path: a login-wall action may be interrupted, the user controls the same leased screen without secret capture, hand-back re-observes current state, and the same Session Job resumes without replaying the interrupted action. The final audit-hardening pass adds run-scoped lease renewal, provider process cleanup, browser-level durable readiness waits, mandatory observation safety attestation with core redaction, operational-error handling for asynchronous waiter drains, and a real Agent-executor/Project/Permissions/Computer/Session-Jobs login-wall acceptance path.
 
-Phase 4 provider-neutral implementation is complete and has passed the repository verification gate. Linux/Sway/Chromium and Windows platform providers remain Phase 5/8 work.
+Phase 4 provider-neutral implementation is complete in scope and the audit-hardening repository verification gate has passed. Linux/Sway/Chromium and Windows platform providers remain Phase 5/8 work, including platform conformance tests that prove the observation-safety attestation against real UI/browser primitives.

@@ -85,12 +85,28 @@ function projectPolicy(body: Record<string, unknown>): Partial<ProjectPolicy> | 
   const allowedTargetIds = stringArray(raw.allowedTargetIds, "policy.allowedTargetIds");
   if (raw.requireWorktreeForWrites !== undefined && typeof raw.requireWorktreeForWrites !== "boolean") throw new Error("policy.requireWorktreeForWrites must be a boolean");
   if (raw.allowCoreHostWrites !== undefined && typeof raw.allowCoreHostWrites !== "boolean") throw new Error("policy.allowCoreHostWrites must be a boolean");
+  let computerAdmission: ProjectPolicy["computerAdmission"];
+  if (raw.computerAdmission !== undefined) {
+    if (!raw.computerAdmission || typeof raw.computerAdmission !== "object" || Array.isArray(raw.computerAdmission)) throw new Error("policy.computerAdmission must be an object");
+    const admission = raw.computerAdmission as Record<string, unknown>;
+    if (admission.requireBrowser !== undefined && typeof admission.requireBrowser !== "boolean") throw new Error("policy.computerAdmission.requireBrowser must be a boolean");
+    if (admission.memoryMb !== undefined && (typeof admission.memoryMb !== "number" || !Number.isFinite(admission.memoryMb) || admission.memoryMb < 0)) throw new Error("policy.computerAdmission.memoryMb must be a non-negative number");
+    if (admission.browserRenderers !== undefined && (!Number.isSafeInteger(admission.browserRenderers) || (admission.browserRenderers as number) < 0)) throw new Error("policy.computerAdmission.browserRenderers must be a non-negative integer");
+    if (admission.gpu !== undefined && typeof admission.gpu !== "boolean") throw new Error("policy.computerAdmission.gpu must be a boolean");
+    computerAdmission = {
+      ...(admission.requireBrowser === undefined ? {} : { requireBrowser: admission.requireBrowser as boolean }),
+      ...(admission.memoryMb === undefined ? {} : { memoryMb: admission.memoryMb as number }),
+      ...(admission.browserRenderers === undefined ? {} : { browserRenderers: admission.browserRenderers as number }),
+      ...(admission.gpu === undefined ? {} : { gpu: admission.gpu as boolean }),
+    };
+  }
   return {
     ...(typeof raw.defaultTargetId === "string" ? { defaultTargetId: raw.defaultTargetId } : {}),
     ...(allowedTargetIds === undefined ? {} : { allowedTargetIds }),
     ...(raw.requireWorktreeForWrites === undefined ? {} : { requireWorktreeForWrites: raw.requireWorktreeForWrites }),
     ...(raw.allowCoreHostWrites === undefined ? {} : { allowCoreHostWrites: raw.allowCoreHostWrites }),
     ...(typeof raw.worktreeRoot === "string" ? { worktreeRoot: raw.worktreeRoot } : {}),
+    ...(computerAdmission === undefined ? {} : { computerAdmission }),
   };
 }
 

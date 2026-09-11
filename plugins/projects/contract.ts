@@ -21,9 +21,19 @@ export interface ProjectValidationCommands {
   readonly build?: string | undefined;
 }
 
+export interface ProjectComputerAdmission {
+  /** Eagerly require the shared Browser Supervisor before the Project run starts. */
+  readonly requireBrowser?: boolean | undefined;
+  readonly memoryMb?: number | undefined;
+  readonly browserRenderers?: number | undefined;
+  readonly gpu?: boolean | undefined;
+}
+
 export interface ProjectPolicy extends ExecutionTargetPolicy {
   /** Optional host path for isolated worktrees. Defaults under FRIDAY state. */
   readonly worktreeRoot?: string | undefined;
+  /** Provider-neutral resource demand applied when this Project targets a Computer Node. */
+  readonly computerAdmission?: ProjectComputerAdmission | undefined;
 }
 
 export interface Project {

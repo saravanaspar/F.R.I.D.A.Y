@@ -68,6 +68,7 @@ describe("Phase 3 Projects and Execution Targets", () => {
           requireWorktreeForWrites: true,
           allowCoreHostWrites: false,
           worktreeRoot,
+          computerAdmission: { requireBrowser: true, memoryMb: 768, browserRenderers: 2, gpu: true },
         },
       });
       expect(created.rootPath).toBe(repository);
@@ -77,7 +78,11 @@ describe("Phase 3 Projects and Execution Targets", () => {
 
       const secondHost = await host();
       const second = requireCapability(PROJECTS_CAPABILITY);
-      expect(second.get("atlas")).toMatchObject({ id: "atlas", rootPath: repository });
+      expect(second.get("atlas")).toMatchObject({
+        id: "atlas",
+        rootPath: repository,
+        policy: { computerAdmission: { requireBrowser: true, memoryMb: 768, browserRenderers: 2, gpu: true } },
+      });
       expect(second.list()).toHaveLength(1);
       await secondHost.dispose();
     } finally {
@@ -170,6 +175,12 @@ describe("Phase 3 Projects and Execution Targets", () => {
       const friday = await host();
       const projects = requireCapability(PROJECTS_CAPABILITY);
       await expect(projects.create({ id: "relative", name: "Relative", rootPath: "./relative" })).rejects.toThrow(/absolute path/);
+      await expect(projects.create({
+        id: "bad-computer-demand",
+        name: "Bad Computer demand",
+        rootPath: repository,
+        policy: { computerAdmission: { memoryMb: -1 } },
+      })).rejects.toThrow(/computerAdmission.memoryMb/);
       await expect(projects.create({
         id: "overlap",
         name: "Overlap",
