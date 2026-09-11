@@ -937,11 +937,32 @@ export function createAgentTurnExecutor(
             computerService = dependencies.optional?.computer?.();
             if (!computerService) throw new Error(`Computer capability is unavailable for execution target ${projectWorkspace.target.id}`);
             if (!computerService.node(nodeId)) throw new Error(`Computer node is not registered: ${nodeId}`);
+            let waitedForComputer = false;
             const grant = await computerService.waitForScreen({
               ownerId: computerOwnerId,
               preferredNodeId: nodeId,
               ...(profile?.defaultComputerScreen === undefined ? {} : { preferredScreenId: profile.defaultComputerScreen }),
-            }, signal);
+            }, signal, async (waiting) => {
+              waitedForComputer = true;
+              await progress?.({
+                kind: "status",
+                message: `Waiting for Computer ${nodeId}: ${waiting.reasons.join(", ")}`,
+                jobStatus: "waiting-for-computer",
+                computerWait: {
+                  code: waiting.code,
+                  nodeId,
+                  reasons: waiting.reasons,
+                },
+              });
+            });
+            if (waitedForComputer) {
+              await progress?.({
+                kind: "status",
+                message: `Computer ${grant.screenLease.nodeId} screen ${grant.screenLease.screenId} acquired; resuming work`,
+                jobStatus: "running",
+                notify: false,
+              });
+            }
             computerExecution = Object.freeze({
               nodeId: grant.screenLease.nodeId,
               screenId: grant.screenLease.screenId,

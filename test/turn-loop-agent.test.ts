@@ -28,7 +28,7 @@ import type { ToolsService } from "../plugins/tools/contract.js";
 import type { ProjectsService } from "../plugins/projects/contract.js";
 import type { RoutingDecision } from "../plugins/routing/contract.js";
 import { createAgentTurnExecutor } from "../plugins/turn-loop/agent-executor.js";
-import type { InboundTurn } from "../plugins/turn-loop/contract.js";
+import type { InboundTurn, TurnProgressUpdate } from "../plugins/turn-loop/contract.js";
 
 const roots: string[] = [];
 const previousProvider = process.env.FRIDAY_MODEL_PROVIDER;
@@ -834,6 +834,7 @@ describe("Turn Loop agent executor", () => {
     const workspace = join(stateDir, "computer-worktree");
     const projectRoot = join(stateDir, "computer-project-root");
     const bindings: ComputerExecutionBinding[] = [];
+    const progressUpdates: TurnProgressUpdate[] = [];
     const toolCalls: Array<{ cwd: string; targetId?: string; computer?: ComputerExecutionBinding }> = [];
     const screenRequests: Array<{ ownerId: string; preferredNodeId?: string; preferredScreenId?: string }> = [];
     const releases: Array<{ screenLeaseId: string; ownerId: string }> = [];
@@ -857,8 +858,13 @@ describe("Turn Loop agent executor", () => {
     } as unknown as ProjectsService;
     const computer = {
       node(nodeId: string) { return nodeId === "desk-1" ? ({ id: "desk-1" } as never) : undefined; },
-      async waitForScreen(request: { ownerId: string; preferredNodeId?: string; preferredScreenId?: string }) {
+      async waitForScreen(
+        request: { ownerId: string; preferredNodeId?: string; preferredScreenId?: string },
+        _signal?: AbortSignal,
+        onWaiting?: (state: { readonly state: "waiting"; readonly code: "WAITING_FOR_COMPUTER"; readonly ownerId: string; readonly reasons: readonly string[] }) => void | Promise<void>,
+      ) {
         screenRequests.push(request);
+        await onWaiting?.({ state: "waiting", code: "WAITING_FOR_COMPUTER", ownerId: request.ownerId, reasons: ["cpu-pressure"] });
         return {
           state: "acquired" as const,
           screenLease: { id: "screen-lease-1", nodeId: "desk-1", screenId: "agent-screen-1", ownerId: request.ownerId, acquiredAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() },
@@ -884,9 +890,22 @@ describe("Turn Loop agent executor", () => {
     try {
       faux.setResponses([modelRuntime.fauxAssistantMessage("computer project complete")]);
       const projectTurn: InboundTurn = { ...turn("computer-project", "work on the computer project"), projectId: "atlas", projectTargetId: "computer:desk-1" };
-      const result = await executor.execute({ turn: projectTurn, decision: decision("session:new"), jobId: "job-computer" });
+      const result = await executor.execute({
+        turn: projectTurn,
+        decision: decision("session:new"),
+        jobId: "job-computer",
+        progress: async (update) => { progressUpdates.push(update); },
+      });
       expect(result.text).toBe("computer project complete");
       expect(screenRequests).toEqual([{ ownerId: "job-computer", preferredNodeId: "desk-1" }]);
+      expect(progressUpdates).toContainEqual(expect.objectContaining({
+        jobStatus: "waiting-for-computer",
+        computerWait: { code: "WAITING_FOR_COMPUTER", nodeId: "desk-1", reasons: ["cpu-pressure"] },
+      }));
+      expect(progressUpdates).toContainEqual(expect.objectContaining({
+        jobStatus: "running",
+        notify: false,
+      }));
       expect(toolCalls).toContainEqual({
         cwd: workspace,
         targetId: "computer:desk-1",

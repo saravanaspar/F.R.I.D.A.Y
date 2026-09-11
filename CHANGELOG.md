@@ -41,6 +41,10 @@ published release artifacts and generated release notes.
 - Connected Phase 3 `computer:<node-id>` execution targets to the Computer capability: Projects now allow Computer-target workspaces, Turn Loop leases the selected Agent screen, and the existing bash/edit/process/IPython tools carry that lease and control generation into the provider instead of creating a parallel executor.
 - Preserved the existing Permissions boundary for Computer execution, including the same tool action IDs, explicit write authorization, conservative network classification for remote shell/process/IPython work, and the existing subagent ban on persistent background-process starts.
 - Added provider-bounded Computer tool execution with capability checks, output bounds, screen/owner/generation validation, and takeover/lease cancellation so a stale Computer tool call cannot continue after control changes.
+- Added durable Session Job `waiting-for-computer` state so Computer admission pressure is visible as active work rather than an opaque running task; persisted wait context records the target node, stable `WAITING_FOR_COMPUTER` code, and bounded admission reasons.
+- Wired Computer admission into Turn progress so a detached Project job persists its wait before blocking, returns to `running` after a screen grant, remains cancellable while waiting, and is reconstructed through the existing restart/resume path with Project and Computer target identity intact.
+- Extended Session Job status/events/doctor surfaces with Computer wait counts and context while keeping Session Jobs provider-neutral; it stores generic wait metadata and does not import or own the Computer implementation.
+- Reported contained Computer timer, admission-retry, and idle hand-back failures through the operational-error sink instead of silently discarding provider/runtime diagnostics, while preserving fail-closed human control on hand-back failure.
 
 ## [1.0.4] - 2026-09-09
 

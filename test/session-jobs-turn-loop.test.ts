@@ -71,6 +71,8 @@ describe("Turn Loop detached session jobs", () => {
         finalized = true;
       },
     });
+    let releaseComputer!: () => void;
+    const computerReady = new Promise<void>((resolve) => { releaseComputer = resolve; });
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let executions = 0;
@@ -80,6 +82,14 @@ describe("Turn Loop detached session jobs", () => {
       canHandle: () => true,
       async execute(context) {
         executions += 1;
+        await context.progress?.({
+          kind: "status",
+          message: "Waiting for Computer desk-1: cpu-pressure",
+          jobStatus: "waiting-for-computer",
+          computerWait: { code: "WAITING_FOR_COMPUTER", nodeId: "desk-1", reasons: ["cpu-pressure"] },
+        });
+        await computerReady;
+        await context.progress?.({ kind: "status", message: "Computer acquired; resuming", jobStatus: "running", notify: false });
         await context.progress?.({ kind: "tool", message: "Running persistence tests" });
         await gate;
         return {
@@ -106,7 +116,7 @@ describe("Turn Loop detached session jobs", () => {
       principal: { authority: "channel", channel: "telegram", accountId: "main", conversationId: "chat", senderId: "alice" },
       text: "work on PSCLS brain",
       projectId: "atlas",
-      projectTargetId: "core-host",
+      projectTargetId: "computer:desk-1",
       timestamp: Date.now(),
       reply: async (text) => { replies.push(text); },
     };
@@ -121,8 +131,15 @@ describe("Turn Loop detached session jobs", () => {
     const result = await runtime.submit(turn);
     expect(result.status).toBe("completed");
     expect(replies[0]).toContain("Started background work: PSCLS — brain (job-1234)");
-    await waitUntil(() => executions === 1 && jobs.get("job-1234")?.status === "running", "background execution");
-    expect(jobs.get("job-1234")?.origin).toMatchObject({ projectId: "atlas", projectTargetId: "core-host" });
+    await waitUntil(() => executions === 1 && jobs.get("job-1234")?.status === "waiting-for-computer", "Computer admission wait");
+    expect(jobs.get("job-1234")?.origin).toMatchObject({ projectId: "atlas", projectTargetId: "computer:desk-1" });
+    expect(jobs.get("job-1234")?.computerWait).toMatchObject({
+      code: "WAITING_FOR_COMPUTER",
+      nodeId: "desk-1",
+      reasons: ["cpu-pressure"],
+    });
+    releaseComputer();
+    await waitUntil(() => jobs.get("job-1234")?.status === "running", "Computer admission resume");
     await waitUntil(() => replies.some((text) => text.includes("Running persistence tests")), "progress notification");
 
     release();

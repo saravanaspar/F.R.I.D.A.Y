@@ -40,6 +40,10 @@ Agent screen admission considers:
 
 If no node can satisfy the request, the result is `WAITING_FOR_COMPUTER` with stable reason codes. `waitForScreen()` keeps the request pending and retries after telemetry refresh, lease release/expiry, or the service poll tick. This lets Session Jobs remain the durable job owner while Computer remains the resource authority.
 
+For detached Agent work, `waitForScreen()` reports its first admission failure through a generic callback before the request is parked. Turn Loop maps that callback onto the existing public progress channel. Session Jobs persists the job as `waiting-for-computer` together with the stable wait code, preferred node id, bounded reason codes, and request timestamp. A later screen grant reports `running` again and clears the active wait record. Waiting work remains part of the normal active-job set, can be cancelled through the existing Session Jobs action, and is never moved into a Computer-owned queue of durable jobs.
+
+On FRIDAY restart, Session Jobs uses its existing resumable-request mechanism: the interrupted active row is durably returned to `queued`, its last Computer wait context remains available for status/diagnostics, and the resume turn preserves the original Project and `computer:<node-id>` target. When the reconstructed Agent run reaches admission again it either acquires a screen immediately or persists a fresh `waiting-for-computer` state. Computer therefore owns only live resource waiters; Session Jobs owns durable work and restart semantics.
+
 ## ScreenLease and ControlLease
 
 A `ScreenLease` is exclusive to one Agent owner and expires unless renewed. Releasing or expiring it aborts pending Computer actions before the screen can be reused.
@@ -81,6 +85,6 @@ Computer Node `restart`, `update`, and `resetManagedState` operations delegate t
 
 ## Current Phase 4 slice
 
-The first slice established the provider contract, admission, lease expiry/waiting, browser-action generation checks, takeover/hand-back behavior, status/doctor surfaces, and managed lifecycle guards. The second slice connects Project/Turn Loop execution to Computer targets and routes the existing bash/edit/process/IPython tool surfaces through the leased node while preserving Permissions and stale-generation checks.
+The first slice established the provider contract, admission, lease expiry/waiting, browser-action generation checks, takeover/hand-back behavior, status/doctor surfaces, and managed lifecycle guards. The second slice connected Project/Turn Loop execution to Computer targets and routed the existing bash/edit/process/IPython tool surfaces through the leased node while preserving Permissions and stale-generation checks. The third slice makes Computer admission a durable Session Job state and reuses the existing restart/resume path rather than introducing Computer-owned durable scheduling.
 
-Still pending in Phase 4 are durable Session Job `WAITING_FOR_COMPUTER` state/resume, Agent-facing Computer observe/browser-control tools, authenticated Client Gateway Computer APIs, Browser Supervisor orchestration beyond the provider contract, and the full login-wall → human takeover → fresh observation → same-job continuation acceptance path. Linux/Sway/Chromium and Windows platform providers remain Phase 5/8 work.
+Still pending in Phase 4 are Agent-facing Computer observe/browser-control tools, authenticated Client Gateway Computer APIs, Browser Supervisor orchestration beyond the provider contract, and the full login-wall → human takeover → fresh observation → same-job continuation acceptance path. Linux/Sway/Chromium and Windows platform providers remain Phase 5/8 work.

@@ -210,7 +210,15 @@ describe("Phase 4 Shared Agent Computer", () => {
     if (immediate.state !== "waiting") throw new Error("expected Computer wait state");
     expect(immediate.reasons).toContain("cpu-pressure");
 
-    const waiting = service.waitForScreen({ ownerId: "job-wait" });
+    let observedWait: { readonly code: "WAITING_FOR_COMPUTER"; readonly reasons: readonly string[] } | undefined;
+    let waitingReported!: () => void;
+    const reported = new Promise<void>((resolve) => { waitingReported = resolve; });
+    const waiting = service.waitForScreen({ ownerId: "job-wait" }, undefined, (state) => {
+      observedWait = state;
+      waitingReported();
+    });
+    await reported;
+    expect(observedWait).toMatchObject({ code: "WAITING_FOR_COMPUTER", reasons: expect.arrayContaining(["cpu-pressure"]) });
     adapter.setSnapshot(healthySnapshot());
     await service.refreshNode("node-1");
     const grant = await waiting;

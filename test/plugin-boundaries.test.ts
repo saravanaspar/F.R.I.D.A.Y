@@ -181,6 +181,10 @@ describe("plugin boundaries", () => {
     expect(turnLoopManifest.optional.map((capability) => capability.id)).toContain("computer");
     const projectsEntry = await readFile(resolve("plugins/projects/index.ts"), "utf8");
     expect(projectsEntry).not.toContain("COMPUTER_CAPABILITY");
+    const sessionJobsContract = await readFile(resolve("plugins/session-jobs/contract.ts"), "utf8");
+    const sessionJobsManager = await readFile(resolve("plugins/session-jobs/manager.ts"), "utf8");
+    expect(sessionJobsContract).toContain('"waiting-for-computer"');
+    expect(sessionJobsManager).not.toMatch(/(?:from|import\()\s*["']\.\.\/computer\//);
   });
 
   it("keeps execution-targets as a provider-neutral shared package rather than a plugin", async () => {

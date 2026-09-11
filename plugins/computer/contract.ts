@@ -304,7 +304,11 @@ export interface ComputerService {
   screenLeases(): readonly ScreenLease[];
   controlLease(screenLeaseId: string): ControlLease | undefined;
   requestScreen(request: ComputerScreenRequest): Promise<ComputerScreenRequestResult>;
-  waitForScreen(request: ComputerScreenRequest, signal?: AbortSignal): Promise<ComputerScreenGrant>;
+  waitForScreen(
+    request: ComputerScreenRequest,
+    signal?: AbortSignal,
+    onWaiting?: ((waiting: ComputerWaitingForComputer) => void | Promise<void>) | undefined,
+  ): Promise<ComputerScreenGrant>;
   renewScreenLease(screenLeaseId: string, ownerId: string, ttlMs?: number): Promise<ScreenLease>;
   releaseScreen(screenLeaseId: string, ownerId: string): Promise<boolean>;
   expireLeases(now?: number): Promise<number>;

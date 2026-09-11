@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { reportOperationalError } from "@friday/operational-errors";
 import {
   type ComputerAdmissionPolicy,
   type ComputerAdmissionReason,
@@ -537,9 +538,17 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
   const ensureTimer = (): void => {
     if (timer !== undefined || closed || !hasTimerWork()) return;
     timer = setInterval(() => {
-      void service.expireLeases().catch(() => undefined);
-      void service.sweepIdleTakeovers().catch(() => undefined);
-      if (waiters.size > 0) void drainWaiters().catch(() => undefined);
+      void service.expireLeases().catch((error: unknown) => {
+        reportOperationalError({ component: "computer", operation: "expire Computer screen leases", error, severity: "warn" });
+      });
+      void service.sweepIdleTakeovers().catch((error: unknown) => {
+        reportOperationalError({ component: "computer", operation: "sweep idle Computer takeovers", error, severity: "warn" });
+      });
+      if (waiters.size > 0) {
+        void drainWaiters().catch((error: unknown) => {
+          reportOperationalError({ component: "computer", operation: "retry waiting Computer admission", error, severity: "warn" });
+        });
+      }
     }, intervalMs);
     timer.unref?.();
   };
@@ -849,10 +858,12 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
       return serialize(() => tryAcquire(request));
     },
 
-    async waitForScreen(request, signal) {
+    async waitForScreen(request, signal, onWaiting) {
       signal?.throwIfAborted();
       const immediate = await service.requestScreen(request);
       if (immediate.state === "acquired") return immediate;
+      await onWaiting?.(immediate);
+      signal?.throwIfAborted();
       if (waiters.size >= MAX_WAITERS) throw new Error(`Computer wait queue limit reached (${MAX_WAITERS})`);
       return new Promise<ComputerScreenGrant>((resolve, reject) => {
         const waiterId = id(idFactory(), "Computer waiter id");
@@ -1015,8 +1026,9 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         try {
           await service.handBack(candidate.screenLeaseId, candidate.humanOwnerId);
           handedBack += 1;
-        } catch {
+        } catch (error) {
           // Fail closed: the human keeps control until a fresh hand-back can re-observe successfully.
+          reportOperationalError({ component: "computer", operation: "hand back idle Computer control", error, severity: "warn" });
         }
       }
       stopTimerIfIdle();

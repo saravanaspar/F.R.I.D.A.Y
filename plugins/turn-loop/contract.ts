@@ -271,6 +271,13 @@ export interface TurnProgressUpdate {
   readonly delayMs?: number | undefined;
   readonly sessionId?: string | undefined;
   readonly notify?: boolean | undefined;
+  /** Durable Session Job state transition when a detached turn is resource-blocked. */
+  readonly jobStatus?: "running" | "waiting-for-computer" | undefined;
+  readonly computerWait?: Readonly<{
+    readonly code: "WAITING_FOR_COMPUTER";
+    readonly nodeId?: string | undefined;
+    readonly reasons: readonly string[];
+  }> | undefined;
 }
 
 export interface TurnExecutionResult {
