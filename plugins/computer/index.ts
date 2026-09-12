@@ -24,9 +24,13 @@ import {
   type ComputerService,
 } from "./contract.js";
 import { createComputerService, type ComputerServiceOptions } from "./service.js";
+import { configuredComputerAdapters } from "./providers/index.js";
+import { TOOLS_CAPABILITY } from "../tools/contract.js";
+import { EXECUTION_CAPABILITY } from "../execution/contract.js";
+import { coreHostExecutionTarget } from "@friday/execution-targets";
 
 export interface ComputerPluginOptions {
-  /** Provider adapters injected by the embedding host. Linux/Windows providers arrive in later phases. */
+  /** Provider adapters injected by an embedding host; when omitted, the configured built-in provider is used. */
   readonly adapters?: readonly ComputerNodeAdapter[] | undefined;
   readonly service?: Omit<ComputerServiceOptions, "publishEvent"> | undefined;
 }
@@ -273,7 +277,7 @@ export function createComputerPlugin(options: ComputerPluginOptions = {}): Frida
   return definePlugin({
     id: "computer",
     requires: [EVENTS_CAPABILITY],
-    optional: [PERMISSIONS_CAPABILITY],
+    optional: [PERMISSIONS_CAPABILITY, TOOLS_CAPABILITY, EXECUTION_CAPABILITY],
     provides: [COMPUTER_CAPABILITY],
   }, async (ctx) => {
     const events = ctx.services.require(EVENTS_CAPABILITY);
@@ -289,7 +293,29 @@ export function createComputerPlugin(options: ComputerPluginOptions = {}): Frida
     const permissions = ctx.services.optional(PERMISSIONS_CAPABILITY);
     if (permissions) registerAgentComputerTools(ctx, service, permissions);
 
-    for (const adapter of options.adapters ?? []) await service.registerNode(adapter);
+    const tools = ctx.services.optional(TOOLS_CAPABILITY);
+    const execution = ctx.services.optional(EXECUTION_CAPABILITY);
+    const providerHooks = tools && execution ? {
+      runTool: async (request: import("./contract.js").ComputerNodeToolExecutionRequest): Promise<import("./contract.js").ComputerToolExecutionResult> => {
+        const tool = tools.createTool(request.tool, request.workspace, {
+          permissionMode: "full",
+          executionTarget: coreHostExecutionTarget(),
+        });
+        const result = await tool.execute(`computer:${request.runId}:${request.tool}`, request.input as never, request.signal);
+        return {
+          content: result.content,
+          ...(result.details === undefined ? {} : { details: result.details }),
+          ...(result.terminate === undefined ? {} : { terminate: result.terminate }),
+        };
+      },
+      cleanupRunProcesses: async (request: import("./contract.js").ComputerRunProcessCleanupRequest): Promise<void> => {
+        for (const process of execution.processes.list().filter((entry) => entry.runId === request.runId && entry.state === "running")) {
+          await execution.processes.stop(process.id, "Computer run settled");
+        }
+      },
+    } satisfies Pick<import("./providers/linux-sway.js").LinuxSwayComputerAdapterOptions, "runTool" | "cleanupRunProcesses"> : {};
+
+    for (const adapter of options.adapters ?? configuredComputerAdapters(process.env, process.platform, providerHooks)) await service.registerNode(adapter);
 
     ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, {
       id: "computer",
@@ -437,3 +463,4 @@ export function createComputerPlugin(options: ComputerPluginOptions = {}): Frida
 export default createComputerPlugin();
 export * from "./contract.js";
 export { createComputerService } from "./service.js";
+export { configuredComputerAdapters, configuredComputerProviderId, inspectConfiguredComputerProvider, createLinuxSwayComputerAdapter } from "./providers/index.js";

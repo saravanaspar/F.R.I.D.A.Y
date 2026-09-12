@@ -175,7 +175,7 @@ describe("plugin boundaries", () => {
 
     const manifest = getPluginManifest(computerPlugin)!;
     expect(manifest.requires.map((capability) => capability.id)).toEqual(["events"]);
-    expect(manifest.optional.map((capability) => capability.id)).toEqual(["permissions"]);
+    expect(manifest.optional.map((capability) => capability.id)).toEqual(["permissions", "tools", "execution"]);
     expect(manifest.provides.map((capability) => capability.id)).toEqual(["computer"]);
 
     const toolsManifest = getPluginManifest(toolsPlugin)!;

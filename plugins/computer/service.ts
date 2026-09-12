@@ -1574,7 +1574,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         reportOperationalError({ component: "computer", operation: "refresh nodes for Computer doctor", error, severity: "warn" });
         return Object.freeze([]);
       });
-      const reports: ComputerDoctorNodeReport[] = service.nodes().map((node) => {
+      const reports: ComputerDoctorNodeReport[] = await Promise.all(service.nodes().map(async (node) => {
         const issues: string[] = [];
         if (node.availability !== "online") issues.push(`node is ${node.availability}`);
         const availableAgentScreens = node.screens.filter((screen) => screen.kind === "agent" && !activeScreenIds(node.id).has(screen.id)).length;
@@ -1586,6 +1586,18 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         if (node.resources.browserRendererCount > node.admission.maxBrowserRenderers) issues.push("browser renderer count exceeds admission threshold");
         if (node.resources.gpuPercent !== undefined && node.resources.gpuPercent > node.admission.maxGpuPercent) issues.push("GPU utilization exceeds admission threshold");
         if (node.resources.screenWorkloadPercent > node.admission.maxScreenWorkloadPercent) issues.push("screen workload exceeds admission threshold");
+        const state = nodes.get(node.id);
+        if (state?.adapter.doctor) {
+          try {
+            const providerIssues = await state.adapter.doctor();
+            for (const issue of providerIssues.slice(0, 32)) {
+              const normalized = text(issue, "Computer provider Doctor issue", 512);
+              if (!issues.includes(normalized)) issues.push(normalized);
+            }
+          } catch (error) {
+            issues.push(`provider Doctor failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512));
+          }
+        }
         const status = node.availability === "offline" ? "unavailable" as const : issues.length > 0 ? "degraded" as const : "ok" as const;
         return Object.freeze({
           nodeId: node.id,
@@ -1594,7 +1606,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
           availableAgentScreens,
           activeScreenLeases: nodeLeaseCount(node.id),
         });
-      });
+      }));
       const status = reports.length === 0
         ? "unavailable" as const
         : reports.some((report) => report.status === "unavailable")

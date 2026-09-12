@@ -8,6 +8,7 @@ import { hasFridayPrivilegedHelper } from "../plugins/host-privileges/privileged
 import type { DoctorCheck, DoctorLevel, DoctorRepairId, DoctorSection } from "../plugins/host-doctor/contract.js";
 import { getFridayHome, readRuntimeSettings } from "../plugins/runtime-settings/runtime-env.js";
 import { selectSandboxProvider } from "../plugins/sandbox/providers/index.js";
+import { inspectConfiguredComputerProvider } from "../plugins/computer/providers/index.js";
 import { voiceCredentialVaultRef } from "../plugins/voice/credential-ref.js";
 import { readVoiceSettings } from "../plugins/voice/settings.js";
 import { memoryEmbeddingHealth } from "../plugins/memory/health.js";
@@ -77,6 +78,7 @@ const CLI_DOCTOR_SOURCES: DoctorSources = Object.freeze({
       repairHint: provider.repairHint(status),
     });
   },
+  computer: (environment: NodeJS.ProcessEnv) => inspectConfiguredComputerProvider(environment),
 });
 
 export function collectDoctorChecks(environment: NodeJS.ProcessEnv = process.env): Promise<readonly DoctorCheck[]> {

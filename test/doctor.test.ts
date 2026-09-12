@@ -68,6 +68,7 @@ describe("friday doctor", () => {
     expect(byId.get("channel-access")).toMatchObject({ level: "ok" });
     expect(byId.get("permission-mode")).toMatchObject({ level: "ok", message: "ask" });
     expect(byId.get("sandbox-network")).toMatchObject({ level: "ok" });
+    expect(byId.get("computer-linux")).toMatchObject({ level: "info", message: "not configured" });
     expect(byId.get("vault")?.level).not.toBe("error");
     expect(byId.get("self-repository")).toMatchObject({ level: "ok" });
     expect(byId.get("node-toolchain")).toMatchObject({ level: "ok" });

@@ -1,0 +1,18 @@
+[Unit]
+Description=F.R.I.D.A.Y shared Chromium browser supervisor
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+UMask=0077
+Environment=PATH=%h/.local/bin:/snap/bin:/usr/local/bin:/usr/bin:/bin
+Environment=FRIDAY_COMPUTER_CDP_PORT=9222
+ExecStart=/bin/sh -lc 'bin="${FRIDAY_CHROMIUM_BIN:-}"; if [ -z "$bin" ]; then for candidate in chromium chromium-browser google-chrome-stable google-chrome; do if command -v "$candidate" >/dev/null 2>&1; then bin="$candidate"; break; fi; done; fi; if [ -z "$bin" ]; then echo "No Chromium/Chrome executable found" >&2; exit 127; fi; profile="${FRIDAY_COMPUTER_BROWSER_PROFILE_DIR:-}"; if [ -z "$profile" ]; then path="$(command -v "$bin")"; snap_launcher=0; case "$path" in /snap/bin/*) snap_launcher=1 ;; esac; if command -v snap >/dev/null 2>&1 && snap list chromium >/dev/null 2>&1 && { [ "$bin" = chromium ] || [ "$bin" = chromium-browser ] || [ "$snap_launcher" -eq 1 ]; }; then profile="$HOME/snap/chromium/common/friday-computer-profile"; else profile="${FRIDAY_HOME:-$HOME/.friday}/computer/chromium-profile"; fi; fi; mkdir -p "$profile"; chmod 700 "$profile"; exec "$bin" --ozone-platform=wayland --enable-features=UseOzonePlatform --remote-debugging-address=127.0.0.1 --remote-debugging-port="$FRIDAY_COMPUTER_CDP_PORT" --user-data-dir="$profile" --no-first-run --no-default-browser-check about:blank'
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+KillMode=mixed
+
+[Install]
+WantedBy=graphical-session.target

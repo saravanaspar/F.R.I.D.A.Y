@@ -235,6 +235,8 @@ export interface ComputerNodeAdapter {
   /** Idempotently terminate provider-owned background processes for one Agent run before that run settles. */
   cleanupRunProcesses?(request: ComputerRunProcessCleanupRequest): Promise<void>;
   runBrowserAction?(request: ComputerBrowserActionRequest): Promise<ComputerBrowserActionResult>;
+  /** Provider-specific health details for Doctor. Must be bounded and secret-free. */
+  doctor?(signal?: AbortSignal): Promise<readonly string[]>;
   restart?(signal?: AbortSignal): Promise<void>;
   update?(signal?: AbortSignal): Promise<void>;
   /** Reset only FRIDAY-managed Agent state. It must never silently reset the person's OS. */
