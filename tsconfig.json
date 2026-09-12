@@ -17,6 +17,7 @@
     "src/**/*.ts",
     "test/**/*.ts",
     "plugins/**/*.ts",
+    "scripts/conformance-linux-computer.ts",
     "vitest.config.ts"
   ],
   "exclude": [

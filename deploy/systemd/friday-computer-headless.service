@@ -1,0 +1,18 @@
+[Unit]
+Description=F.R.I.D.A.Y compatibility-mode headless Sway session
+After=default.target
+
+[Service]
+Type=simple
+UMask=0077
+Environment=WLR_BACKENDS=headless
+Environment=WLR_LIBINPUT_NO_DEVICES=1
+Environment=FRIDAY_COMPUTER_SESSION_MODE=compatibility
+ExecStart=/usr/bin/sway --config %h/.config/friday/sway-headless.conf
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+KillMode=mixed
+
+[Install]
+WantedBy=default.target

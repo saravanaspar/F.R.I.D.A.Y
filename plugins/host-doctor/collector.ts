@@ -47,6 +47,14 @@ export interface DoctorSandboxSnapshot {
   readonly repairHint?: string | undefined;
 }
 
+export interface DoctorComputerSnapshot {
+  readonly configured: boolean;
+  readonly provider?: string | undefined;
+  readonly status: "ok" | "degraded" | "unavailable";
+  readonly nodes: number;
+  readonly issues: readonly string[];
+}
+
 export interface DoctorHostPrivilegeSnapshot {
   readonly privilegeMode: "broker" | "none";
   readonly privilegedHelperInstalled: boolean;
@@ -60,6 +68,7 @@ export interface DoctorSources {
   voice(home: string, vaultRefs: ReadonlySet<string>): Promise<DoctorVoiceSnapshot>;
   hostPrivileges(home: string): Promise<DoctorHostPrivilegeSnapshot>;
   sandbox(): Promise<DoctorSandboxSnapshot>;
+  computer?(environment: NodeJS.ProcessEnv): Promise<DoctorComputerSnapshot>;
   memory?(): Promise<unknown>;
 }
 
@@ -477,6 +486,38 @@ async function whatsappToolingCheck(environment: NodeJS.ProcessEnv, home: string
   }
 }
 
+async function computerCheck(environment: NodeJS.ProcessEnv, sources: DoctorSources): Promise<DoctorCheck> {
+  if (!sources.computer) {
+    return check("computer-linux", "Tooling", "info", "Agent Computer", "not configured", { detail: "Optional until a Computer provider is enabled." });
+  }
+  try {
+    const snapshot = await sources.computer(environment);
+    if (!snapshot.configured) {
+      return check("computer-linux", "Tooling", "info", "Agent Computer", "not configured", {
+        detail: "Set FRIDAY_COMPUTER_PROVIDER=linux-sway to enable the Phase 5 Linux provider.",
+      });
+    }
+    const detail = [
+      snapshot.provider ? `provider=${snapshot.provider}` : undefined,
+      `nodes=${snapshot.nodes}`,
+      ...snapshot.issues.slice(0, 6),
+    ].filter(Boolean).join(" · ");
+    if (snapshot.status === "ok") {
+      return check("computer-linux", "Tooling", "ok", "Agent Computer", "Linux provider ready", { detail });
+    }
+    return check("computer-linux", "Tooling", snapshot.status === "unavailable" ? "error" : "warn", "Agent Computer",
+      snapshot.status === "unavailable" ? "Linux provider unavailable" : "Linux provider needs attention", {
+        detail,
+        fix: "See docs/operations/LINUX_COMPUTER.md, repair the listed host/session dependency, then rerun: friday doctor",
+      });
+  } catch (error) {
+    return check("computer-linux", "Tooling", "error", "Agent Computer", "Linux provider could not be inspected", {
+      detail: error instanceof Error ? error.message : String(error),
+      fix: "Check FRIDAY_COMPUTER_PROVIDER and docs/operations/LINUX_COMPUTER.md, then rerun: friday doctor",
+    });
+  }
+}
+
 async function sourceRepositoryCheck(path: string | undefined): Promise<DoctorCheck> {
   if (!path) {
     return check("self-repository", "Configuration", "info", "Self-improvement source", "not configured", {
@@ -832,6 +873,7 @@ export async function collectDoctorChecks(
   checks.push(executionPythonCheck(environment));
   checks.push(await whatsappToolingCheck(environment, home, channels));
   checks.push(await sandboxCheck(sources));
+  checks.push(await computerCheck(environment, sources));
   try {
     const snapshot = await sources.memory?.();
     const status = snapshot && typeof snapshot === "object" ? snapshot as Record<string, unknown> : {};

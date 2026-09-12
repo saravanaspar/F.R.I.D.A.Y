@@ -1,5 +1,6 @@
 import type { FridayPlugin } from "../../src/plugin.js";
 import { MODEL_CREDENTIALS_CAPABILITY } from "../auth/contract.js";
+import { COMPUTER_CAPABILITY } from "../computer/contract.js";
 import { CHANNELS_CAPABILITY } from "../channels/contract.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { RUNTIME_SETTINGS_CAPABILITY } from "../runtime-settings/contract.js";
@@ -28,6 +29,7 @@ export function createHostDoctorPlugin(): FridayPlugin {
       SANDBOX_HEALTH_CAPABILITY,
       VOICE_CAPABILITY,
     ],
+    optional: [COMPUTER_CAPABILITY],
     provides: [HOST_DOCTOR_CAPABILITY],
   }, (ctx) => {
     const channels = ctx.services.require(CHANNELS_CAPABILITY);
@@ -36,6 +38,7 @@ export function createHostDoctorPlugin(): FridayPlugin {
     const runtime = ctx.services.require(RUNTIME_SETTINGS_CAPABILITY);
     const sandboxHealth = ctx.services.require(SANDBOX_HEALTH_CAPABILITY);
     const voice = ctx.services.require(VOICE_CAPABILITY);
+    const computer = ctx.services.optional(COMPUTER_CAPABILITY);
 
     const sources: DoctorSources = Object.freeze({
       async memory() {
@@ -78,6 +81,29 @@ export function createHostDoctorPlugin(): FridayPlugin {
           status: status.probe.status,
           imageMissing: status.probe.status === "image-missing",
           repairHint: status.repairHint,
+        });
+      },
+      async computer(environment: NodeJS.ProcessEnv) {
+        const provider = environment.FRIDAY_COMPUTER_PROVIDER?.trim();
+        if (!provider || provider === "none") {
+          return Object.freeze({ configured: false, status: "ok" as const, nodes: 0, issues: Object.freeze([]) });
+        }
+        if (!computer) {
+          return Object.freeze({
+            configured: true,
+            provider,
+            status: "unavailable" as const,
+            nodes: 0,
+            issues: Object.freeze(["Computer capability is unavailable in the running plugin graph"]),
+          });
+        }
+        const report = await computer.doctor();
+        return Object.freeze({
+          configured: true,
+          provider,
+          status: report.status,
+          nodes: report.nodes.length,
+          issues: Object.freeze(report.nodes.flatMap((node) => node.issues.map((issue) => `${node.nodeId}: ${issue}`)).slice(0, 32)),
         });
       },
     });

@@ -30,6 +30,17 @@ published release artifacts and generated release notes.
 - Added restart-safe isolated coding worktrees, trusted diff Artifacts, deterministic validation, commit/promotion flows, authenticated Client Gateway Project APIs, and Session Job preservation of Project/target context.
 - Added permission-gated canonical repository promotion by clean fast-forward merge or cherry-pick while keeping Computer Node execution fail-closed until Phase 4.
 
+### Linux Agent Computer (Phase 5)
+
+- Made Linux Computer smoke acceptance readiness-based: it now retries live Sway output and Chromium CDP startup, recovers from stale systemd-published Sway sockets after restarts, and fails closed after a bounded retry window instead of racing freshly started services.
+- Started the first Linux/Sway platform slice behind the existing `ComputerNodeAdapter` instead of adding a new plugin or executor: opt-in provider registration, Sway physical/headless output discovery, shared-profile Chromium CDP targets per Agent screen, CPU/RAM/renderer telemetry, and Linux-specific Doctor diagnostics.
+- Added provider-side observation-safety enforcement for the Linux browser path: input values and protected/CAPTCHA-shaped DOM are omitted before attestation, sensitive URL/title/assignment data is redacted again, screenshots and human keystroke history are not exposed, and protected typing targets require human takeover.
+- Added managed-Sway and KDE/GNOME/XFCE compatibility deployment examples with user-level systemd Chromium/headless-Sway units plus Linux/Pi setup and smoke-test documentation.
+- Hardened real-host Linux bring-up with an idempotent user-scoped setup helper, a Sway-socket-aware smoke test, launcher auto-detection, and Ubuntu/Kubuntu Chromium Snap-safe profile defaults instead of assuming a `chromium` binary and shell-local `SWAYSOCK`.
+- Added real Chromium CDP action conformance: browser clicks/focus now use CDP mouse input instead of page-script `element.click()`, named key presses carry browser key metadata, navigation waits for the live document before re-observation, protected click/input targets are rejected from live DOM metadata, and a loopback-only conformance runner verifies navigate/click/type/press plus redaction on the real browser.
+- Cleaned compatibility-mode host warnings by disabling Xwayland in the isolated headless compositor, explicitly configuring synthetic-output backgrounds, and removing a systemd-sensitive shell parameter expansion from the browser unit.
+- Completed Linux Computer execution and lifecycle wiring: shell/edit/process/IPython use the existing execution boundary, background processes are run-scoped and cleaned up before completion, and restart/update/reset operate only on FRIDAY-owned user services/profile state. Optional Playwright/AT-SPI and PipeWire/WebRTC accelerators remain opt-in and fail closed when unavailable.
+
 ### Shared Agent Computer
 
 - Started Phase 4 with a provider-neutral `computer` capability and `ComputerNodeAdapter` boundary for future Linux and Windows platform providers instead of adding a second executor or job system.

@@ -3,11 +3,14 @@ declare module "ws" {
   import type { Duplex } from "node:stream";
 
   export class WebSocket {
-    constructor(url: string);
+    constructor(url: string, options?: { handshakeTimeout?: number });
     static readonly OPEN: number;
     readonly readyState: number;
     send(data: string): void;
     close(code?: number, reason?: string): void;
+    terminate(): void;
+    once(event: "open", listener: () => void): this;
+    once(event: "error", listener: (error?: unknown) => void): this;
     on(event: "open", listener: () => void): this;
     on(event: "message", listener: (data: { toString(): string }) => void): this;
     on(event: "close" | "error", listener: (error?: unknown) => void): this;

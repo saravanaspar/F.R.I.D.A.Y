@@ -144,6 +144,8 @@ Acceptance: an Agent reaches a login wall, the user takes over, signs in without
 
 Tracking: [issue #22](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/22).
 
+Status: **complete for the Linux provider slice**. The opt-in built-in `linux-sway` adapter covers Sway physical/headless output discovery, shared persistent Chromium CDP targets, provider-side secret/CAPTCHA redaction, protected-target refusal, resource telemetry/admission, Doctor integration, managed/compatibility user-service deployment, and real-Chromium loopback conformance. Linux Computer execution delegates to the existing tool/execution authorities (shell, edit, process, and IPython), scopes background processes to the Agent run, and provides managed restart/update/reset operations limited to FRIDAY-owned services and profile state. Real-host setup remains user-scoped and Chromium Snap-aware. Playwright/AT-SPI and PipeWire/WebRTC are optional accelerators; CDP and safe metadata are the mandatory baseline. See [`operations/LINUX_COMPUTER.md`](operations/LINUX_COMPUTER.md).
+
 Linux is the first-class Computer Node implementation.
 
 - Debian-family Linux/Raspberry Pi OS, systemd user services, Sway/wlroots, Wayland virtual inputs, Chromium, Playwright/CDP, AT-SPI, PipeWire, and WebRTC screen streaming.
