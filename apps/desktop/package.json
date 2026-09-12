@@ -1,0 +1,12 @@
+{
+  "name": "@friday/desktop",
+  "private": true,
+  "version": "1.0.4",
+  "type": "module",
+  "description": "F.R.I.D.A.Y desktop client presentation shell",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "preview": "python3 -m http.server 4173 -d .",
+    "test": "echo \"Desktop core tests run from the repository Vitest suite\""
+  }
+}
