@@ -160,6 +160,13 @@ Acceptance: a Pi user works on the physical monitor while two Agents browse inde
 
 Tracking: [issue #19](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/19).
 
+Status: **in progress — first vertical slice started**. The repository now has the
+`apps/desktop` presentation shell and typed local cache/reducer for the Phase 6
+path (conversation → background job → approval → artifact → Computer panel), plus
+the reserved `apps/android` boundary for Phase 7. Gateway authentication,
+server-backed event wiring, offline persistence, and native Electron/React
+integrations remain follow-up work in this phase.
+
 Start only after Phases 1–4 stabilize. Build `apps/desktop` with Electron, React, TypeScript, Vite, Zustand, TanStack Query, SQLite cache, OS credential storage, xterm.js, Monaco, native notifications, WebRTC voice/video, and the shared protocol.
 
 Provide Agents, Groups, Conversations, Threads, Projects, Routines, Skills, Plugins, Files, Computer, Approvals, Jobs, Search, Usage, and Settings. The three-pane layout includes Agent/group navigation, streaming conversation with tool activity/diffs/approvals/artifacts, and an Activity/Computer/Files/Terminal/Diff panel. Add command palette, deep links, offline cache, reconnect, and desktop updater/recovery.
