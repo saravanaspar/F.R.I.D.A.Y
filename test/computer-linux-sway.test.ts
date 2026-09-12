@@ -62,6 +62,23 @@ function fakeCdp(options: {
         return { frameId: "frame-1" };
       }
       if (method === "Input.insertText" || method === "Input.dispatchKeyEvent" || method === "Input.dispatchMouseEvent") return {};
+      if (method === "Runtime.callFunctionOn") {
+        const functionDeclaration = String(params?.functionDeclaration ?? "");
+        if (functionDeclaration.includes("getBoundingClientRect")) {
+          return {
+            result: {
+              value: {
+                found: true,
+                protected: options.elementProtected === true,
+                actionable: true,
+                x: 320,
+                y: 240,
+              },
+            },
+          };
+        }
+        return { result: { value: { protected: options.activeProtected === true, expected: true } } };
+      }
       if (method !== "Runtime.evaluate") throw new Error(`unexpected target command: ${method}`);
       const expression = String(params?.expression ?? "");
       if (expression === "location.href") return { result: { value: nextUrl } };
@@ -257,6 +274,10 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
         params: expect.objectContaining({ type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }),
       }),
     ]));
+    const selectorCalls = cdp.calls.filter((call) => call.method === "Runtime.callFunctionOn");
+    expect(selectorCalls.some((call) => String(call.params?.functionDeclaration ?? "").includes("#safe-input"))).toBe(false);
+    expect(selectorCalls.some((call) => String(call.params?.functionDeclaration ?? "").includes("#safe-button"))).toBe(false);
+    expect(selectorCalls.some((call) => (call.params?.arguments as readonly { value?: unknown }[] | undefined)?.some((argument) => argument.value === "#safe-input"))).toBe(true);
     expect(cdp.calls.some((call) => call.method === "Runtime.evaluate" && String(call.params?.expression ?? "").includes("el.click()"))).toBe(false);
   });
 

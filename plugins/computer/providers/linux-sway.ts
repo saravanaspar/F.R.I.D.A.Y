@@ -37,6 +37,26 @@ const VALUE_ATTRIBUTE = /\bvalue\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi;
 const SENSITIVE_URL_KEY = /(access[_-]?token|auth|authorization|code|credential|key|otp|pass|password|pin|secret|session|token)/i;
 const SENSITIVE_TITLE = /(captcha|one[- ]time|otp|passcode|password|verification code)/i;
 const PAGE_STATE_EXPRESSION = String.raw`(() => ({ href: location.href, readyState: document.readyState }))()`;
+const ACTIVE_ELEMENT_SAFETY_FUNCTION = String.raw`function (expectedSelector) {
+  const el = document.activeElement;
+  if (!el) return { protected: false, expected: expectedSelector === null };
+  const expected = expectedSelector === null ? null : document.querySelector(expectedSelector);
+  const signature = [el.getAttribute?.('type'), el.getAttribute?.('name'), el.getAttribute?.('id'), el.getAttribute?.('class'), el.getAttribute?.('autocomplete'), el.getAttribute?.('aria-label'), el.getAttribute?.('placeholder'), el.getAttribute?.('role')].filter(Boolean).join(' ');
+  return {
+    protected: /(?:password|passwd|passcode|otp|one[-_ ]?time|verification|captcha|token|secret|pin)/i.test(signature),
+    expected: expected === null || el === expected,
+  };
+}`;
+const ELEMENT_POINT_FUNCTION = String.raw`function (selector) {
+  const el = document.querySelector(selector);
+  if (!el) return { found: false, protected: false, actionable: false };
+  el.scrollIntoView({ block: 'center', inline: 'center' });
+  const signature = [el.getAttribute('type'), el.getAttribute('name'), el.getAttribute('id'), el.getAttribute('class'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder'), el.getAttribute('role')].filter(Boolean).join(' ');
+  const rect = el.getBoundingClientRect();
+  const style = getComputedStyle(el);
+  const actionable = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && !el.hasAttribute('disabled') && el.getAttribute('aria-disabled') !== 'true';
+  return { found: true, protected: /(?:password|passwd|passcode|otp|one[-_ ]?time|verification|captcha|token|secret|pin)/i.test(signature), actionable, x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2) };
+}`;
 const DOM_SUMMARY_EXPRESSION = String.raw`(() => {
   const protectedPattern = /(password|passwd|passcode|otp|one[-_ ]?time|verification|captcha|token|secret|pin)/i;
   const root = document.body ? document.body.cloneNode(true) : null;
@@ -748,6 +768,23 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     return cdpResultValue<T>(result);
   }
 
+  async function callFunctionValue<T>(
+    targetId: string,
+    functionDeclaration: string,
+    args: readonly unknown[],
+    signal?: AbortSignal,
+  ): Promise<T | undefined> {
+    const result = await cdp.targetCommand(targetId, "Runtime.callFunctionOn", {
+      functionDeclaration,
+      arguments: args.map((value) => ({ value })),
+      returnByValue: true,
+      awaitPromise: true,
+    }, signal);
+    const exception = cdpExceptionMessage(result);
+    if (exception) throw new Error(`browser page evaluation failed: ${sanitizeText(exception, 256)}`);
+    return cdpResultValue<T>(result);
+  }
+
   async function pageUrl(targetId: string, signal?: AbortSignal): Promise<string> {
     return await evaluateValue<string>(targetId, "location.href", signal) ?? "about:blank";
   }
@@ -789,17 +826,7 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     signal?: AbortSignal,
   ): Promise<Readonly<{ x: number; y: number }>> {
     if (PROTECTED_TARGET.test(selector)) throw new Error(protectedMessage);
-    const expression = `(() => {
-      const el = document.querySelector(${JSON.stringify(selector)});
-      if (!el) return { found: false, protected: false, actionable: false };
-      el.scrollIntoView({ block: 'center', inline: 'center' });
-      const signature = [el.getAttribute('type'), el.getAttribute('name'), el.getAttribute('id'), el.getAttribute('class'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder'), el.getAttribute('role')].filter(Boolean).join(' ');
-      const rect = el.getBoundingClientRect();
-      const style = getComputedStyle(el);
-      const actionable = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && !el.hasAttribute('disabled') && el.getAttribute('aria-disabled') !== 'true';
-      return { found: true, protected: /(?:password|passwd|passcode|otp|one[-_ ]?time|verification|captcha|token|secret|pin)/i.test(signature), actionable, x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2) };
-    })()`;
-    const value = await evaluateValue<BrowserElementPoint>(targetId, expression, signal);
+    const value = await callFunctionValue<BrowserElementPoint>(targetId, ELEMENT_POINT_FUNCTION, [selector], signal);
     if (value?.found !== true) throw new Error(`browser target was not found: ${selector}`);
     if (value.protected === true) throw new Error(protectedMessage);
     if (value.actionable !== true || typeof value.x !== "number" || !Number.isFinite(value.x)
@@ -867,8 +894,12 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
   }
 
   async function assertActiveElementSafe(targetId: string, expectedSelector?: string, signal?: AbortSignal): Promise<void> {
-    const expression = `(() => { const el = document.activeElement; if (!el) return { protected: false, expected: ${expectedSelector === undefined ? "true" : "false"} }; const expected = ${expectedSelector === undefined ? "null" : `document.querySelector(${JSON.stringify(expectedSelector)})`}; const signature = [el.getAttribute?.('type'), el.getAttribute?.('name'), el.getAttribute?.('id'), el.getAttribute?.('class'), el.getAttribute?.('autocomplete'), el.getAttribute?.('aria-label'), el.getAttribute?.('placeholder'), el.getAttribute?.('role')].filter(Boolean).join(' '); return { protected: /(?:password|passwd|passcode|otp|one[-_ ]?time|verification|captcha|token|secret|pin)/i.test(signature), expected: expected === null || el === expected }; })()`;
-    const value = await evaluateValue<{ readonly protected?: unknown; readonly expected?: unknown }>(targetId, expression, signal);
+    const value = await callFunctionValue<{ readonly protected?: unknown; readonly expected?: unknown }>(
+      targetId,
+      ACTIVE_ELEMENT_SAFETY_FUNCTION,
+      [expectedSelector ?? null],
+      signal,
+    );
     if (value?.protected === true) throw new Error("protected browser input requires human takeover");
     if (expectedSelector !== undefined && value?.expected !== true) throw new Error(`browser target could not be focused: ${expectedSelector}`);
   }
