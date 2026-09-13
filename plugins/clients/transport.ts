@@ -571,6 +571,43 @@ export async function startClientTransport(
         json(response, 202, { directive });
         return;
       }
+      if (path === "/v1/session-jobs/list") {
+        await authenticatedDevice();
+        if (!resources.sessionJobs) throw new Error("session jobs capability is unavailable");
+        if (body.activeOnly !== undefined && typeof body.activeOnly !== "boolean") throw new Error("activeOnly must be a boolean");
+        const limit = body.limit === undefined ? undefined : body.limit;
+        if (limit !== undefined && (!Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > 500)) throw new Error("limit must be an integer from 1 to 500");
+        json(response, 200, { jobs: resources.sessionJobs.list({ ...(body.activeOnly === undefined ? {} : { activeOnly: body.activeOnly }), ...(limit === undefined ? {} : { limit: limit as number }) }) });
+        return;
+      }
+      if (path === "/v1/session-jobs/get") {
+        await authenticatedDevice();
+        if (!resources.sessionJobs) throw new Error("session jobs capability is unavailable");
+        const job = resources.sessionJobs.get(requiredText(body, "jobId", 96));
+        if (!job) throw new Error("session job not found");
+        json(response, 200, { job });
+        return;
+      }
+      if (path === "/v1/session-jobs/cancel") {
+        await authenticatedDevice();
+        if (!resources.sessionJobs) throw new Error("session jobs capability is unavailable");
+        const reason = optionalText(body, "reason", 4_000);
+        const job = await resources.sessionJobs.cancel(requiredText(body, "jobId", 96), reason);
+        json(response, 200, { job });
+        return;
+      }
+      if (path === "/v1/artifacts/storage") {
+        await authenticatedDevice();
+        if (!resources.artifacts) throw new Error("artifacts capability is unavailable");
+        json(response, 200, { storage: await resources.artifacts.storage() });
+        return;
+      }
+      if (path === "/v1/artifacts/inspect") {
+        await authenticatedDevice();
+        if (!resources.artifacts) throw new Error("artifacts capability is unavailable");
+        json(response, 200, { artifact: await resources.artifacts.inspect(requiredText(body, "ref", 512)) });
+        return;
+      }
       json(response, 404, { error: "not_found" });
     } catch (error) {
       const failure = safeFailure(error);

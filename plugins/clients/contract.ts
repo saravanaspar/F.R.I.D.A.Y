@@ -6,6 +6,7 @@ import type { TurnRuntimeService } from "../turn-loop/contract.js";
 import type { SessionJobsService } from "../session-jobs/contract.js";
 import type { ProjectsService } from "../projects/contract.js";
 import type { ComputerService } from "../computer/contract.js";
+import type { ArtifactService } from "../artifacts/contract.js";
 
 /** Wire-compatible event envelope. The canonical generated schemas live in @friday/client-protocol. */
 export interface ClientEventMessage {
@@ -56,6 +57,8 @@ export interface ClientGatewayResources {
   readonly sessionJobs?: SessionJobsService | undefined;
   readonly projects?: ProjectsService | undefined;
   readonly computer?: ComputerService | undefined;
+  /** Read-only artifact metadata and storage controls exposed to trusted clients. */
+  readonly artifacts?: ArtifactService | undefined;
 }
 
 export interface ClientGatewayListenOptions {
