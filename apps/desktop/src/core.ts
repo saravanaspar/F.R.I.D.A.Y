@@ -1,6 +1,7 @@
 export type DesktopConnection = "offline" | "connecting" | "online";
 export type DesktopJobStatus = "queued" | "running" | "awaiting-approval" | "approved" | "completed" | "failed";
 export type DesktopMessageRole = "user" | "assistant" | "system";
+export type DesktopSurface = "conversations" | "agents" | "groups" | "projects" | "routines" | "skills" | "plugins" | "files" | "computer" | "approvals" | "jobs" | "search" | "usage" | "settings" | "terminal" | "diff";
 
 export interface DesktopMessage {
   readonly id: string;
@@ -44,6 +45,7 @@ export interface DesktopState {
   readonly connection: DesktopConnection;
   readonly lastSequence: number;
   readonly conversationId: string;
+  readonly activeSurface: DesktopSurface;
   readonly messages: readonly DesktopMessage[];
   readonly jobs: readonly DesktopJob[];
   readonly artifacts: readonly DesktopArtifact[];
@@ -53,6 +55,7 @@ export interface DesktopState {
 
 export type DesktopAction =
   | { readonly type: "connection"; readonly status: DesktopConnection }
+  | { readonly type: "surface"; readonly surface: DesktopSurface }
   | { readonly type: "send-message"; readonly text: string; readonly now?: string; readonly messageId?: string; readonly jobId?: string }
   | { readonly type: "job-update"; readonly jobId: string; readonly status: DesktopJobStatus; readonly progress: number; readonly approvalLabel?: string; readonly artifactId?: string }
   | { readonly type: "artifact-added"; readonly artifact: DesktopArtifact }
@@ -102,6 +105,7 @@ export function createDesktopState(conversationId = "conversation-demo"): Deskto
     connection: "offline",
     lastSequence: 0,
     conversationId,
+    activeSurface: "conversations",
     messages: Object.freeze([]),
     jobs: Object.freeze([]),
     artifacts: Object.freeze([]),
@@ -112,6 +116,7 @@ export function createDesktopState(conversationId = "conversation-demo"): Deskto
 export function reduceDesktopState(state: DesktopState, action: DesktopAction): DesktopState {
   switch (action.type) {
     case "connection": return { ...state, connection: action.status };
+    case "surface": return { ...state, activeSurface: action.surface, computer: action.surface === "computer" ? { ...state.computer, open: true } : state.computer };
     case "notice": {
       if (action.message !== undefined) return { ...state, notice: action.message };
       const { notice: _notice, ...withoutNotice } = state;

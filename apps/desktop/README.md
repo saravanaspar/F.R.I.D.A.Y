@@ -5,10 +5,14 @@ implements this initial workflow:
 
 `conversation → background job → approval → artifact → Computer panel`
 
-The renderer is intentionally dependency-light while the Electron/React shell is
-being established. `src/core.ts` is the typed, framework-independent client cache
-and reducer. It owns no durable data, credentials, Agent execution, or Computer
-authority; those remain behind the authenticated Client Gateway.
+The renderer is intentionally dependency-light while the native Electron/React
+shell is being established. `src/core.ts` is the typed, framework-independent
+client cache and reducer. `src/gateway.ts` provides authenticated HTTP and
+reconnecting WebSocket transport, `src/storage.ts` provides versioned bounded
+cache storage, `src/deep-links.ts` validates `friday://` routes, and
+`src/commands.ts` powers the command palette. The client owns no durable data,
+credentials, Agent execution, or Computer authority; those remain behind the
+authenticated Client Gateway.
 
 ## Run the desktop client
 
@@ -18,14 +22,15 @@ npm --prefix apps/desktop run preview
 # open http://127.0.0.1:4173 in a desktop browser
 ```
 
-The optional Electron host is in [`electron/main.cjs`](electron/main.cjs). Install
-the Electron toolchain in the app workspace before launching it; the browser
-preview remains the canonical smoke-test path until the native shell is wired to
-device pairing and OS credential storage.
+The Electron host is in [`electron/main.cjs`](electron/main.cjs), with an isolated
+preload bridge for OS-encrypted credentials, deep links, and single-instance
+behavior. Install the Electron toolchain in the app workspace before launching it.
 
-## What is deliberately next
+## Integration boundary
 
-- Replace demo dispatches with authenticated `ClientGateway` HTTP/WebSocket calls.
-- Persist only bounded cache data locally and resume using the event sequence.
-- Add React/Zustand/TanStack Query adapters around the tested reducer.
-- Add native pairing, credential storage, notifications, terminal, and WebRTC.
+The visible renderer currently runs in demo mode so it can be previewed without a
+paired host. Wiring a production deployment requires connecting the renderer to
+`createDesktopGatewayClient`, supplying a device signer from the preload bridge,
+and mapping Gateway event types to the reducer. React/Zustand/TanStack Query,
+terminal, WebRTC, and the remaining native panels can then consume these stable
+client boundaries without moving authority into the app.
