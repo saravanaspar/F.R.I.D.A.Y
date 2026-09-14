@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { access, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
@@ -12,12 +12,19 @@ import type {
   ComputerBrowserSupervisorSnapshot,
   ComputerBrowserTabSnapshot,
   ComputerBrowserWindowSnapshot,
+  ComputerBoundingBox,
+  ComputerElement,
+  ComputerElementAction,
   ComputerNodeAdapter,
   ComputerNodeRuntimeSnapshot,
   ComputerObservation,
+  ComputerObservationDelta,
+  ComputerObservationRequest,
   ComputerProcessObservation,
   ComputerResourceSnapshot,
   ComputerScreenDescriptor,
+  ComputerVisualProbeRequest,
+  ComputerVisualProbeResult,
 } from "../contract.js";
 
 const DEFAULT_CDP_URL = "http://127.0.0.1:9222/";
@@ -28,6 +35,10 @@ const BROWSER_ACTION_TIMEOUT_MS = 5_000;
 const BROWSER_ACTION_POLL_MS = 40;
 const BROWSER_INPUT_SETTLE_MS = 50;
 const MAX_DOM_SUMMARY = 12_000;
+const MAX_STRUCTURED_ELEMENTS = 256;
+const MAX_VISUAL_TEXT_ITEMS = 32;
+const ACTION_CONFIDENCE_THRESHOLD = 0.82;
+const VISUAL_PROBE_TOKEN_TTL_MS = 30_000;
 const MAX_PROCESSES = 128;
 const MAX_TABS = 64;
 const PROTECTED_TARGET = /(password|passwd|passcode|otp|one[-_ ]?time|verification|captcha|token|secret|pin)/i;
@@ -36,6 +47,7 @@ const SECRET_NEAR_LABEL = /\b(otp|one[- ]time(?: password| code)?|verification c
 const VALUE_ATTRIBUTE = /\bvalue\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi;
 const SENSITIVE_URL_KEY = /(access[_-]?token|auth|authorization|code|credential|key|otp|pass|password|pin|secret|session|token)/i;
 const SENSITIVE_TITLE = /(captcha|one[- ]time|otp|passcode|password|verification code)/i;
+const HIGH_IMPACT_ACTION = /\b(place\s+order|buy(?:\s+now)?|pay|submit\s+payment|confirm\s+purchase|delete|send|transfer|checkout)\b/i;
 const PAGE_STATE_EXPRESSION = String.raw`(() => ({ href: location.href, readyState: document.readyState }))()`;
 const ACTIVE_ELEMENT_SAFETY_FUNCTION = String.raw`function (expectedSelector) {
   const el = document.activeElement;
@@ -75,6 +87,192 @@ const DOM_SUMMARY_EXPRESSION = String.raw`(() => {
   const text = (root.innerText || root.textContent || "").replace(/\s+/g, " ").trim();
   return text.slice(0, 12000);
 })()`;
+
+const STRUCTURED_ELEMENTS_FUNCTION = String.raw`function (input) {
+  const protectedPattern = /(password|passwd|passcode|otp|one[-_ ]?time|verification|captcha|token|secret|pin)/i;
+  const interactiveSelector = [
+    'a[href]', 'button', 'input:not([type="hidden"])', 'textarea', 'select', 'option',
+    '[role="button"]', '[role="link"]', '[role="checkbox"]', '[role="radio"]',
+    '[role="combobox"]', '[role="textbox"]', '[role="menuitem"]', '[role="tab"]',
+    '[contenteditable="true"]', '[tabindex]:not([tabindex="-1"])'
+  ].join(',');
+  const cssEscape = (value) => globalThis.CSS?.escape ? globalThis.CSS.escape(value) : String(value).replace(/[^A-Za-z0-9_-]/g, (ch) => String.fromCharCode(92) + ch);
+  const unique = (selector) => {
+    try { return document.querySelectorAll(selector).length === 1; } catch { return false; }
+  };
+  const selectorFor = (el) => {
+    if (el.id) {
+      const selector = '#' + cssEscape(el.id);
+      if (unique(selector)) return selector;
+    }
+    for (const attr of ['data-testid', 'data-test', 'aria-label', 'name']) {
+      const value = el.getAttribute(attr);
+      if (!value || value.length > 160) continue;
+      const selector = el.tagName.toLowerCase() + '[' + attr + '=' + JSON.stringify(value) + ']';
+      if (unique(selector)) return selector;
+    }
+    const parts = [];
+    let node = el;
+    for (let depth = 0; node && node.nodeType === 1 && depth < 8; depth += 1) {
+      const tag = node.tagName.toLowerCase();
+      const parent = node.parentElement;
+      if (!parent) { parts.unshift(tag); break; }
+      const siblings = [...parent.children].filter((candidate) => candidate.tagName === node.tagName);
+      const index = siblings.indexOf(node) + 1;
+      parts.unshift(tag + ':nth-of-type(' + Math.max(1, index) + ')');
+      const selector = parts.join(' > ');
+      if (unique(selector)) return selector;
+      node = parent;
+    }
+    return parts.join(' > ');
+  };
+  const rectVisible = (rect, style) => rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+  const roleFor = (el) => {
+    const explicit = el.getAttribute('role');
+    if (explicit) return explicit.toLowerCase();
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'button') return 'button';
+    if (tag === 'a' && el.hasAttribute('href')) return 'link';
+    if (tag === 'textarea') return 'textbox';
+    if (tag === 'select') return 'combobox';
+    if (tag === 'option') return 'option';
+    if (tag === 'input') {
+      const type = (el.getAttribute('type') || 'text').toLowerCase();
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (['button', 'submit', 'reset'].includes(type)) return 'button';
+      return 'textbox';
+    }
+    return tag;
+  };
+  const clean = (value, max = 240) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+  const nameFor = (el) => clean(el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('placeholder') || el.labels?.[0]?.innerText || el.innerText || el.textContent || el.getAttribute('alt') || el.getAttribute('name') || '', 240);
+  const contextFor = (el, name) => {
+    const parent = el.closest('li,article,tr,section,form,[role="row"],[role="listitem"],[role="dialog"]') || el.parentElement;
+    const text = clean(parent?.innerText || parent?.textContent || '', 360);
+    if (!text || text === name) return '';
+    return text;
+  };
+  const actionsFor = (el, role, editable, clickable, scrollable) => {
+    const actions = [];
+    if (clickable) actions.push('click');
+    if (editable) actions.push('type');
+    if (role === 'checkbox' || role === 'radio') actions.push('toggle');
+    if (role === 'combobox' || role === 'option') actions.push('select');
+    if (el.hasAttribute('aria-expanded')) actions.push('expand');
+    if (scrollable) actions.push('scroll');
+    return [...new Set(actions)];
+  };
+  const candidates = [...document.querySelectorAll(input.scope === 'all' ? 'body *' : interactiveSelector)];
+  const near = input.nearSelector ? document.querySelector(input.nearSelector) : null;
+  const nearRect = near?.getBoundingClientRect();
+  const query = clean(input.query || '', 512).toLowerCase();
+  const rows = [];
+  for (const el of candidates) {
+    const rect = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    const visible = rectVisible(rect, style);
+    if (!visible && input.scope !== 'all') continue;
+    const signature = [el.getAttribute('type'), el.getAttribute('name'), el.getAttribute('id'), el.getAttribute('class'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder'), el.getAttribute('role')].filter(Boolean).join(' ');
+    const isProtected = protectedPattern.test(signature);
+    const role = roleFor(el);
+    const name = isProtected ? '[PROTECTED INPUT]' : nameFor(el);
+    const context = isProtected ? '' : contextFor(el, name);
+    const haystack = [role, name, context].join(' ').toLowerCase();
+    if (query && !haystack.includes(query)) continue;
+    const disabled = el.hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true';
+    const editable = !isProtected && (el.matches('input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]),textarea,[contenteditable="true"],[role="textbox"]'));
+    const clickable = !isProtected && (el.matches(interactiveSelector) || typeof el.onclick === 'function');
+    const selectable = !isProtected && (role === 'combobox' || role === 'option' || role === 'radio');
+    const scrollable = !isProtected && ((el.scrollHeight > el.clientHeight + 2) || (el.scrollWidth > el.clientWidth + 2));
+    const draggable = !isProtected && (el.draggable === true || el.getAttribute('aria-grabbed') === 'true');
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const top = document.elementFromPoint(Math.max(0, Math.min(innerWidth - 1, centerX)), Math.max(0, Math.min(innerHeight - 1, centerY)));
+    const obscured = Boolean(top && top !== el && !el.contains(top) && !top.contains(el));
+    let distance = 0;
+    if (nearRect) {
+      const dx = centerX - (nearRect.left + nearRect.width / 2);
+      const dy = centerY - (nearRect.top + nearRect.height / 2);
+      distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance > 700) continue;
+    }
+    const selector = selectorFor(el);
+    if (!selector) continue;
+    const value = isProtected ? undefined : (editable || role === 'combobox' ? clean(el.value || el.getAttribute('aria-valuetext') || '', 240) : undefined);
+    rows.push({
+      selector, role, name, context, value,
+      left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+      pageLeft: rect.left + scrollX, pageTop: rect.top + scrollY,
+      pageRight: rect.right + scrollX, pageBottom: rect.bottom + scrollY,
+      visible, enabled: !disabled, focused: document.activeElement === el,
+      interactive: clickable || editable || selectable || scrollable,
+      clickable, editable, selectable, scrollable, draggable,
+      selected: el.getAttribute('aria-selected') === null ? undefined : el.getAttribute('aria-selected') === 'true',
+      checked: typeof el.checked === 'boolean' ? el.checked : (el.getAttribute('aria-checked') === null ? undefined : el.getAttribute('aria-checked') === 'true'),
+      expanded: el.getAttribute('aria-expanded') === null ? undefined : el.getAttribute('aria-expanded') === 'true',
+      protected: isProtected, obscured, distance,
+      actions: isProtected ? [] : actionsFor(el, role, editable, clickable, scrollable),
+    });
+  }
+  rows.sort((a, b) => (a.distance - b.distance) || (a.top - b.top) || (a.left - b.left));
+  return rows.slice(0, Math.max(1, Math.min(256, Number(input.maxElements) || 80)));
+}`;
+
+const ELEMENT_VALIDATION_FUNCTION = String.raw`function (input) {
+  const protectedPattern = /(password|passwd|passcode|otp|one[-_ ]?time|verification|captcha|token|secret|pin)/i;
+  let el;
+  try { el = document.querySelector(input.selector); } catch { return { found: false }; }
+  if (!el) return { found: false };
+  const clean = (value, max = 240) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+  const signature = [el.getAttribute('type'), el.getAttribute('name'), el.getAttribute('id'), el.getAttribute('class'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder'), el.getAttribute('role')].filter(Boolean).join(' ');
+  const protectedTarget = protectedPattern.test(signature);
+  const rect = el.getBoundingClientRect();
+  const style = getComputedStyle(el);
+  const visible = rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+  const enabled = !el.hasAttribute('disabled') && el.getAttribute('aria-disabled') !== 'true';
+  const centerX = rect.left + rect.width / 2;
+  const centerY = rect.top + rect.height / 2;
+  const top = document.elementFromPoint(Math.max(0, Math.min(innerWidth - 1, centerX)), Math.max(0, Math.min(innerHeight - 1, centerY)));
+  const obscured = Boolean(top && top !== el && !el.contains(top) && !top.contains(el));
+  const name = protectedTarget ? '[PROTECTED INPUT]' : clean(el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('placeholder') || el.labels?.[0]?.innerText || el.innerText || el.textContent || el.getAttribute('alt') || el.getAttribute('name') || '', 240);
+  const parent = el.closest('li,article,tr,section,form,[role="row"],[role="listitem"],[role="dialog"]') || el.parentElement;
+  const context = protectedTarget ? '' : clean(parent?.innerText || parent?.textContent || '', 360);
+  return {
+    found: true, protected: protectedTarget, visible, enabled, obscured,
+    name, context: context && context !== name ? context : '', role: el.getAttribute('role') || input.role || el.tagName.toLowerCase(),
+    x: centerX, y: centerY,
+    left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+    pageLeft: rect.left + scrollX, pageTop: rect.top + scrollY,
+    pageRight: rect.right + scrollX, pageBottom: rect.bottom + scrollY,
+  };
+}`;
+
+const PROBE_REGION_FUNCTION = String.raw`function (input) {
+  const protectedPattern = /(password|passwd|passcode|otp|one[-_ ]?time|verification|captcha|token|secret|pin)/i;
+  const region = input.bbox;
+  const regionArea = Math.max(1, (region.right - region.left) * (region.bottom - region.top));
+  const intersects = (rect) => rect.right > region.left && rect.left < region.right && rect.bottom > region.top && rect.top < region.bottom;
+  const text = [];
+  let unsafe = false;
+  for (const el of document.querySelectorAll('body *')) {
+    const rect = el.getBoundingClientRect();
+    if (!intersects(rect) || rect.width <= 0 || rect.height <= 0) continue;
+    const tag = el.tagName.toLowerCase();
+    const rectArea = rect.width * rect.height;
+    const directControl = ['input', 'textarea', 'select', 'button', 'a', 'label', 'iframe', 'img', 'canvas'].includes(tag)
+      || el.hasAttribute('role') || el.hasAttribute('contenteditable') || el.hasAttribute('aria-label') || el.hasAttribute('title');
+    // Ignore giant layout ancestors so an unrelated password label elsewhere on the page cannot poison a tiny crop.
+    if (!directControl && el.children.length > 0 && rectArea > regionArea * 4) continue;
+    const signature = [tag, el.getAttribute('type'), el.getAttribute('name'), el.getAttribute('id'), el.getAttribute('class'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder'), el.getAttribute('role'), el.getAttribute('src'), el.getAttribute('title')].filter(Boolean).join(' ');
+    const value = String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 512);
+    const nearby = tag === 'canvas' || tag === 'iframe' ? String(el.parentElement?.innerText || el.parentElement?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 512) : '';
+    if (protectedPattern.test(signature) || protectedPattern.test(value) || protectedPattern.test(nearby)) { unsafe = true; break; }
+    if (value && value.length <= 240 && !text.includes(value)) text.push(value);
+    if (text.length >= 32) break;
+  }
+  return { unsafe, text: text.slice(0, 32), scrollX, scrollY, innerWidth, innerHeight };
+}`;
 
 export interface LinuxCommandResult {
   readonly ok: boolean;
@@ -126,6 +324,79 @@ interface BrowserElementPoint {
   readonly actionable?: unknown;
   readonly x?: unknown;
   readonly y?: unknown;
+}
+
+interface BrowserStructuredElement {
+  readonly selector?: unknown;
+  readonly role?: unknown;
+  readonly name?: unknown;
+  readonly value?: unknown;
+  readonly context?: unknown;
+  readonly left?: unknown;
+  readonly top?: unknown;
+  readonly right?: unknown;
+  readonly bottom?: unknown;
+  readonly pageLeft?: unknown;
+  readonly pageTop?: unknown;
+  readonly pageRight?: unknown;
+  readonly pageBottom?: unknown;
+  readonly visible?: unknown;
+  readonly enabled?: unknown;
+  readonly focused?: unknown;
+  readonly interactive?: unknown;
+  readonly clickable?: unknown;
+  readonly editable?: unknown;
+  readonly selectable?: unknown;
+  readonly scrollable?: unknown;
+  readonly draggable?: unknown;
+  readonly selected?: unknown;
+  readonly checked?: unknown;
+  readonly expanded?: unknown;
+  readonly protected?: unknown;
+  readonly obscured?: unknown;
+  readonly actions?: unknown;
+}
+
+interface BrowserElementValidation {
+  readonly found?: unknown;
+  readonly protected?: unknown;
+  readonly visible?: unknown;
+  readonly enabled?: unknown;
+  readonly obscured?: unknown;
+  readonly name?: unknown;
+  readonly context?: unknown;
+  readonly role?: unknown;
+  readonly x?: unknown;
+  readonly y?: unknown;
+  readonly left?: unknown;
+  readonly top?: unknown;
+  readonly right?: unknown;
+  readonly bottom?: unknown;
+  readonly pageLeft?: unknown;
+  readonly pageTop?: unknown;
+  readonly pageRight?: unknown;
+  readonly pageBottom?: unknown;
+}
+
+interface ProviderElementRecord {
+  readonly element: ComputerElement;
+  readonly selector: string;
+  readonly pageBbox: ComputerBoundingBox;
+}
+
+interface ScreenObservationState {
+  readonly observationId: string;
+  readonly requestKey: string;
+  readonly request: ComputerObservationRequest;
+  readonly elementsById: ReadonlyMap<string, ProviderElementRecord>;
+  readonly idsBySelector: ReadonlyMap<string, string>;
+  readonly observation: ComputerObservation;
+}
+
+interface VisualProbeTokenRecord {
+  readonly screenId: string;
+  readonly ref: string;
+  readonly expiresAt: number;
 }
 
 export interface LinuxSwayComputerAdapterOptions {
@@ -557,6 +828,103 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+function finiteBrowserNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function browserBoundingBox(input: BrowserStructuredElement | BrowserElementValidation, page = false): ComputerBoundingBox | undefined {
+  const left = finiteBrowserNumber(page ? input.pageLeft : input.left);
+  const top = finiteBrowserNumber(page ? input.pageTop : input.top);
+  const right = finiteBrowserNumber(page ? input.pageRight : input.right);
+  const bottom = finiteBrowserNumber(page ? input.pageBottom : input.bottom);
+  if (left === undefined || top === undefined || right === undefined || bottom === undefined || right < left || bottom < top) return undefined;
+  return Object.freeze({ left, top, right, bottom });
+}
+
+function providerObservationRequest(input: ComputerObservationRequest | undefined): ComputerObservationRequest {
+  const scope = input?.scope === "all" ? "all" as const : "interactive" as const;
+  const maxElements = Math.max(1, Math.min(MAX_STRUCTURED_ELEMENTS, input?.maxElements ?? 80));
+  const query = input?.query?.trim().slice(0, 512);
+  const near = input?.near?.trim().slice(0, 256);
+  return Object.freeze({
+    scope,
+    ...(query ? { query } : {}),
+    ...(near ? { near } : {}),
+    maxElements,
+  });
+}
+
+function elementConfidence(input: {
+  readonly visible: boolean;
+  readonly enabled: boolean;
+  readonly interactive: boolean;
+  readonly name?: string | undefined;
+  readonly context?: string | undefined;
+  readonly bbox?: ComputerBoundingBox | undefined;
+  readonly obscured: boolean;
+  readonly actions: readonly ComputerElementAction[];
+  readonly protected: boolean;
+}): number {
+  if (input.protected) return 0;
+  let score = 0;
+  if (input.visible) score += 0.15;
+  if (input.enabled) score += 0.1;
+  if (input.interactive) score += 0.2;
+  if (input.actions.length > 0) score += 0.15;
+  if (input.name?.trim()) score += 0.15;
+  if (input.context?.trim()) score += 0.05;
+  if (input.bbox && input.bbox.right > input.bbox.left && input.bbox.bottom > input.bbox.top) score += 0.1;
+  if (!input.obscured) score += 0.1;
+  else score -= 0.25;
+  return Math.max(0, Math.min(1, Math.round(score * 100) / 100));
+}
+
+function elementFingerprint(element: ComputerElement): string {
+  return JSON.stringify({
+    id: element.id,
+    role: element.role,
+    name: element.name,
+    value: element.value,
+    bbox: element.bbox,
+    visible: element.visible,
+    enabled: element.enabled,
+    focused: element.focused,
+    interactive: element.interactive,
+    clickable: element.clickable,
+    editable: element.editable,
+    selectable: element.selectable,
+    scrollable: element.scrollable,
+    draggable: element.draggable,
+    selected: element.selected,
+    checked: element.checked,
+    expanded: element.expanded,
+    protected: element.protected,
+    context: element.context,
+    actions: element.actions,
+    source: element.source,
+    confidence: element.confidence,
+  });
+}
+
+function probeMaxSide(request: ComputerVisualProbeRequest): number {
+  const preset = request.size === "tiny" ? 128
+    : request.size === "medium" ? 512
+      : request.size === "window" ? 1_024
+        : request.size === "full" ? 2_048
+          : 256;
+  return Math.max(64, Math.min(2_048, request.maxSide ?? preset));
+}
+
+function clampProbeBox(box: ComputerBoundingBox, width: number, height: number, margin: number): ComputerBoundingBox {
+  const safeWidth = Math.max(1, width);
+  const safeHeight = Math.max(1, height);
+  const left = Math.max(0, Math.min(safeWidth - 1, box.left - margin));
+  const top = Math.max(0, Math.min(safeHeight - 1, box.top - margin));
+  const right = Math.max(left + 1, Math.min(safeWidth, box.right + margin));
+  const bottom = Math.max(top + 1, Math.min(safeHeight, box.bottom + margin));
+  return Object.freeze({ left, top, right, bottom });
+}
+
 export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapterOptions = {}): ComputerNodeAdapter {
   const environment = { ...(options.environment ?? process.env) };
   const platform = options.platform ?? process.platform;
@@ -577,6 +945,10 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     60_000,
   );
   const targetByScreen = new Map<string, string>();
+  const observationStateByScreen = new Map<string, ScreenObservationState>();
+  const nextElementIdByScreen = new Map<string, number>();
+  const visualProbeTokens = new Map<string, VisualProbeTokenRecord>();
+  let observationSequence = 0;
   let outputGeometry = new Map<string, OutputGeometry>();
   let lastProcesses: readonly ComputerProcessObservation[] = Object.freeze([]);
 
@@ -733,6 +1105,11 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
       const targets = await browserTargets(signal);
       if (targets.some((target) => target.id === existing)) return existing;
       targetByScreen.delete(screenId);
+      observationStateByScreen.delete(screenId);
+      nextElementIdByScreen.delete(screenId);
+      for (const [token, record] of visualProbeTokens.entries()) {
+        if (record.screenId === screenId) visualProbeTokens.delete(token);
+      }
     }
     const geometry = outputGeometry.get(screenId);
     if (!geometry || geometry.kind !== "agent") throw new Error(`Linux Computer Agent output is unavailable: ${screenId}`);
@@ -766,6 +1143,15 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     const exception = cdpExceptionMessage(result);
     if (exception) throw new Error(`browser page evaluation failed: ${sanitizeText(exception, 256)}`);
     return cdpResultValue<T>(result);
+  }
+
+  async function evaluateFunctionValue<T>(
+    targetId: string,
+    functionDeclaration: string,
+    input: unknown,
+    signal?: AbortSignal,
+  ): Promise<T | undefined> {
+    return evaluateValue<T>(targetId, `(${functionDeclaration})(${JSON.stringify(input)})`, signal);
   }
 
   async function callFunctionValue<T>(
@@ -860,16 +1246,181 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     }, signal);
   }
 
-  async function observeScreen(screenId: string, _controlGeneration: number, signal?: AbortSignal): Promise<ComputerObservation> {
+  function currentSemanticRecord(screenId: string, ref: string): Readonly<{ state: ScreenObservationState; record: ProviderElementRecord }> | undefined {
+    if (!/^obs-\d+:e\d+$/.test(ref)) return undefined;
+    const state = observationStateByScreen.get(screenId);
+    if (!state || !ref.startsWith(`${state.observationId}:`)) {
+      throw new Error(`STALE_REF: ${ref}; reinspect_required=true`);
+    }
+    const elementId = ref.slice(state.observationId.length + 1);
+    const record = state.elementsById.get(elementId);
+    if (!record || record.element.ref !== ref) throw new Error(`STALE_REF: ${ref}; reinspect_required=true`);
+    return Object.freeze({ state, record });
+  }
+
+  function resolveNearSelector(screenId: string, near: string | undefined): string | undefined {
+    if (near === undefined) return undefined;
+    const resolved = currentSemanticRecord(screenId, near);
+    if (!resolved) throw new Error("Computer observation near must be a current semantic element ref");
+    return resolved.record.selector;
+  }
+
+  function nextElementId(screenId: string): string {
+    const next = (nextElementIdByScreen.get(screenId) ?? 0) + 1;
+    nextElementIdByScreen.set(screenId, next);
+    return `e${next}`;
+  }
+
+  async function structuredObservation(
+    screenId: string,
+    targetId: string,
+    observationId: string,
+    request: ComputerObservationRequest,
+    nearSelector: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<Readonly<{
+    elements: readonly ComputerElement[];
+    records: ReadonlyMap<string, ProviderElementRecord>;
+    idsBySelector: ReadonlyMap<string, string>;
+  }>> {
+    const rawElements = await evaluateFunctionValue<readonly BrowserStructuredElement[]>(targetId, STRUCTURED_ELEMENTS_FUNCTION, {
+      scope: request.scope ?? "interactive",
+      query: request.query ?? "",
+      nearSelector: nearSelector ?? null,
+      maxElements: request.maxElements ?? 80,
+    }, signal) ?? [];
+    if (!Array.isArray(rawElements)) throw new Error("browser structured inspection returned an invalid element list");
+    const previous = observationStateByScreen.get(screenId);
+    const elements: ComputerElement[] = [];
+    const records = new Map<string, ProviderElementRecord>();
+    const idsBySelector = new Map<string, string>();
+    for (const raw of rawElements.slice(0, MAX_STRUCTURED_ELEMENTS)) {
+      if (!raw || typeof raw !== "object") continue;
+      const selector = typeof raw.selector === "string" ? raw.selector.trim().slice(0, 2_048) : "";
+      const bbox = browserBoundingBox(raw);
+      const pageBbox = browserBoundingBox(raw, true);
+      if (!selector || !bbox || !pageBbox) continue;
+      const previousId = previous?.idsBySelector.get(selector);
+      const elementId = previousId ?? nextElementId(screenId);
+      const role = sanitizeText(typeof raw.role === "string" ? raw.role : "element", 128) || "element";
+      const isProtected = raw.protected === true;
+      const name = sanitizeText(typeof raw.name === "string" ? raw.name : "", 1_024);
+      const context = sanitizeText(typeof raw.context === "string" ? raw.context : "", 2_048);
+      const value = isProtected ? "" : sanitizeText(typeof raw.value === "string" ? raw.value : "", 2_048);
+      const allowedActions = new Set<ComputerElementAction>(["click", "type", "toggle", "select", "expand", "scroll"]);
+      const actions: ComputerElementAction[] = [];
+      if (Array.isArray(raw.actions)) {
+        for (const candidate of raw.actions as readonly unknown[]) {
+          if (typeof candidate !== "string" || !allowedActions.has(candidate as ComputerElementAction)) continue;
+          const action = candidate as ComputerElementAction;
+          if (!actions.includes(action)) actions.push(action);
+        }
+      }
+      const visible = raw.visible === true;
+      const enabled = raw.enabled !== false;
+      const interactive = raw.interactive === true;
+      const confidence = elementConfidence({
+        visible,
+        enabled,
+        interactive,
+        ...(name ? { name } : {}),
+        ...(context ? { context } : {}),
+        bbox,
+        obscured: raw.obscured === true,
+        actions,
+        protected: isProtected,
+      });
+      const element = Object.freeze({
+        id: elementId,
+        ref: `${observationId}:${elementId}`,
+        role,
+        ...(name ? { name } : {}),
+        ...(value ? { value } : {}),
+        bbox,
+        visible,
+        enabled,
+        focused: raw.focused === true,
+        interactive,
+        clickable: raw.clickable === true,
+        editable: raw.editable === true,
+        selectable: raw.selectable === true,
+        scrollable: raw.scrollable === true,
+        draggable: raw.draggable === true,
+        ...(typeof raw.selected === "boolean" ? { selected: raw.selected } : {}),
+        ...(typeof raw.checked === "boolean" ? { checked: raw.checked } : {}),
+        ...(typeof raw.expanded === "boolean" ? { expanded: raw.expanded } : {}),
+        ...(isProtected ? { protected: true } : {}),
+        ...(context ? { context } : {}),
+        actions: Object.freeze(isProtected ? [] : actions),
+        source: "dom" as const,
+        confidence,
+      } satisfies ComputerElement);
+      elements.push(element);
+      records.set(elementId, Object.freeze({ element, selector, pageBbox }));
+      idsBySelector.set(selector, elementId);
+    }
+    return Object.freeze({
+      elements: Object.freeze(elements),
+      records,
+      idsBySelector,
+    });
+  }
+
+  function observationDelta(
+    previous: ScreenObservationState | undefined,
+    requestKey: string,
+    elements: readonly ComputerElement[],
+    records: ReadonlyMap<string, ProviderElementRecord>,
+  ): ComputerObservationDelta | undefined {
+    if (!previous || previous.requestKey !== requestKey) return undefined;
+    const added: ComputerElement[] = [];
+    const updated: { previousRef: string; element: ComputerElement }[] = [];
+    let retained = 0;
+    for (const element of elements) {
+      const before = previous.elementsById.get(element.id)?.element;
+      if (!before) {
+        added.push(element);
+      } else if (elementFingerprint(before) !== elementFingerprint(element)) {
+        updated.push(Object.freeze({ previousRef: before.ref, element }));
+      } else {
+        retained += 1;
+      }
+    }
+    const removedIds = [...previous.elementsById.keys()].filter((id) => !records.has(id));
+    return Object.freeze({
+      baseObservationId: previous.observationId,
+      added: Object.freeze(added),
+      updated: Object.freeze(updated),
+      removedIds: Object.freeze(removedIds),
+      retained,
+    });
+  }
+
+  async function observeScreen(
+    screenId: string,
+    _controlGeneration: number,
+    signal?: AbortSignal,
+    rawRequest?: ComputerObservationRequest,
+  ): Promise<ComputerObservation> {
     signal?.throwIfAborted();
     const targetId = await ensureTarget(screenId, signal);
-    const [rawSummary, rawUrl, targets] = await Promise.all([
-      evaluateValue<string>(targetId, DOM_SUMMARY_EXPRESSION, signal),
+    const request = providerObservationRequest(rawRequest);
+    const nearSelector = resolveNearSelector(screenId, request.near);
+    const requestKey = JSON.stringify({
+      scope: request.scope,
+      query: request.query ?? "",
+      nearSelector: nearSelector ?? "",
+      maxElements: request.maxElements,
+    });
+    const previous = observationStateByScreen.get(screenId);
+    const observationId = `obs-${++observationSequence}`;
+    const [rawSummary, rawUrl, targets, structured] = await Promise.all([
+      rawRequest === undefined ? evaluateValue<string>(targetId, DOM_SUMMARY_EXPRESSION, signal) : Promise.resolve(undefined),
       pageUrl(targetId, signal),
       browserTargets(signal),
+      structuredObservation(screenId, targetId, observationId, request, nearSelector, signal),
     ]);
     const target = targets.find((candidate) => candidate.id === targetId);
-    const summary = rawSummary ?? "";
     const currentUrl = rawUrl || target?.url || "about:blank";
     const tabs = target ? Object.freeze([Object.freeze({
       id: target.id,
@@ -877,9 +1428,11 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
       url: sanitizeUrl(target.url),
       active: true,
     })]) : Object.freeze([]);
-    return Object.freeze({
+    const delta = observationDelta(previous, requestKey, structured.elements, structured.records);
+    const observation = Object.freeze({
       observedAt: now().toISOString(),
       screenId,
+      observationId,
       safety: Object.freeze({
         protectedInputOmitted: true as const,
         keystrokesOmitted: true as const,
@@ -887,10 +1440,21 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
         sensitiveScreenshotOmitted: true as const,
       }),
       url: sanitizeUrl(currentUrl),
-      domSummary: sanitizeText(summary, MAX_DOM_SUMMARY),
+      ...(rawSummary === undefined ? {} : { domSummary: sanitizeText(rawSummary, MAX_DOM_SUMMARY) }),
       tabs,
+      elements: structured.elements,
+      ...(delta === undefined ? {} : { delta }),
       processes: lastProcesses,
-    });
+    } satisfies ComputerObservation);
+    observationStateByScreen.set(screenId, Object.freeze({
+      observationId,
+      requestKey,
+      request,
+      elementsById: structured.records,
+      idsBySelector: structured.idsBySelector,
+      observation,
+    }));
+    return observation;
   }
 
   async function assertActiveElementSafe(targetId: string, expectedSelector?: string, signal?: AbortSignal): Promise<void> {
@@ -904,11 +1468,97 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     if (expectedSelector !== undefined && value?.expected !== true) throw new Error(`browser target could not be focused: ${expectedSelector}`);
   }
 
+  async function validateStructuredTarget(
+    targetId: string,
+    record: ProviderElementRecord,
+    action: ComputerElementAction,
+    signal?: AbortSignal,
+  ): Promise<Readonly<{ selector: string; point: Readonly<{ x: number; y: number }>; bbox: ComputerBoundingBox; confidence: number }>> {
+    if (!record.element.actions.includes(action)) throw new Error(`semantic target does not support ${action}: ${record.element.ref}`);
+    const live = await evaluateFunctionValue<BrowserElementValidation>(targetId, ELEMENT_VALIDATION_FUNCTION, {
+      selector: record.selector,
+      role: record.element.role,
+    }, signal);
+    if (live?.found !== true) throw new Error(`STALE_REF: ${record.element.ref}; reinspect_required=true`);
+    if (live.protected === true) throw new Error("protected browser target requires human takeover");
+    if (live.visible !== true || live.enabled !== true) throw new Error(`STALE_REF: ${record.element.ref}; target_not_actionable=true`);
+    const liveName = sanitizeText(typeof live.name === "string" ? live.name : "", 1_024);
+    const liveContext = sanitizeText(typeof live.context === "string" ? live.context : "", 2_048);
+    const expectedName = record.element.name ?? "";
+    const expectedContext = record.element.context ?? "";
+    if (expectedName !== liveName || expectedContext !== liveContext) {
+      throw new Error(`STALE_REF: ${record.element.ref}; semantic_target_changed=true`);
+    }
+    const x = finiteBrowserNumber(live.x);
+    const y = finiteBrowserNumber(live.y);
+    const bbox = browserBoundingBox(live);
+    if (x === undefined || y === undefined || !bbox) throw new Error(`STALE_REF: ${record.element.ref}; target_geometry_missing=true`);
+    const confidence = elementConfidence({
+      visible: true,
+      enabled: true,
+      interactive: record.element.interactive,
+      ...(record.element.name ? { name: record.element.name } : {}),
+      ...(record.element.context ? { context: record.element.context } : {}),
+      bbox,
+      obscured: live.obscured === true,
+      actions: record.element.actions,
+      protected: false,
+    });
+    return Object.freeze({ selector: record.selector, point: Object.freeze({ x, y }), bbox, confidence: Math.min(record.element.confidence, confidence) });
+  }
+
+  function pruneVisualProbeTokens(): void {
+    const time = Date.now();
+    for (const [token, record] of visualProbeTokens.entries()) {
+      if (record.expiresAt <= time) visualProbeTokens.delete(token);
+    }
+  }
+
+  function consumeVisualProbeToken(token: string, screenId: string, ref: string): void {
+    pruneVisualProbeTokens();
+    const record = visualProbeTokens.get(token);
+    if (!record || record.screenId !== screenId || record.ref !== ref) throw new Error("VISUAL_PROBE_TOKEN_INVALID");
+    visualProbeTokens.delete(token);
+  }
+
+  function gatedSemanticAction(
+    screenId: string,
+    resolved: Readonly<{ state: ScreenObservationState; record: ProviderElementRecord }>,
+    confidence: number,
+    highImpactEligible: boolean,
+    probeToken: string | undefined,
+  ): ComputerBrowserActionResult | undefined {
+    const highImpact = highImpactEligible && HIGH_IMPACT_ACTION.test(`${resolved.record.element.name ?? ""} ${resolved.record.element.context ?? ""}`);
+    const lowConfidence = confidence < ACTION_CONFIDENCE_THRESHOLD;
+    if (!highImpact && !lowConfidence) {
+      if (probeToken !== undefined) consumeVisualProbeToken(probeToken, screenId, resolved.record.element.ref);
+      return undefined;
+    }
+    if (probeToken !== undefined) {
+      consumeVisualProbeToken(probeToken, screenId, resolved.record.element.ref);
+      return undefined;
+    }
+    return Object.freeze({
+      mode: "cdp" as const,
+      performed: false,
+      confidence,
+      visualProbeRequired: Object.freeze({
+        ref: resolved.record.element.ref,
+        reason: highImpact ? "high-impact-action" as const : "low-confidence" as const,
+        recommendedSize: highImpact ? "small" as const : "tiny" as const,
+      }),
+      observation: resolved.state.observation,
+    });
+  }
+
   async function runBrowserAction(request: ComputerBrowserActionRequest): Promise<ComputerBrowserActionResult> {
     request.signal?.throwIfAborted();
     if (!request.automationOrder.includes("cdp")) throw new Error("Linux Sway provider requires CDP automation");
     const targetId = await ensureTarget(request.screenId, request.signal);
+    const beforeState = observationStateByScreen.get(request.screenId);
+    const beforeUrl = beforeState?.observation.url ?? await pageUrl(targetId, request.signal);
     const action: ComputerBrowserAction = request.action;
+    let actionConfidence: number | undefined;
     if (action.kind === "navigate") {
       const requestedUrl = safeNavigationUrl(action.url);
       const previousUrl = await pageUrl(targetId, request.signal);
@@ -916,27 +1566,199 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
       const error = navigationError(navigation);
       if (error) throw new Error(`browser navigation failed: ${sanitizeText(error, 256)}`);
       await waitForPageReady(targetId, request.signal, { previousUrl, requestedUrl });
-    } else if (action.kind === "click") {
-      const previousUrl = await pageUrl(targetId, request.signal);
-      const point = await elementPoint(targetId, action.target, "protected browser target requires human takeover", request.signal);
-      await dispatchClick(targetId, point, request.signal);
-      await waitForPageReady(targetId, request.signal, { previousUrl, minimumDelayMs: BROWSER_INPUT_SETTLE_MS });
-    } else if (action.kind === "type") {
-      if (action.sensitive === true) throw new Error("protected browser input requires human takeover");
-      const point = await elementPoint(targetId, action.target, "protected browser input requires human takeover", request.signal);
-      await dispatchClick(targetId, point, request.signal);
-      await assertActiveElementSafe(targetId, action.target, request.signal);
-      await cdp.targetCommand(targetId, "Input.insertText", { text: action.text }, request.signal);
-      await delay(BROWSER_INPUT_SETTLE_MS, request.signal);
+    } else if (action.kind === "click" || action.kind === "type") {
+      const semantic = currentSemanticRecord(request.screenId, action.target);
+      let selector = action.target;
+      let point: Readonly<{ x: number; y: number }>;
+      if (semantic) {
+        const validated = await validateStructuredTarget(targetId, semantic.record, action.kind === "click" ? "click" : "type", request.signal);
+        selector = validated.selector;
+        point = validated.point;
+        actionConfidence = validated.confidence;
+        const gated = gatedSemanticAction(request.screenId, semantic, validated.confidence, action.kind === "click", action.visualProbeToken);
+        if (gated) return gated;
+      } else {
+        point = await elementPoint(targetId, selector, action.kind === "click" ? "protected browser target requires human takeover" : "protected browser input requires human takeover", request.signal);
+      }
+      if (action.kind === "click") {
+        const previousUrl = await pageUrl(targetId, request.signal);
+        await dispatchClick(targetId, point, request.signal);
+        await waitForPageReady(targetId, request.signal, { previousUrl, minimumDelayMs: BROWSER_INPUT_SETTLE_MS });
+      } else {
+        if (action.sensitive === true) throw new Error("protected browser input requires human takeover");
+        await dispatchClick(targetId, point, request.signal);
+        await assertActiveElementSafe(targetId, selector, request.signal);
+        await cdp.targetCommand(targetId, "Input.insertText", { text: action.text }, request.signal);
+        await delay(BROWSER_INPUT_SETTLE_MS, request.signal);
+      }
     } else if (action.kind === "press") {
       const key = action.key.trim();
       if (!key || key.length > 64 || /[\0\r\n]/.test(key)) throw new Error("browser key is invalid");
-      await assertActiveElementSafe(targetId, undefined, request.signal);
+      const activationKey = /^(enter|numpadenter|space|spacebar)$/i.test(key);
+      if (activationKey && !action.target) throw new Error("browser activation key requires a current target ref");
+      if (action.target) {
+        const semantic = currentSemanticRecord(request.screenId, action.target);
+        if (semantic) {
+          const validationAction = semantic.record.element.actions.includes("click") ? "click"
+            : semantic.record.element.actions.includes("type") ? "type"
+              : semantic.record.element.actions.includes("scroll") ? "scroll"
+                : semantic.record.element.actions[0];
+          if (!validationAction) throw new Error(`semantic target is not actionable: ${action.target}`);
+          const validated = await validateStructuredTarget(targetId, semantic.record, validationAction, request.signal);
+          actionConfidence = validated.confidence;
+          const gated = gatedSemanticAction(request.screenId, semantic, validated.confidence, activationKey, action.visualProbeToken);
+          if (gated) return gated;
+          await assertActiveElementSafe(targetId, validated.selector, request.signal);
+        } else {
+          await assertActiveElementSafe(targetId, action.target, request.signal);
+        }
+      } else {
+        await assertActiveElementSafe(targetId, undefined, request.signal);
+      }
       await cdp.targetCommand(targetId, "Input.dispatchKeyEvent", keyEventParams(key, "keyDown"), request.signal);
       await cdp.targetCommand(targetId, "Input.dispatchKeyEvent", keyEventParams(key, "keyUp"), request.signal);
       await delay(BROWSER_INPUT_SETTLE_MS, request.signal);
+    } else if (action.kind === "scroll") {
+      let point: Readonly<{ x: number; y: number }> = Object.freeze({ x: 640, y: 360 });
+      if (action.target) {
+        const semantic = currentSemanticRecord(request.screenId, action.target);
+        if (semantic) {
+          const validated = await validateStructuredTarget(targetId, semantic.record, "scroll", request.signal);
+          actionConfidence = validated.confidence;
+          const gated = gatedSemanticAction(request.screenId, semantic, validated.confidence, false, action.visualProbeToken);
+          if (gated) return gated;
+          point = validated.point;
+        } else {
+          point = await elementPoint(targetId, action.target, "protected browser target requires human takeover", request.signal);
+        }
+      } else {
+        const viewport = await evaluateValue<{ readonly width?: unknown; readonly height?: unknown }>(targetId, "({width: innerWidth, height: innerHeight})", request.signal);
+        const width = finiteBrowserNumber(viewport?.width) ?? 1_280;
+        const height = finiteBrowserNumber(viewport?.height) ?? 720;
+        point = Object.freeze({ x: width / 2, y: height / 2 });
+      }
+      await cdp.targetCommand(targetId, "Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        x: point.x,
+        y: point.y,
+        deltaX: action.deltaX ?? 0,
+        deltaY: action.deltaY,
+      }, request.signal);
+      await delay(BROWSER_INPUT_SETTLE_MS, request.signal);
     }
-    return Object.freeze({ mode: "cdp" as const, observation: await observeScreen(request.screenId, request.controlGeneration, request.signal) });
+    const observation = await observeScreen(
+      request.screenId,
+      request.controlGeneration,
+      request.signal,
+      beforeState?.request,
+    );
+    const afterUrl = observation.url;
+    const delta = observation.delta;
+    const structuralChange = Boolean(delta && (delta.added.length > 0 || delta.updated.length > 0 || delta.removedIds.length > 0));
+    return Object.freeze({
+      mode: "cdp" as const,
+      performed: true,
+      ...(actionConfidence === undefined ? {} : { confidence: actionConfidence }),
+      verification: Object.freeze({ structuralChange, urlChanged: beforeUrl !== afterUrl }),
+      observation,
+    });
+  }
+
+  async function visualProbe(request: ComputerVisualProbeRequest): Promise<ComputerVisualProbeResult> {
+    request.signal?.throwIfAborted();
+    const targetId = await ensureTarget(request.screenId, request.signal);
+    let state = observationStateByScreen.get(request.screenId);
+    if (!state) {
+      await observeScreen(request.screenId, request.controlGeneration, request.signal, providerObservationRequest(undefined));
+      state = observationStateByScreen.get(request.screenId);
+    }
+    if (!state) throw new Error("Computer visual probe could not establish an observation");
+    let sourceBox: ComputerBoundingBox;
+    let ref: string | undefined;
+    let confidence = 1;
+    if (request.ref !== undefined) {
+      const semantic = currentSemanticRecord(request.screenId, request.ref);
+      if (!semantic) throw new Error("Computer visual probe ref must be a current semantic element ref");
+      const action = semantic.record.element.actions.includes("click") ? "click"
+        : semantic.record.element.actions.includes("type") ? "type"
+          : semantic.record.element.actions.includes("scroll") ? "scroll"
+            : semantic.record.element.actions[0];
+      if (!action) throw new Error(`semantic target is not probeable: ${request.ref}`);
+      const live = await validateStructuredTarget(targetId, semantic.record, action, request.signal);
+      sourceBox = live.bbox;
+      ref = request.ref;
+      confidence = live.confidence;
+    } else if (request.bbox !== undefined) {
+      sourceBox = request.bbox;
+    } else {
+      throw new Error("Computer visual probe requires ref or bbox");
+    }
+    const viewport = await evaluateValue<{ readonly width?: unknown; readonly height?: unknown }>(targetId, "({width: innerWidth, height: innerHeight})", request.signal);
+    const viewportWidth = Math.max(1, finiteBrowserNumber(viewport?.width) ?? outputGeometry.get(request.screenId)?.width ?? 1_280);
+    const viewportHeight = Math.max(1, finiteBrowserNumber(viewport?.height) ?? outputGeometry.get(request.screenId)?.height ?? 720);
+    const fullWindow = request.size === "window" || request.size === "full";
+    const crop = fullWindow
+      ? Object.freeze({ left: 0, top: 0, right: viewportWidth, bottom: viewportHeight })
+      : clampProbeBox(sourceBox, viewportWidth, viewportHeight, request.includeContext === false ? 8 : 32);
+    const region = await evaluateFunctionValue<{
+      readonly unsafe?: unknown;
+      readonly text?: unknown;
+      readonly scrollX?: unknown;
+      readonly scrollY?: unknown;
+    }>(targetId, PROBE_REGION_FUNCTION, { bbox: crop }, request.signal);
+    if (region?.unsafe === true) throw new Error("protected or challenge visual region requires human takeover");
+    const visibleText = Array.isArray(region?.text)
+      ? Object.freeze(region.text.filter((value): value is string => typeof value === "string").map((value) => sanitizeText(value, 1_024)).filter(Boolean).slice(0, MAX_VISUAL_TEXT_ITEMS))
+      : Object.freeze([]);
+    const maxSide = probeMaxSide(request);
+    const cropWidth = Math.max(1, crop.right - crop.left);
+    const cropHeight = Math.max(1, crop.bottom - crop.top);
+    const scale = Math.min(1, maxSide / Math.max(cropWidth, cropHeight));
+    let image: ComputerVisualProbeResult["image"];
+    if (request.return === "image") {
+      const scrollX = finiteBrowserNumber(region?.scrollX) ?? 0;
+      const scrollY = finiteBrowserNumber(region?.scrollY) ?? 0;
+      const raw = await cdp.targetCommand(targetId, "Page.captureScreenshot", {
+        format: "png",
+        fromSurface: true,
+        captureBeyondViewport: false,
+        clip: {
+          x: crop.left + scrollX,
+          y: crop.top + scrollY,
+          width: cropWidth,
+          height: cropHeight,
+          scale,
+        },
+      }, request.signal);
+      const data = raw && typeof raw === "object" && typeof (raw as { data?: unknown }).data === "string"
+        ? (raw as { data: string }).data
+        : "";
+      if (!data) throw new Error("Chromium CDP did not return visual probe image data");
+      image = Object.freeze({ data, mimeType: "image/png" as const });
+    }
+    let probeToken: string | undefined;
+    if (ref) {
+      pruneVisualProbeTokens();
+      probeToken = `probe-${randomUUID()}`;
+      visualProbeTokens.set(probeToken, Object.freeze({
+        screenId: request.screenId,
+        ref,
+        expiresAt: Date.now() + VISUAL_PROBE_TOKEN_TTL_MS,
+      }));
+    }
+    return Object.freeze({
+      observationId: state.observationId,
+      safety: Object.freeze({ protectedRegionOmitted: true as const, challengeRegionOmitted: true as const }),
+      ...(ref === undefined ? {} : { ref }),
+      bbox: crop,
+      width: Math.max(1, Math.round(cropWidth * scale)),
+      height: Math.max(1, Math.round(cropHeight * scale)),
+      targetMatch: true,
+      confidence,
+      visibleText,
+      ...(probeToken === undefined ? {} : { probeToken }),
+      ...(image === undefined ? {} : { image }),
+    });
   }
 
   async function doctor(signal?: AbortSignal): Promise<readonly string[]> {
@@ -984,7 +1806,7 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
         accessibility: false,
         cdp: true,
         visualControl: false,
-        screenCapture: false,
+        screenCapture: true,
         rawInput: false,
         virtualDisplays: true,
         managedLifecycle: true,
@@ -1000,6 +1822,7 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     snapshot,
     observeScreen,
     runBrowserAction,
+    visualProbe,
     ...(options.runTool === undefined ? {} : { runTool: runExistingTool }),
     ...(options.cleanupRunProcesses === undefined ? {} : { cleanupRunProcesses: cleanupExistingRun }),
     doctor,

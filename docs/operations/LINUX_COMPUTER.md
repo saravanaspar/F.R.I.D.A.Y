@@ -8,9 +8,11 @@ The provider is capability-honest: CDP is the required browser baseline, while P
 
 Run FRIDAY, Sway, and Chromium as the ordinary user, never root. CDP is restricted to loopback HTTP; the provider rejects a non-loopback `FRIDAY_COMPUTER_CDP_URL`. Chromium uses a dedicated shared FRIDAY profile, so Human and Agent windows share the FRIDAY browser login state without locking the person's unrelated Chrome/Chromium profile.
 
-The provider does not return raw screenshot bytes and does not record human keystrokes. DOM observation removes all input values and protected/captcha-shaped nodes before it is returned. A second provider-side redaction pass removes password/OTP/token/PIN/CAPTCHA assignments and sensitive URL parameters/titles before the provider sets the mandatory observation-safety attestation. Typing into password/OTP/CAPTCHA/token-shaped targets is rejected, protected click targets are rejected, and key presses are blocked while a protected field owns focus; those interactions must use Phase 4 human takeover.
+Normal provider observations are screenshot-free and do not record human keystrokes. DOM inspection removes input values and protected/CAPTCHA-shaped nodes before returning bounded semantic elements. Each structured observation carries an observation id plus scoped refs such as `obs-12:e7`; element-targeted model actions use those refs, and the provider revalidates the live element immediately before acting so stale refs, semantic drift, hidden/obscured targets, and unsafe protected regions fail closed. A second provider-side redaction pass removes password/OTP/token/PIN/CAPTCHA assignments and sensitive URL parameters/titles before the provider sets the mandatory observation-safety attestation. Typing into password/OTP/CAPTCHA/token-shaped targets is rejected, protected click targets are rejected, and key presses are blocked while a protected field owns focus; those interactions must use Phase 4 human takeover.
 
-CDP actions use browser input primitives rather than page-script `element.click()` shortcuts: click and focus are driven with `Input.dispatchMouseEvent`, text uses `Input.insertText`, named keys carry their CDP key/code/virtual-key metadata, and navigation waits for a live document state before the provider re-observes the page. `FRIDAY_COMPUTER_BROWSER_ACTION_TIMEOUT_MS` can raise the default five-second settle timeout up to 60 seconds for unusually slow local/browser environments.
+When structure is insufficient, the provider can expose a bounded action-time visual probe instead of a full-screen image. The requested region is clamped to the Chromium viewport and protected/challenge regions are refused. Text mode returns safe local target/context verification for a non-vision model; image mode returns only the bounded PNG crop as native current-turn tool content. Successful ref probes issue a short-lived one-use token bound to that exact screen/ref so a gated action can be retried once. Turn Loop removes image parts before durable Session persistence while keeping safe text metadata.
+
+CDP actions use browser input primitives rather than page-script `element.click()` shortcuts: click and focus are driven with `Input.dispatchMouseEvent`, text uses `Input.insertText`, named keys carry their CDP key/code/virtual-key metadata, and navigation waits for a live document state before the provider re-observes the page. Post-action observations include a bounded structural delta for verification rather than forcing a full UI resend. `FRIDAY_COMPUTER_BROWSER_ACTION_TIMEOUT_MS` can raise the default five-second settle timeout up to 60 seconds for unusually slow local/browser environments.
 
 ## Host packages
 
@@ -163,6 +165,9 @@ Implemented so far:
 - Sway physical/headless output discovery and per-screen Chromium CDP target allocation;
 - shared persistent FRIDAY Chromium profile;
 - CPU/RAM/renderer admission telemetry;
+- bounded semantic DOM observations with observation-scoped refs, confidence, geometry, and structural deltas;
+- stale-ref/semantic-drift revalidation plus obscured/high-impact action gating;
+- bounded CDP micro-vision probes with protected-region refusal and one-use confirmation tokens;
 - provider-side observation redaction and protected-input refusal;
 - real CDP mouse/key browser input with action settle/readiness checks;
 - provider-specific Computer Doctor details plus canonical `friday doctor` integration;
@@ -171,4 +176,4 @@ Implemented so far:
 - Ubuntu/Kubuntu Chromium Snap-aware launcher/profile handling.
 - real-host Chromium action/safety conformance against a loopback-only synthetic page.
 
-Phase 5 implementation is complete in the repository. Remaining work is host validation rather than a new core authority: run the smoke and real-Chromium conformance commands on the target Raspberry Pi 4, and enable optional Playwright/AT-SPI/PipeWire/WebRTC adapters when those host packages are installed. The mandatory CDP, redaction, lease/generation, execution delegation, run-scoped cleanup, deployment, and lifecycle paths are covered by the checked-in tests and scripts.
+Phase 5 implementation is complete in the repository. Remaining work is host validation rather than a new core authority: run the smoke and real-Chromium conformance commands on the target Raspberry Pi 4, and enable optional Playwright/AT-SPI/PipeWire/WebRTC adapters when those host packages are installed. The mandatory CDP, structured observation/ref safety, bounded visual-probe policy, redaction, lease/generation, execution delegation, run-scoped cleanup, deployment, and lifecycle paths are covered by checked-in tests; the real-host conformance runner continues to validate the baseline CDP action/redaction path against loopback Chromium.

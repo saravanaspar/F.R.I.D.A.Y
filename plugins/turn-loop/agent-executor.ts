@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { reportOperationalError } from "@friday/operational-errors";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -59,6 +59,7 @@ const DEFAULT_CACHE_SIZE = 24;
 const DEFAULT_MAX_SUBAGENT_DEPTH = 2;
 const DEFAULT_MAX_CONCURRENT_SUBAGENTS = 4;
 const MAX_CONTRIBUTED_TOOL_OUTPUT_CHARS = 64_000;
+const MAX_CONTRIBUTED_TOOL_IMAGE_CHARS = 16 * 1024 * 1024;
 const MAX_PERSISTED_INPUT_CONTEXT_CHARS = 24_000;
 const MAX_PERSISTED_INPUT_CONTEXTS = 12;
 const PERSISTED_AGENT_INPUT_PREFIX = "friday.agent-input:";
@@ -143,6 +144,15 @@ function positiveInteger(value: number | undefined, fallback: number, label: str
     throw new Error(`${label} must be an integer between 1 and 1000`);
   }
   return value;
+}
+
+/** @internal Stable per-runtime Computer owner id; child runtimes must never share a screen lease accidentally. */
+export function computerExecutionOwnerId(baseOwnerId: string, agentId: string, depth: number): string {
+  if (depth <= 0) return baseOwnerId;
+  const readableAgent = agentId.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40) || "subagent";
+  const digest = createHash("sha256").update(`${baseOwnerId}\0${agentId}\0${depth}`).digest("hex").slice(0, 12);
+  const suffix = `:agent:${readableAgent}:${digest}`;
+  return `${baseOwnerId.slice(0, Math.max(1, 160 - suffix.length))}${suffix}`;
 }
 
 const MAX_COMPUTER_LEASE_RENEW_INTERVAL_MS = 5 * 60_000;
@@ -411,10 +421,25 @@ function contributionTools(
       parameters: parameters as never,
       async execute(_toolCallId, params, signal) {
         const result = await contribution.execute(params as never, signal, executionContext);
-        const text = renderContributedToolOutput(result.output);
-        if (result.isError === true) throw new Error(text);
+        const renderedOutput = result.output === undefined ? undefined : renderContributedToolOutput(result.output);
+        const content = result.content === undefined
+          ? [{ type: "text" as const, text: renderedOutput ?? "null" }]
+          : result.content.map((item) => {
+              if (item.type === "text") return { type: "text" as const, text: renderContributedToolOutput(item.text) };
+              if (!item.mimeType.startsWith("image/")) throw new Error(`Agent tool ${name} returned a non-image MIME type`);
+              if (!item.data || item.data.length > MAX_CONTRIBUTED_TOOL_IMAGE_CHARS) {
+                throw new Error(`Agent tool ${name} returned an image larger than the contribution limit`);
+              }
+              return { type: "image" as const, data: item.data, mimeType: item.mimeType };
+            });
+        if (result.isError === true) {
+          const message = renderedOutput
+            ?? content.find((item): item is { type: "text"; text: string } => item.type === "text")?.text
+            ?? `Agent tool ${name} failed`;
+          throw new Error(message);
+        }
         return {
-          content: [{ type: "text", text }],
+          content,
           details: { contribution: id, tool: name },
           ...(result.terminate === undefined ? {} : { terminate: result.terminate }),
         };
@@ -454,8 +479,9 @@ function combinedAfterFailure(
   };
 }
 
-function persistableAgentMessage(message: AgentMessage): AgentMessage {
-  if (message.role !== "user") return message;
+/** @internal Image bytes are current-turn context only; never persist user/tool visual payloads into durable Session history. */
+export function persistableAgentMessage(message: AgentMessage): AgentMessage {
+  if (message.role !== "user" && message.role !== "toolResult") return message;
   if (!Array.isArray(message.content)) return message;
   const content = message.content.filter((part) => {
     if (!part || typeof part !== "object") return true;
@@ -1001,7 +1027,8 @@ export function createAgentTurnExecutor(
               };
           const hasComputerDemand = computerDemand !== undefined && Object.keys(computerDemand).length > 0;
           const effectiveCwd = projectWorkspace?.workspacePath ?? cwd;
-          const computerOwnerId = turnContext?.turn.resumedJobId ?? jobId ?? sessionId;
+          const baseComputerOwnerId = turnContext?.turn.resumedJobId ?? jobId ?? sessionId;
+          const computerOwnerId = computerExecutionOwnerId(baseComputerOwnerId, agentId, runtimeOptions.depth ?? 0);
           let computerService: ComputerService | undefined;
           let computerExecution: ComputerExecutionBinding | undefined;
           let computerLeaseKeeper: { stop(): Promise<void> } | undefined;

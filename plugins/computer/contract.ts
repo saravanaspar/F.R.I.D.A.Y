@@ -124,9 +124,73 @@ export interface ComputerObservationSafety {
   readonly sensitiveScreenshotOmitted: true;
 }
 
+export interface ComputerBoundingBox {
+  readonly left: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+}
+
+export type ComputerElementSource = "dom" | "aria" | "atspi" | "uia" | "visual";
+export type ComputerElementAction = "click" | "type" | "toggle" | "select" | "expand" | "scroll";
+
+/** Canonical cross-platform UI element shape exposed to the planning model. */
+export interface ComputerElement {
+  /** Stable local id reused across observations while the provider can prove element continuity. */
+  readonly id: string;
+  /** Observation-scoped action reference, for example `obs-12:e7`. */
+  readonly ref: string;
+  readonly role: string;
+  readonly name?: string | undefined;
+  readonly value?: string | undefined;
+  readonly bbox?: ComputerBoundingBox | undefined;
+  readonly visible: boolean;
+  readonly enabled: boolean;
+  readonly focused: boolean;
+  readonly interactive: boolean;
+  readonly clickable: boolean;
+  readonly editable: boolean;
+  readonly selectable: boolean;
+  readonly scrollable: boolean;
+  readonly draggable: boolean;
+  readonly selected?: boolean | undefined;
+  readonly checked?: boolean | undefined;
+  readonly expanded?: boolean | undefined;
+  readonly protected?: boolean | undefined;
+  readonly context?: string | undefined;
+  readonly actions: readonly ComputerElementAction[];
+  readonly source: ComputerElementSource;
+  /** Provider confidence that this semantic element maps uniquely to the intended live control. */
+  readonly confidence: number;
+}
+
+export interface ComputerObservationDeltaUpdate {
+  readonly previousRef: string;
+  readonly element: ComputerElement;
+}
+
+export interface ComputerObservationDelta {
+  readonly baseObservationId: string;
+  readonly added: readonly ComputerElement[];
+  readonly updated: readonly ComputerObservationDeltaUpdate[];
+  readonly removedIds: readonly string[];
+  readonly retained: number;
+}
+
+export interface ComputerObservationRequest {
+  /** Interactive-only is the token-efficient default. */
+  readonly scope?: "interactive" | "all" | undefined;
+  readonly query?: string | undefined;
+  /** Restrict results near a current observation-scoped element reference. */
+  readonly near?: string | undefined;
+  readonly maxElements?: number | undefined;
+}
+
 export interface ComputerObservation {
   readonly observedAt: string;
   readonly screenId: string;
+  /** Provider observation generation used to scope semantic element references. */
+  readonly observationId?: string | undefined;
   /** Required provider-side safety attestation; the core also applies bounded credential redaction defensively. */
   readonly safety: ComputerObservationSafety;
   /** Current browser URL after provider-side secret redaction. */
@@ -136,16 +200,21 @@ export interface ComputerObservation {
   /** Bounded provider-side accessibility summary. Secret values must be omitted. */
   readonly accessibilitySummary?: string | undefined;
   readonly tabs: readonly ComputerBrowserTabSnapshot[];
-  /** Artifact reference only; raw screenshot bytes never cross the Computer capability. */
+  /** Artifact reference only; raw screenshots are exposed only by explicit bounded visual probes. */
   readonly screenshotArtifactRef?: string | undefined;
+  /** Canonical semantic snapshot. Providers that do not support structured perception may omit it. */
+  readonly elements?: readonly ComputerElement[] | undefined;
+  /** Structural difference from the provider's previous observation of this screen. */
+  readonly delta?: ComputerObservationDelta | undefined;
   readonly processes: readonly ComputerProcessObservation[];
 }
 
 export type ComputerBrowserAction =
   | Readonly<{ kind: "navigate"; url: string }>
-  | Readonly<{ kind: "click"; target: string }>
-  | Readonly<{ kind: "type"; target: string; text: string; sensitive?: boolean | undefined }>
-  | Readonly<{ kind: "press"; key: string }>;
+  | Readonly<{ kind: "click"; target: string; visualProbeToken?: string | undefined }>
+  | Readonly<{ kind: "type"; target: string; text: string; sensitive?: boolean | undefined; visualProbeToken?: string | undefined }>
+  | Readonly<{ kind: "press"; key: string; target?: string | undefined; visualProbeToken?: string | undefined }>
+  | Readonly<{ kind: "scroll"; deltaX?: number | undefined; deltaY: number; target?: string | undefined; visualProbeToken?: string | undefined }>;
 
 export interface ComputerBrowserActionRequest {
   readonly screenId: string;
@@ -158,7 +227,57 @@ export interface ComputerBrowserActionRequest {
 
 export interface ComputerBrowserActionResult {
   readonly mode: ComputerAutomationMode;
+  /** False means the provider intentionally deferred the action until a visual probe is reviewed. */
+  readonly performed?: boolean | undefined;
+  readonly confidence?: number | undefined;
+  readonly visualProbeRequired?: Readonly<{
+    readonly ref: string;
+    readonly reason: "low-confidence" | "high-impact-action";
+    readonly recommendedSize: ComputerVisualProbeSize;
+  }> | undefined;
+  readonly verification?: Readonly<{
+    readonly structuralChange: boolean;
+    readonly urlChanged: boolean;
+  }> | undefined;
   readonly observation: ComputerObservation;
+}
+
+export type ComputerVisualProbeSize = "tiny" | "small" | "medium" | "window" | "full";
+export type ComputerVisualProbeReturn = "text" | "image";
+
+export interface ComputerVisualProbeRequest {
+  readonly screenId: string;
+  readonly controlGeneration: number;
+  readonly ref?: string | undefined;
+  readonly bbox?: ComputerBoundingBox | undefined;
+  readonly size?: ComputerVisualProbeSize | undefined;
+  readonly maxSide?: number | undefined;
+  readonly includeContext?: boolean | undefined;
+  readonly purpose?: string | undefined;
+  readonly return: ComputerVisualProbeReturn;
+  readonly signal?: AbortSignal | undefined;
+}
+
+export interface ComputerVisualProbeSafety {
+  /** Provider attests that password/OTP/token/credential regions were refused before capture. */
+  readonly protectedRegionOmitted: true;
+  /** Provider attests that known CAPTCHA/challenge regions were refused before capture. */
+  readonly challengeRegionOmitted: true;
+}
+
+export interface ComputerVisualProbeResult {
+  readonly observationId: string;
+  readonly safety: ComputerVisualProbeSafety;
+  readonly ref?: string | undefined;
+  readonly bbox: ComputerBoundingBox;
+  readonly width: number;
+  readonly height: number;
+  readonly targetMatch: boolean;
+  readonly confidence: number;
+  readonly visibleText: readonly string[];
+  /** One-use token proving the caller inspected this exact current target before retrying a gated action. */
+  readonly probeToken?: string | undefined;
+  readonly image?: Readonly<{ readonly data: string; readonly mimeType: "image/png" }> | undefined;
 }
 
 export type ComputerExecutionToolName = "bash" | "edit" | "process" | "ipython";
@@ -229,12 +348,19 @@ export interface ComputerRunProcessCleanupRequest {
 export interface ComputerNodeAdapter {
   readonly descriptor: ComputerNodeDescriptor;
   snapshot(signal?: AbortSignal): Promise<ComputerNodeRuntimeSnapshot>;
-  observeScreen(screenId: string, controlGeneration: number, signal?: AbortSignal): Promise<ComputerObservation>;
+  observeScreen(
+    screenId: string,
+    controlGeneration: number,
+    signal?: AbortSignal,
+    request?: ComputerObservationRequest,
+  ): Promise<ComputerObservation>;
   /** Execute an existing FRIDAY tool on this node without introducing a second tool/executor stack. */
   runTool?(request: ComputerNodeToolExecutionRequest): Promise<ComputerToolExecutionResult>;
   /** Idempotently terminate provider-owned background processes for one Agent run before that run settles. */
   cleanupRunProcesses?(request: ComputerRunProcessCleanupRequest): Promise<void>;
   runBrowserAction?(request: ComputerBrowserActionRequest): Promise<ComputerBrowserActionResult>;
+  /** Explicit, bounded, on-demand visual crop. Providers must refuse protected/challenge regions. */
+  visualProbe?(request: ComputerVisualProbeRequest): Promise<ComputerVisualProbeResult>;
   /** Provider-specific health details for Doctor. Must be bounded and secret-free. */
   doctor?(signal?: AbortSignal): Promise<readonly string[]>;
   restart?(signal?: AbortSignal): Promise<void>;
@@ -436,6 +562,7 @@ export interface ComputerService {
     ownerId: string,
     generation: number,
     signal?: AbortSignal,
+    request?: ComputerObservationRequest,
   ): Promise<ComputerObservation>;
   runTool(
     binding: ComputerExecutionBinding,
@@ -451,6 +578,13 @@ export interface ComputerService {
     action: ComputerBrowserAction,
     signal?: AbortSignal,
   ): Promise<ComputerBrowserActionResult>;
+  visualProbe(
+    screenLeaseId: string,
+    ownerId: string,
+    generation: number,
+    request: Omit<ComputerVisualProbeRequest, "screenId" | "controlGeneration" | "signal">,
+    signal?: AbortSignal,
+  ): Promise<ComputerVisualProbeResult>;
   restartNode(nodeId: string, signal?: AbortSignal): Promise<ComputerNode>;
   updateNode(nodeId: string, signal?: AbortSignal): Promise<ComputerNode>;
   resetManagedState(nodeId: string, signal?: AbortSignal): Promise<ComputerNode>;

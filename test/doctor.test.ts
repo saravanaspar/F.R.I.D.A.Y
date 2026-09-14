@@ -55,7 +55,14 @@ describe("friday doctor", () => {
     vault.create({ ref: modelCredentialVaultRef("openai"), kind: "model-api-key", secret: "doctor-test-key" });
     await saveSavedChannels({ telegram: { enabled: true, allowAll: false, allowedSenderIds: ["owner"] } }, home);
 
-    const environment = { ...process.env, FRIDAY_HOME: home, FRIDAY_SANDBOX_NETWORK_MODE: "requested" };
+    const environment = {
+      ...process.env,
+      FRIDAY_HOME: home,
+      FRIDAY_SANDBOX_NETWORK_MODE: "requested",
+      // Keep this fixture independent from a developer host that already has
+      // the Linux Computer provider enabled through environment.d/systemd.
+      FRIDAY_COMPUTER_PROVIDER: "none",
+    };
     const checks = await collectDoctorChecks(environment);
     const byId = new Map(checks.map((entry) => [entry.id, entry]));
     expect(byId.get("home")?.level).toBe("ok");

@@ -219,15 +219,36 @@ describe("Turn Loop detached session jobs", () => {
       let signedIn = false;
       let browserActionCount = 0;
       let observationCount = 0;
-      const observation = (screenId: string): ComputerObservation => ({
+      const observation = (screenId: string, sequence: number): ComputerObservation => ({
         observedAt: new Date().toISOString(),
         screenId,
+        observationId: `obs-${sequence}`,
         safety: { protectedInputOmitted: true, keystrokesOmitted: true, captchaOmitted: true, sensitiveScreenshotOmitted: true },
         url: signedIn ? "https://example.com/account" : "https://example.com/login",
         domSummary: signedIn ? "signed-in account page; protected values omitted" : "login wall; password and OTP fields omitted",
         accessibilitySummary: signedIn ? "account main document" : "sign-in form with protected fields",
         tabs: [{ id: "tab-1", title: signedIn ? "Account" : "Sign in", url: signedIn ? "https://example.com/account" : "https://example.com/login", active: true }],
         screenshotArtifactRef: signedIn ? "artifact:after-login-safe" : "artifact:login-wall-safe",
+        elements: signedIn ? [] : [{
+          id: "e1",
+          ref: `obs-${sequence}:e1`,
+          role: "button",
+          name: "Sign in",
+          bbox: { left: 420, top: 460, right: 560, bottom: 506 },
+          visible: true,
+          enabled: true,
+          focused: false,
+          interactive: true,
+          clickable: true,
+          editable: false,
+          selectable: false,
+          scrollable: false,
+          draggable: false,
+          context: "Sign in form",
+          actions: ["click"],
+          source: "dom",
+          confidence: 0.99,
+        }],
         processes: [{ pid: 123, name: "chromium" }],
       });
       const adapter: ComputerNodeAdapter = {
@@ -256,7 +277,7 @@ describe("Turn Loop detached session jobs", () => {
             },
           };
         },
-        async observeScreen(screenId) { observationCount += 1; return observation(screenId); },
+        async observeScreen(screenId) { observationCount += 1; return observation(screenId, observationCount); },
         async cleanupRunProcesses() {},
         async runBrowserAction(request) {
           browserActionCount += 1;
@@ -295,7 +316,7 @@ describe("Turn Loop detached session jobs", () => {
       faux = modelRuntime.registerFauxProvider({ provider: "faux" });
       faux.setResponses([
         modelRuntime.fauxAssistantMessage(modelRuntime.fauxToolCall("computer_observe", {}), { stopReason: "toolUse" }),
-        modelRuntime.fauxAssistantMessage(modelRuntime.fauxToolCall("computer_browser", { action: "click", target: "Sign in" }), { stopReason: "toolUse" }),
+        modelRuntime.fauxAssistantMessage(modelRuntime.fauxToolCall("computer_browser", { action: "click", target: "obs-1:e1" }), { stopReason: "toolUse" }),
         (context: unknown) => {
           expect(JSON.stringify(context)).not.toContain("never-model-visible-password-otp");
           return modelRuntime.fauxAssistantMessage("Login complete; resumed from fresh observation");
