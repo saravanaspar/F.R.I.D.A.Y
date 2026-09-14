@@ -79,7 +79,7 @@ describe("runtime-settings persona extension", () => {
     await expect(switchPersona.execute({ name: "jarvis" }, undefined, agentContext("Switch persona to Operator.")))
       .rejects.toThrow(/explicit current-user request/);
     await switchPersona.execute({ name: "operator" }, undefined, agentContext("Switch persona to Operator."));
-    expect(sections.find((section) => section.id === "persona")?.render({} as never)).toContain("Operator (operator)");
+    expect(sections.find((section) => section.id === "persona")?.render({} as never)?.content).toContain("Operator (operator)");
 
     const stateFile = join(root, "personas", "state.json");
     expect((await stat(stateFile)).mode & 0o077).toBe(0);

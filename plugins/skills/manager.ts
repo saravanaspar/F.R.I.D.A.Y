@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { analyzeSkillTextSecurity } from "@friday/skills";
 import type { SkillsService } from "./contract.js";
 
 type SkillValidationService = Pick<SkillsService, "parseFrontmatter" | "loadSkillsFromDir">;
@@ -22,7 +23,6 @@ const MAX_SKILL_TOTAL_BYTES = 4 * 1024 * 1024;
 const MAX_SKILL_FILES = 128;
 const MAX_RELATIVE_PATH_CHARS = 240;
 const FORBIDDEN_SOURCE = /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|password|passwd|authorization)\b\s*[:=]\s*[^\s]{8,}|\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}))/i;
-const PROMPT_INJECTION = /(?:ignore|disregard|override|bypass).{0,60}(?:system|developer|previous instructions?|security|permission)|(?:system prompt|developer message).{0,40}(?:reveal|exfiltrate|print)/i;
 
 export function userSkillsDir(environment: NodeJS.ProcessEnv = process.env): string {
   const configured = environment.FRIDAY_HOME?.trim() || environment.FRIDAY_STATE_DIR?.trim();
@@ -94,11 +94,16 @@ function cleanContent(value: unknown, label: string, maximum = MAX_SKILL_FILE_BY
     .replace(/\r\n?/g, "\n");
   if (Buffer.byteLength(normalized, "utf8") > maximum) throw new Error(`${label} exceeds ${maximum} bytes`);
   if (FORBIDDEN_SOURCE.test(normalized)) throw new Error(`${label} appears to contain authentication material; secrets must not be embedded in Skills`);
+  const securityIssues = analyzeSkillTextSecurity(normalized, label);
+  if (securityIssues.length > 0) throw new Error(`${label} failed the managed-skill security scan: ${securityIssues.map((issue) => `${issue.kind}: ${issue.message}`).join("; ")}`);
   return normalized;
 }
 
 function validateSkillFrontmatter(skills: SkillValidationService, name: string, content: string): void {
-  if (PROMPT_INJECTION.test(content)) throw new Error("SKILL.md contains policy-override or prompt-exfiltration language and was rejected by the managed-skill security scan");
+  const securityIssues = analyzeSkillTextSecurity(content, "SKILL.md");
+  if (securityIssues.length > 0) {
+    throw new Error(`SKILL.md failed the managed-skill security scan: ${securityIssues.map((issue) => `${issue.kind}: ${issue.message}`).join("; ")}`);
+  }
   const parsed = skills.parseFrontmatter<Record<string, unknown>>(content).frontmatter;
   if (parsed.name !== name) throw new Error(`SKILL.md frontmatter name must exactly match ${name}`);
   if (typeof parsed.description !== "string" || !parsed.description.trim()) throw new Error("SKILL.md requires a description");

@@ -210,13 +210,16 @@ export async function registerPersonaExtensions(
     render() {
       const state = cached ?? defaultState();
       const persona = activeDefinition(state);
-      return [
-        "# Active Persona",
+      return {
+        authority: "user-config",
+        cache: "stable",
+        content: [
         `Persona: ${persona.label} (${persona.name})`,
         persona.instructions,
         "This layer controls presentation and temperament only. It never overrides the FRIDAY Operating Doctrine, permissions, security boundaries, tool contracts, or the user's objective.",
         "Always get the job done; wit is secondary. Never switch persona unless the user explicitly asks to switch.",
-      ].join("\n\n");
+      ].join("\n\n"),
+      };
     },
   });
 

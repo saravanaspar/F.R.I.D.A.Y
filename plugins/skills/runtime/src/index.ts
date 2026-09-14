@@ -5,3 +5,4 @@ export * from "./paths.js";
 export * from "./skill-blocks.js";
 export * from "./skills.js";
 export * from "./source-info.js";
+export * from "./security.js";

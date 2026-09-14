@@ -965,7 +965,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
     const occupied = activeScreenIds(node.id);
     const candidateScreens = node.screens.filter((screen) =>
       screen.kind === "agent" && (!occupied.has(screen.id) || screen.id === ownedScreenId));
-    if (request.preferredScreenId !== undefined) {
+    if (request.preferredScreenId !== undefined && request.preferredScreenMode !== "soft") {
       const preferredScreenId = id(request.preferredScreenId, "preferred screen id");
       if (!candidateScreens.some((screen) => screen.id === preferredScreenId)) reasons.push("screen-unavailable");
     } else if (candidateScreens.length === 0) {
@@ -983,7 +983,9 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
     if (request.preferredNodeId !== undefined && id(request.preferredNodeId, "preferred node id") !== screenLease.nodeId) {
       throw new Error(`Computer owner ${request.ownerId} already holds a screen on ${screenLease.nodeId}`);
     }
-    if (request.preferredScreenId !== undefined && id(request.preferredScreenId, "preferred screen id") !== screenLease.screenId) {
+    if (request.preferredScreenId !== undefined
+      && request.preferredScreenMode !== "soft"
+      && id(request.preferredScreenId, "preferred screen id") !== screenLease.screenId) {
       throw new Error(`Computer owner ${request.ownerId} already holds screen ${screenLease.screenId}`);
     }
     const state = nodes.get(screenLease.nodeId);
@@ -997,10 +999,18 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
 
   const tryAcquire = (rawRequest: ComputerScreenRequest): ComputerScreenRequestResult => {
     assertOpen();
+    if (rawRequest.preferredScreenMode !== undefined
+      && rawRequest.preferredScreenMode !== "required"
+      && rawRequest.preferredScreenMode !== "soft") {
+      throw new Error("preferredScreenMode must be required or soft");
+    }
     const request: ComputerScreenRequest = Object.freeze({
       ownerId: id(rawRequest.ownerId, "Computer screen owner id", 160),
       ...(rawRequest.preferredNodeId === undefined ? {} : { preferredNodeId: id(rawRequest.preferredNodeId, "preferred node id") }),
       ...(rawRequest.preferredScreenId === undefined ? {} : { preferredScreenId: id(rawRequest.preferredScreenId, "preferred screen id") }),
+      ...(rawRequest.preferredScreenMode === undefined ? {} : {
+        preferredScreenMode: rawRequest.preferredScreenMode,
+      }),
       ...(rawRequest.requireBrowser === undefined ? {} : { requireBrowser: Boolean(rawRequest.requireBrowser) }),
       ...(rawRequest.demand === undefined ? {} : { demand: Object.freeze({ ...rawRequest.demand }) }),
       ...(rawRequest.leaseTtlMs === undefined ? {} : { leaseTtlMs: leaseTtl(rawRequest.leaseTtlMs) }),
@@ -1017,10 +1027,11 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
       aggregateReasons.push(...reasons);
       if (reasons.length > 0) continue;
       const occupied = activeScreenIds(state.node.id);
-      const screen = state.node.screens.find((candidate) =>
-        candidate.kind === "agent"
-        && !occupied.has(candidate.id)
-        && (request.preferredScreenId === undefined || candidate.id === request.preferredScreenId));
+      const availableScreens = state.node.screens.filter((candidate) => candidate.kind === "agent" && !occupied.has(candidate.id));
+      const screen = request.preferredScreenId === undefined
+        ? availableScreens[0]
+        : availableScreens.find((candidate) => candidate.id === request.preferredScreenId)
+          ?? (request.preferredScreenMode === "soft" ? availableScreens[0] : undefined);
       if (!screen) continue;
       const timestamp = now();
       const acquiredAt = iso(timestamp);
