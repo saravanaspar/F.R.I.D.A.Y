@@ -27,7 +27,7 @@ import { SESSIONS_CAPABILITY } from "../plugins/sessions/contract.js";
 import type { ToolsService } from "../plugins/tools/contract.js";
 import type { ProjectsService } from "../plugins/projects/contract.js";
 import type { RoutingDecision } from "../plugins/routing/contract.js";
-import { createAgentTurnExecutor } from "../plugins/turn-loop/agent-executor.js";
+import { computerExecutionOwnerId, createAgentTurnExecutor, persistableAgentMessage } from "../plugins/turn-loop/agent-executor.js";
 import type { InboundTurn, TurnProgressUpdate } from "../plugins/turn-loop/contract.js";
 import { withTestModel } from "./helpers/faux-model.js";
 
@@ -89,6 +89,31 @@ afterEach(() => {
 });
 
 describe("Turn Loop agent executor", () => {
+  it("keeps contributed visual pixels ephemeral when persisting tool results", () => {
+    const message = persistableAgentMessage({
+      role: "toolResult",
+      toolCallId: "tool-1",
+      toolName: "computer_visual_probe",
+      content: [
+        { type: "text", text: '{"observationId":"obs-1"}' },
+        { type: "image", data: "base64-pixels", mimeType: "image/png" },
+      ],
+    } as never) as unknown as { content: readonly { type: string; data?: string }[] };
+    expect(message.content).toEqual([{ type: "text", text: '{"observationId":"obs-1"}' }]);
+    expect(JSON.stringify(message)).not.toContain("base64-pixels");
+  });
+
+  it("uses distinct Computer owners for sibling subagents while preserving the top-level job owner", () => {
+    expect(computerExecutionOwnerId("job-42", "main", 0)).toBe("job-42");
+    const first = computerExecutionOwnerId("job-42", "child-a", 1);
+    const second = computerExecutionOwnerId("job-42", "child-b", 1);
+    expect(first).not.toBe(second);
+    expect(first).toMatch(/^job-42:agent:child-a:/);
+    expect(second).toMatch(/^job-42:agent:child-b:/);
+    expect(first.length).toBeLessThanOrEqual(160);
+    expect(computerExecutionOwnerId("job-42", "child-a", 1)).toBe(first);
+  });
+
   it("returns a bootstrap response for a new general-agent turn when no main model is configured", async () => {
     delete process.env.FRIDAY_MODEL_PROVIDER;
     delete process.env.FRIDAY_MODEL_ID;
@@ -435,6 +460,64 @@ describe("Turn Loop agent executor", () => {
       expect(result).toMatchObject({ text: "tool completed", sessionId });
       expect(calls).toEqual([{ value: "hello" }]);
       expect(faux.state.callCount).toBe(3);
+    } finally {
+      await executor.dispose();
+      faux.unregister();
+    }
+  });
+
+  it("passes native image content from plugin-contributed tools back to the model without JSON/base64 text wrapping", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "faux";
+    process.env.FRIDAY_MODEL_ID = "faux-1";
+    const stateDir = tempRoot();
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(sessionsPlugin);
+    await friday.activatePlugin(promptsPlugin);
+    await friday.activatePlugin(modelPlugin);
+    await friday.activatePlugin(agentPlugin);
+
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
+    const contributions: AgentToolContribution[] = [{
+      id: "image-tool",
+      name: "image_tool",
+      label: "Image tool",
+      description: "Return a bounded native image tool result.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      async execute() {
+        return {
+          content: [
+            { type: "text", text: "tiny visual probe" },
+            { type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB", mimeType: "image/png" },
+          ],
+        };
+      },
+    }];
+    const executor = createAgentTurnExecutor({
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: withTestModel(requireCapability(MODEL_CAPABILITY), faux),
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions: requireCapability(SESSIONS_CAPABILITY),
+      tools: { createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService,
+      toolContributions: () => contributions,
+    }, { stateDir, maxCachedSessions: 2 });
+
+    try {
+      let secondRequest = "";
+      faux.setResponses([
+        modelRuntime.fauxAssistantMessage(modelRuntime.fauxToolCall("image_tool", {}), { stopReason: "toolUse" }),
+        (context) => {
+          secondRequest = JSON.stringify(context.messages);
+          return modelRuntime.fauxAssistantMessage("image inspected");
+        },
+      ]);
+      const result = await executor.execute({ turn: turn("image-contribution", "inspect the crop"), decision: decision("session:new") });
+      expect(result.text).toBe("image inspected");
+      expect(secondRequest).toContain('"type":"image"');
+      expect(secondRequest).toContain('"mimeType":"image/png"');
+      expect(secondRequest).toContain("iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB");
     } finally {
       await executor.dispose();
       faux.unregister();

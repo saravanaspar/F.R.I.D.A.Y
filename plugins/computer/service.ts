@@ -10,6 +10,11 @@ import {
   type ComputerBrowserSupervisorSnapshot,
   type ComputerBrowserTabSnapshot,
   type ComputerBrowserWindowSnapshot,
+  type ComputerBoundingBox,
+  type ComputerElement,
+  type ComputerElementAction,
+  type ComputerObservationDelta,
+  type ComputerObservationRequest,
   type ComputerDoctorNodeReport,
   type ComputerDoctorReport,
   type ComputerExecutionBinding,
@@ -34,6 +39,8 @@ import {
   type ComputerStatusSnapshot,
   type ComputerToolExecutionRequest,
   type ComputerToolExecutionResult,
+  type ComputerVisualProbeRequest,
+  type ComputerVisualProbeResult,
   type ControlLease,
   type ScreenLease,
 } from "./contract.js";
@@ -52,6 +59,9 @@ const MAX_BROWSER_TABS = 512;
 const MAX_TOOL_CONTENT_ITEMS = 64;
 const MAX_TOOL_TEXT_CHARS = 8 * 1024 * 1024;
 const MAX_TOOL_IMAGE_CHARS = 16 * 1024 * 1024;
+const MAX_OBSERVATION_ELEMENTS = 256;
+const MAX_VISUAL_PROBE_TEXT_ITEMS = 64;
+const MAX_VISUAL_PROBE_IMAGE_CHARS = 16 * 1024 * 1024;
 const MAX_COMPUTER_PROCESS_LIFETIME_SECONDS = 3_600;
 const TRANSCRIPT_POLICY = Object.freeze({
   captureKeystrokes: false as const,
@@ -432,6 +442,154 @@ function cloneControlLease(lease: MutableControlLease): ControlLease {
   return Object.freeze({ ...lease, transcriptPolicy: TRANSCRIPT_POLICY });
 }
 
+function normalizeBoundingBox(input: ComputerBoundingBox, label: string): ComputerBoundingBox {
+  const left = finiteNumber(input.left, `${label}.left`, -1_000_000, 1_000_000);
+  const top = finiteNumber(input.top, `${label}.top`, -1_000_000, 1_000_000);
+  const right = finiteNumber(input.right, `${label}.right`, -1_000_000, 1_000_000);
+  const bottom = finiteNumber(input.bottom, `${label}.bottom`, -1_000_000, 1_000_000);
+  if (right < left || bottom < top) throw new Error(`${label} has inverted bounds`);
+  if (right - left > 65_535 || bottom - top > 65_535) throw new Error(`${label} exceeds the supported size`);
+  return Object.freeze({ left, top, right, bottom });
+}
+
+const ELEMENT_ACTIONS = new Set<ComputerElementAction>(["click", "type", "toggle", "select", "expand", "scroll"]);
+const ELEMENT_SOURCES = new Set(["dom", "aria", "atspi", "uia", "visual"] as const);
+
+function normalizeElement(input: ComputerElement, observationId?: string): ComputerElement {
+  const elementId = id(input.id, "Computer element id", 128);
+  const ref = id(input.ref, "Computer element ref", 256);
+  if (observationId !== undefined && ref !== `${observationId}:${elementId}`) {
+    throw new Error(`Computer element ref must be scoped to observation ${observationId}`);
+  }
+  const source = input.source;
+  if (!ELEMENT_SOURCES.has(source)) throw new Error(`unsupported Computer element source: ${String(source)}`);
+  const actions = [...new Set(input.actions.map((action) => {
+    if (!ELEMENT_ACTIONS.has(action)) throw new Error(`unsupported Computer element action: ${String(action)}`);
+    return action;
+  }))];
+  const isProtected = input.protected === true;
+  return Object.freeze({
+    id: elementId,
+    ref,
+    role: observationText(input.role, "Computer element role", 128),
+    ...(input.name === undefined ? {} : { name: observationText(input.name, "Computer element name", 1_024) }),
+    ...(!isProtected && input.value !== undefined ? { value: observationText(input.value, "Computer element value", 2_048) } : {}),
+    ...(input.bbox === undefined ? {} : { bbox: normalizeBoundingBox(input.bbox, "Computer element bbox") }),
+    visible: Boolean(input.visible),
+    enabled: Boolean(input.enabled),
+    focused: Boolean(input.focused),
+    interactive: Boolean(input.interactive),
+    clickable: Boolean(input.clickable),
+    editable: Boolean(input.editable),
+    selectable: Boolean(input.selectable),
+    scrollable: Boolean(input.scrollable),
+    draggable: Boolean(input.draggable),
+    ...(input.selected === undefined ? {} : { selected: Boolean(input.selected) }),
+    ...(input.checked === undefined ? {} : { checked: Boolean(input.checked) }),
+    ...(input.expanded === undefined ? {} : { expanded: Boolean(input.expanded) }),
+    ...(isProtected ? { protected: true } : {}),
+    ...(input.context === undefined ? {} : { context: observationText(input.context, "Computer element context", 2_048) }),
+    actions: Object.freeze(isProtected ? [] : actions),
+    source,
+    confidence: finiteNumber(input.confidence, "Computer element confidence", 0, 1),
+  });
+}
+
+function normalizeDelta(input: ComputerObservationDelta, observationId?: string): ComputerObservationDelta {
+  const baseObservationId = id(input.baseObservationId, "Computer delta base observation id", 160);
+  if (observationId !== undefined && baseObservationId === observationId) throw new Error("Computer delta must reference an earlier observation");
+  if (input.added.length > MAX_OBSERVATION_ELEMENTS || input.updated.length > MAX_OBSERVATION_ELEMENTS || input.removedIds.length > MAX_OBSERVATION_ELEMENTS) {
+    throw new Error("Computer observation delta exceeds element limit");
+  }
+  const added = Object.freeze(input.added.map((element) => normalizeElement(element, observationId)));
+  const updated = Object.freeze(input.updated.map((entry) => {
+    const previousRef = id(entry.previousRef, "Computer delta previous ref", 256);
+    if (!previousRef.startsWith(`${baseObservationId}:`)) {
+      throw new Error("Computer delta previous ref must belong to the base observation");
+    }
+    return Object.freeze({
+      previousRef,
+      element: normalizeElement(entry.element, observationId),
+    });
+  }));
+  const removedIds = Object.freeze(input.removedIds.map((elementId) => id(elementId, "Computer delta removed element id", 128)));
+  return Object.freeze({
+    baseObservationId,
+    added,
+    updated,
+    removedIds,
+    retained: nonNegativeInteger(input.retained, "Computer delta retained count", MAX_OBSERVATION_ELEMENTS),
+  });
+}
+
+function normalizeObservationRequest(input: ComputerObservationRequest | undefined): ComputerObservationRequest | undefined {
+  if (input === undefined) return undefined;
+  const scope = input.scope ?? "interactive";
+  if (scope !== "interactive" && scope !== "all") throw new Error(`unsupported Computer observation scope: ${String(scope)}`);
+  const query = input.query === undefined ? undefined : boundedText(input.query, "Computer observation query", 512).trim();
+  const near = input.near === undefined ? undefined : id(input.near, "Computer observation near ref", 256);
+  const maxElements = input.maxElements === undefined ? 80 : nonNegativeInteger(input.maxElements, "Computer observation max elements", MAX_OBSERVATION_ELEMENTS);
+  if (maxElements < 1) throw new Error("Computer observation max elements must be at least 1");
+  return Object.freeze({
+    scope,
+    ...(query ? { query } : {}),
+    ...(near === undefined ? {} : { near }),
+    maxElements,
+  });
+}
+
+function normalizeVisualProbeRequest(
+  input: Omit<ComputerVisualProbeRequest, "screenId" | "controlGeneration" | "signal">,
+): Omit<ComputerVisualProbeRequest, "screenId" | "controlGeneration" | "signal"> {
+  const hasRef = input.ref !== undefined;
+  const hasBbox = input.bbox !== undefined;
+  if (hasRef === hasBbox) throw new Error("Computer visual probe requires exactly one of ref or bbox");
+  const size = input.size ?? "small";
+  if (size !== "tiny" && size !== "small" && size !== "medium" && size !== "window" && size !== "full") {
+    throw new Error(`unsupported Computer visual probe size: ${String(size)}`);
+  }
+  if (input.return !== "text" && input.return !== "image") throw new Error("Computer visual probe return must be text or image");
+  const maxSide = input.maxSide === undefined ? undefined : nonNegativeInteger(input.maxSide, "Computer visual probe maxSide", 2_048);
+  if (maxSide !== undefined && maxSide < 64) throw new Error("Computer visual probe maxSide must be at least 64");
+  return Object.freeze({
+    ...(input.ref === undefined ? {} : { ref: id(input.ref, "Computer visual probe ref", 256) }),
+    ...(input.bbox === undefined ? {} : { bbox: normalizeBoundingBox(input.bbox, "Computer visual probe bbox") }),
+    size,
+    ...(maxSide === undefined ? {} : { maxSide }),
+    ...(input.includeContext === undefined ? {} : { includeContext: Boolean(input.includeContext) }),
+    ...(input.purpose === undefined ? {} : { purpose: observationText(input.purpose, "Computer visual probe purpose", 512) }),
+    return: input.return,
+  });
+}
+
+function normalizeVisualProbeResult(input: ComputerVisualProbeResult): ComputerVisualProbeResult {
+  if (input.visibleText.length > MAX_VISUAL_PROBE_TEXT_ITEMS) throw new Error("Computer visual probe exceeds visible-text limit");
+  const image = input.image === undefined ? undefined : Object.freeze({
+    data: boundedRawText(input.image.data, "Computer visual probe image", MAX_VISUAL_PROBE_IMAGE_CHARS),
+    mimeType: (() => {
+      if (input.image.mimeType !== "image/png") throw new Error("Computer visual probe image must be PNG");
+      return "image/png" as const;
+    })(),
+  });
+  const safety = input.safety as ComputerVisualProbeResult["safety"] | undefined;
+  if (safety?.protectedRegionOmitted !== true || safety.challengeRegionOmitted !== true) {
+    throw new Error("Computer visual probe is missing the required protected/challenge safety attestation");
+  }
+  return Object.freeze({
+    observationId: id(input.observationId, "Computer visual probe observation id", 160),
+    safety: Object.freeze({ protectedRegionOmitted: true as const, challengeRegionOmitted: true as const }),
+    ...(input.ref === undefined ? {} : { ref: id(input.ref, "Computer visual probe ref", 256) }),
+    bbox: normalizeBoundingBox(input.bbox, "Computer visual probe result bbox"),
+    width: nonNegativeInteger(input.width, "Computer visual probe width", 2_048),
+    height: nonNegativeInteger(input.height, "Computer visual probe height", 2_048),
+    targetMatch: Boolean(input.targetMatch),
+    confidence: finiteNumber(input.confidence, "Computer visual probe confidence", 0, 1),
+    visibleText: Object.freeze(input.visibleText.map((value) => observationText(value, "Computer visual probe visible text", 1_024))),
+    ...(input.probeToken === undefined ? {} : { probeToken: id(input.probeToken, "Computer visual probe token", 256) }),
+    ...(image === undefined ? {} : { image }),
+  });
+}
+
 function normalizeObservation(input: ComputerObservation, expectedScreenId: string): ComputerObservation {
   const screenId = id(input.screenId, "observation screen id");
   if (screenId !== expectedScreenId) throw new Error(`Computer observation returned the wrong screen: ${screenId}`);
@@ -441,7 +599,9 @@ function normalizeObservation(input: ComputerObservation, expectedScreenId: stri
   }
   const observedAt = text(input.observedAt, "observation timestamp", 64);
   if (!Number.isFinite(Date.parse(observedAt))) throw new Error("observation timestamp is invalid");
+  const observationId = input.observationId === undefined ? undefined : id(input.observationId, "Computer observation id", 160);
   if (input.tabs.length > MAX_BROWSER_TABS) throw new Error("Computer observation exceeds tab limit");
+  if (input.elements !== undefined && input.elements.length > MAX_OBSERVATION_ELEMENTS) throw new Error("Computer observation exceeds element limit");
   if (input.processes.length > 512) throw new Error("Computer observation exceeds process limit");
   const processes: readonly ComputerProcessObservation[] = Object.freeze(input.processes.map((process) => Object.freeze({
     pid: nonNegativeInteger(process.pid, "observation process pid"),
@@ -450,12 +610,23 @@ function normalizeObservation(input: ComputerObservation, expectedScreenId: stri
   return Object.freeze({
     observedAt,
     screenId,
+    ...(observationId === undefined ? {} : { observationId }),
     safety: Object.freeze({ protectedInputOmitted: true as const, keystrokesOmitted: true as const, captchaOmitted: true as const, sensitiveScreenshotOmitted: true as const }),
     ...(input.url === undefined ? {} : { url: observationText(input.url, "observation url", 4_096) }),
     ...(input.domSummary === undefined ? {} : { domSummary: observationText(input.domSummary, "observation DOM summary", 32_000) }),
     ...(input.accessibilitySummary === undefined ? {} : { accessibilitySummary: observationText(input.accessibilitySummary, "observation accessibility summary", 32_000) }),
     tabs: Object.freeze(input.tabs.map(normalizeTab)),
     ...(input.screenshotArtifactRef === undefined ? {} : { screenshotArtifactRef: id(input.screenshotArtifactRef, "observation screenshot artifact ref", 256) }),
+    ...(input.elements === undefined ? {} : {
+      elements: (() => {
+        const elements = Object.freeze(input.elements.map((element) => normalizeElement(element, observationId)));
+        const ids = new Set(elements.map((element) => element.id));
+        const refs = new Set(elements.map((element) => element.ref));
+        if (ids.size !== elements.length || refs.size !== elements.length) throw new Error("Computer observation has duplicate element ids or refs");
+        return elements;
+      })(),
+    }),
+    ...(input.delta === undefined ? {} : { delta: normalizeDelta(input.delta, observationId) }),
     processes,
   });
 }
@@ -527,6 +698,10 @@ function normalizeExecutionBinding(input: ComputerExecutionBinding): ComputerExe
   });
 }
 
+function optionalProbeToken(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : id(value, "browser visual probe token", 256);
+}
+
 function normalizeBrowserAction(action: ComputerBrowserAction): ComputerBrowserAction {
   if (action.kind === "navigate") {
     const raw = boundedText(action.url, "browser URL", 4_096);
@@ -535,15 +710,45 @@ function normalizeBrowserAction(action: ComputerBrowserAction): ComputerBrowserA
     if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("browser navigation supports only http/https URLs");
     return Object.freeze({ kind: "navigate", url: url.toString() });
   }
-  if (action.kind === "click") return Object.freeze({ kind: "click", target: text(action.target, "browser click target", 4_096) });
-  if (action.kind === "press") return Object.freeze({ kind: "press", key: text(action.key, "browser key", 128) });
+  if (action.kind === "click") {
+    const visualProbeToken = optionalProbeToken(action.visualProbeToken);
+    return Object.freeze({
+      kind: "click",
+      target: text(action.target, "browser click target", 4_096),
+      ...(visualProbeToken === undefined ? {} : { visualProbeToken }),
+    });
+  }
+  if (action.kind === "press") {
+    const visualProbeToken = optionalProbeToken(action.visualProbeToken);
+    return Object.freeze({
+      kind: "press",
+      key: text(action.key, "browser key", 128),
+      ...(action.target === undefined ? {} : { target: text(action.target, "browser press target", 4_096) }),
+      ...(visualProbeToken === undefined ? {} : { visualProbeToken }),
+    });
+  }
   if (action.kind === "type") {
     if (action.sensitive === true) throw new Error("sensitive browser input requires human takeover or a dedicated protected-credential flow");
+    const visualProbeToken = optionalProbeToken(action.visualProbeToken);
     return Object.freeze({
       kind: "type",
       target: text(action.target, "browser type target", 4_096),
       text: boundedText(action.text, "browser type text", 16_384),
       ...(action.sensitive === undefined ? {} : { sensitive: false }),
+      ...(visualProbeToken === undefined ? {} : { visualProbeToken }),
+    });
+  }
+  if (action.kind === "scroll") {
+    const deltaX = action.deltaX === undefined ? undefined : finiteNumber(action.deltaX, "browser scroll deltaX", -100_000, 100_000);
+    const deltaY = finiteNumber(action.deltaY, "browser scroll deltaY", -100_000, 100_000);
+    if (deltaX === 0 && deltaY === 0) throw new Error("browser scroll delta must not be zero");
+    const visualProbeToken = optionalProbeToken(action.visualProbeToken);
+    return Object.freeze({
+      kind: "scroll",
+      ...(deltaX === undefined ? {} : { deltaX }),
+      deltaY,
+      ...(action.target === undefined ? {} : { target: text(action.target, "browser scroll target", 4_096) }),
+      ...(visualProbeToken === undefined ? {} : { visualProbeToken }),
     });
   }
   throw new Error(`unsupported browser action: ${String((action as { kind?: unknown }).kind)}`);
@@ -1452,8 +1657,9 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
       return true;
     },
 
-    async observeScreen(screenLeaseIdInput, ownerIdInput, generation, signal) {
+    async observeScreen(screenLeaseIdInput, ownerIdInput, generation, signal, rawRequest) {
       signal?.throwIfAborted();
+      const request = normalizeObservationRequest(rawRequest);
       const prepared = await serialize(() => {
         const control = service.assertAgentControl(screenLeaseIdInput, ownerIdInput, generation);
         const screenLease = requireScreenLease(control.screenLeaseId);
@@ -1470,7 +1676,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
       });
       try {
         const observation = normalizeObservation(
-          await prepared.adapter.observeScreen(prepared.screenId, generation, prepared.controller.signal),
+          await prepared.adapter.observeScreen(prepared.screenId, generation, prepared.controller.signal, request),
           prepared.screenId,
         );
         prepared.controller.signal.throwIfAborted();
@@ -1479,6 +1685,12 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
           nodeId: prepared.nodeId,
           screenId: prepared.screenId,
           generation,
+          observationId: observation.observationId ?? null,
+          elements: observation.elements?.length ?? 0,
+          deltaAdded: observation.delta?.added.length ?? 0,
+          deltaUpdated: observation.delta?.updated.length ?? 0,
+          deltaRemoved: observation.delta?.removedIds.length ?? 0,
+          filtered: request !== undefined,
         });
         return observation;
       } finally {
@@ -1521,6 +1733,29 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         service.assertAgentControl(prepared.screenLeaseId, ownerIdInput, generation);
         const normalizedResult: ComputerBrowserActionResult = Object.freeze({
           mode: result.mode,
+          ...(result.performed === undefined ? {} : { performed: Boolean(result.performed) }),
+          ...(result.confidence === undefined ? {} : { confidence: finiteNumber(result.confidence, "browser action confidence", 0, 1) }),
+          ...(result.visualProbeRequired === undefined ? {} : {
+            visualProbeRequired: Object.freeze({
+              ref: id(result.visualProbeRequired.ref, "browser visual-probe-required ref", 256),
+              reason: (() => {
+                const reason = result.visualProbeRequired!.reason;
+                if (reason !== "low-confidence" && reason !== "high-impact-action") throw new Error(`unsupported browser visual probe reason: ${String(reason)}`);
+                return reason;
+              })(),
+              recommendedSize: (() => {
+                const size = result.visualProbeRequired!.recommendedSize;
+                if (size !== "tiny" && size !== "small" && size !== "medium" && size !== "window" && size !== "full") throw new Error(`unsupported browser visual probe size: ${String(size)}`);
+                return size;
+              })(),
+            }),
+          }),
+          ...(result.verification === undefined ? {} : {
+            verification: Object.freeze({
+              structuralChange: Boolean(result.verification.structuralChange),
+              urlChanged: Boolean(result.verification.urlChanged),
+            }),
+          }),
           observation: normalizeObservation(result.observation, prepared.screenId),
         });
         publish("computer.browser.action-completed", `computer:${prepared.nodeId}:screen:${prepared.screenId}`, {
@@ -1529,8 +1764,59 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
           action: action.kind,
           mode: result.mode,
           generation,
+          performed: normalizedResult.performed ?? true,
+          confidence: normalizedResult.confidence ?? null,
+          visualProbeRequired: normalizedResult.visualProbeRequired?.reason ?? null,
+          structuralChange: normalizedResult.verification?.structuralChange ?? null,
+          urlChanged: normalizedResult.verification?.urlChanged ?? null,
         });
         return normalizedResult;
+      } finally {
+        finishScreenAction(prepared.screenLeaseId, prepared.controller, prepared.unlink);
+      }
+    },
+
+    async visualProbe(screenLeaseIdInput, ownerIdInput, generation, rawRequest, signal) {
+      signal?.throwIfAborted();
+      const request = normalizeVisualProbeRequest(rawRequest);
+      const prepared = await serialize(() => {
+        const control = service.assertAgentControl(screenLeaseIdInput, ownerIdInput, generation);
+        const screenLease = requireScreenLease(control.screenLeaseId);
+        const state = requireNodeState(screenLease.nodeId);
+        if (!browserSupervisorReady(state.node)) throw new Error(`Computer node ${state.node.id} browser supervisor is not ready`);
+        if (!state.adapter.visualProbe) throw new Error(`Computer node ${state.node.id} does not provide visual probing`);
+        const pending = beginScreenAction(screenLease.id, signal);
+        return Object.freeze({
+          screenLeaseId: screenLease.id,
+          screenId: screenLease.screenId,
+          nodeId: screenLease.nodeId,
+          adapter: state.adapter,
+          controller: pending.controller,
+          ...(pending.unlink === undefined ? {} : { unlink: pending.unlink }),
+        });
+      });
+      try {
+        const result = normalizeVisualProbeResult(await prepared.adapter.visualProbe!({
+          screenId: prepared.screenId,
+          controlGeneration: generation,
+          ...request,
+          signal: prepared.controller.signal,
+        }));
+        prepared.controller.signal.throwIfAborted();
+        service.assertAgentControl(prepared.screenLeaseId, ownerIdInput, generation);
+        publish("computer.visual.probed", `computer:${prepared.nodeId}:screen:${prepared.screenId}`, {
+          nodeId: prepared.nodeId,
+          screenId: prepared.screenId,
+          generation,
+          observationId: result.observationId,
+          image: result.image !== undefined,
+          imageBytes: result.image === undefined ? 0 : Math.floor((result.image.data.length * 3) / 4),
+          width: result.width,
+          height: result.height,
+          visibleTextItems: result.visibleText.length,
+          size: request.size ?? "small",
+        });
+        return result;
       } finally {
         finishScreenAction(prepared.screenLeaseId, prepared.controller, prepared.unlink);
       }

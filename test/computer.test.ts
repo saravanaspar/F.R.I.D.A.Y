@@ -21,12 +21,20 @@ function observation(screenId = "agent-1"): ComputerObservation {
   return Object.freeze({
     observedAt: new Date().toISOString(),
     screenId,
+    observationId: "obs-1",
     safety: { protectedInputOmitted: true as const, keystrokesOmitted: true as const, captchaOmitted: true as const, sensitiveScreenshotOmitted: true as const },
     url: "https://example.com/after-takeover",
     domSummary: "signed-in page; secret fields omitted",
     accessibilitySummary: "main document",
     tabs: Object.freeze([{ id: "tab-1", title: "Example", url: "https://example.com/after-takeover", active: true }]),
     screenshotArtifactRef: "artifact:screen-safe",
+    elements: Object.freeze([{
+      id: "e1", ref: "obs-1:e1", role: "button", name: "Continue",
+      bbox: { left: 10, top: 10, right: 50, bottom: 50 },
+      visible: true, enabled: true, focused: false, interactive: true, clickable: true, editable: false,
+      selectable: false, scrollable: false, draggable: false, actions: Object.freeze(["click" as const]),
+      source: "dom" as const, confidence: 0.95,
+    }]),
     processes: Object.freeze([{ pid: 123, name: "chromium" }]),
   });
 }
@@ -113,6 +121,21 @@ function fakeAdapter(overrides: Partial<ComputerNodeAdapter> = {}): ComputerNode
     async runBrowserAction(request) {
       browserRequests.push(request);
       return { mode: request.automationOrder[0]!, observation: observation(request.screenId) };
+    },
+    async visualProbe(request) {
+      return {
+        observationId: "obs-1",
+        safety: { protectedRegionOmitted: true as const, challengeRegionOmitted: true as const },
+        ...(request.ref === undefined ? {} : { ref: request.ref }),
+        bbox: request.bbox ?? { left: 10, top: 10, right: 50, bottom: 50 },
+        width: 40,
+        height: 40,
+        targetMatch: true,
+        confidence: 0.95,
+        visibleText: ["Continue"],
+        ...(request.ref === undefined ? {} : { probeToken: "probe-test" }),
+        ...(request.return === "image" ? { image: { data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB", mimeType: "image/png" as const } } : {}),
+      };
     },
     async restart() { lifecycle.restarts += 1; },
     async update() { lifecycle.updates += 1; },
@@ -351,6 +374,35 @@ describe("Phase 4 Shared Agent Computer", () => {
     expect(serialized).not.toContain("9876");
     expect(serialized).toContain("[REDACTED]");
     expect(safe.safety).toEqual({ protectedInputOmitted: true, keystrokesOmitted: true, captchaOmitted: true, sensitiveScreenshotOmitted: true });
+    await service.close();
+  });
+
+  it("fails closed when a visual probe omits its protected-region safety attestation", async () => {
+    const adapter = fakeAdapter({
+      async visualProbe(request) {
+        return {
+          observationId: "obs-1",
+          safety: undefined,
+          ...(request.ref === undefined ? {} : { ref: request.ref }),
+          bbox: request.bbox ?? { left: 10, top: 10, right: 50, bottom: 50 },
+          width: 40,
+          height: 40,
+          targetMatch: true,
+          confidence: 0.95,
+          visibleText: ["Continue"],
+        } as never;
+      },
+    });
+    const service = createComputerService({ idFactory: sequentialIds() });
+    await service.registerNode(adapter);
+    const grant = await service.requestScreen({ ownerId: "job-unsafe-visual", requireBrowser: true });
+    if (grant.state !== "acquired") throw new Error("expected Computer screen grant");
+    await expect(service.visualProbe(
+      grant.screenLease.id,
+      grant.screenLease.ownerId,
+      grant.controlLease.generation,
+      { ref: "obs-1:e1", return: "text" },
+    )).rejects.toThrow(/visual probe.*safety attestation/i);
     await service.close();
   });
 
@@ -618,12 +670,12 @@ describe("Phase 4 Shared Agent Computer", () => {
       deferOnFailure() {},
     } as never;
     const tools = collectContributions(AGENT_TOOL_CONTRIBUTION);
-    expect(tools.map((tool) => tool.id).sort()).toEqual(["computer-browser", "computer-observe"]);
-    expect(tools.map((tool) => tool.name).sort()).toEqual(["computer_browser", "computer_observe"]);
+    expect(tools.map((tool) => tool.id).sort()).toEqual(["computer-browser", "computer-observe", "computer-visual-probe"]);
+    expect(tools.map((tool) => tool.name).sort()).toEqual(["computer_browser", "computer_observe", "computer_visual_probe"]);
 
     const observe = tools.find((tool) => tool.name === "computer_observe")!;
     await expect(observe.execute({}, undefined, executionContext)).resolves.toMatchObject({
-      output: { screenId: "agent-1", screenshotArtifactRef: "artifact:screen-safe" },
+      output: { screenId: "agent-1", observationId: "obs-1", elements: [{ ref: "obs-1:e1" }] },
     });
     const browser = tools.find((tool) => tool.name === "computer_browser")!;
     adapter.setSnapshot(Object.freeze({
@@ -632,7 +684,7 @@ describe("Phase 4 Shared Agent Computer", () => {
       browser: Object.freeze({ running: false, profileId: "shared-profile", persistentProfile: true, windows: Object.freeze([]), tabs: Object.freeze([]) }),
     }));
     await service.refreshNode("node-1");
-    const waitingBrowser = browser.execute({ action: "click", target: "Continue" }, undefined, executionContext);
+    const waitingBrowser = browser.execute({ action: "click", target: "obs-1:e1" }, undefined, executionContext);
     for (let attempt = 0; service.status().waitingRequests === 0 && attempt < 50; attempt += 1) {
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
@@ -649,11 +701,23 @@ describe("Phase 4 Shared Agent Computer", () => {
       output: { mode: "playwright-dom", observation: { screenId: "agent-1" } },
     });
     expect(progressUpdates).toContainEqual(expect.objectContaining({ jobStatus: "running" }));
+    const visual = tools.find((tool) => tool.name === "computer_visual_probe")!;
+    await expect(visual.execute({ ref: "obs-1:e1", size: "tiny", return: "image" }, undefined, executionContext)).resolves.toMatchObject({
+      content: [
+        { type: "text" },
+        { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB" },
+      ],
+    });
+    await expect(browser.execute({ action: "click", target: "#legacy-selector" }, undefined, executionContext))
+      .rejects.toThrow(/current semantic ref/);
+    await expect(visual.execute({ ref: "#legacy-selector", size: "tiny", return: "text" }, undefined, executionContext))
+      .rejects.toThrow(/current semantic ref/);
     await expect(browser.execute({ action: "type", target: "password", text: "do-not-capture", sensitive: true }, undefined, executionContext))
       .rejects.toThrow(/human takeover|protected-credential/);
     expect(authorization.map((request) => request.action)).toEqual([
       { id: "computer.observe", effect: "private-read", resource: "computer:node-1:screen:agent-1", network: true },
       { id: "computer.browser.action", effect: "external-write", resource: "computer:node-1:screen:agent-1", network: true },
+      { id: "computer.visual.probe", effect: "private-read", resource: "computer:node-1:screen:agent-1", network: true },
     ]);
 
     await service.takeOver(grant.screenLease.id, "human:operator", null);
@@ -668,17 +732,17 @@ describe("Phase 4 Shared Agent Computer", () => {
         resumedAfterHumanTakeover: true,
         staleActionReplayed: false,
         controlGeneration: handBack.controlLease.generation,
-        observation: { screenId: "agent-1", screenshotArtifactRef: "artifact:screen-safe" },
+        observation: { screenId: "agent-1", observationId: "obs-1", elements: [{ ref: "obs-1:e1" }] },
       },
     });
-    await expect(browser.execute({ action: "click", target: "Continue after login" }, undefined, executionContext)).resolves.toMatchObject({
+    await expect(browser.execute({ action: "click", target: "obs-1:e1" }, undefined, executionContext)).resolves.toMatchObject({
       output: { mode: "playwright-dom", observation: { screenId: "agent-1" } },
     });
     expect(adapter.browserRequests.at(-1)?.controlGeneration).toBe(handBack.controlLease.generation);
 
     const browserRequestsBeforeSecondTakeover = adapter.browserRequests.length;
     await service.takeOver(grant.screenLease.id, "human:operator", null);
-    const pausedBrowser = browser.execute({ action: "click", target: "Do not replay during takeover" }, undefined, executionContext);
+    const pausedBrowser = browser.execute({ action: "click", target: "obs-1:e1" }, undefined, executionContext);
     for (let attempt = 0; service.status().waitingForControl === 0 && attempt < 50; attempt += 1) {
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
@@ -690,7 +754,7 @@ describe("Phase 4 Shared Agent Computer", () => {
         resumedAfterHumanTakeover: true,
         staleActionReplayed: false,
         controlGeneration: secondHandBack.controlLease.generation,
-        observation: { screenId: "agent-1", screenshotArtifactRef: "artifact:screen-safe" },
+        observation: { screenId: "agent-1", observationId: "obs-1", elements: [{ ref: "obs-1:e1" }] },
       },
     });
     expect(adapter.browserRequests).toHaveLength(browserRequestsBeforeSecondTakeover);

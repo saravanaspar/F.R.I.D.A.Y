@@ -169,6 +169,7 @@ describe("plugin boundaries", () => {
     expect(entry).toContain("AGENT_TOOL_CONTRIBUTION");
     expect(entry).toContain('name: "computer_observe"');
     expect(entry).toContain('name: "computer_browser"');
+    expect(entry).toContain('name: "computer_visual_probe"');
     expect(entry).toContain('id: "computer.takeover"');
     expect(entry).toContain('id: "computer.hand-back"');
     expect(entry).toContain('id: "computer.node.reset-managed"');

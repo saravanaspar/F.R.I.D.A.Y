@@ -50,6 +50,9 @@ describe("Phase 5 Linux Computer deployment", () => {
         PATH: `${bin}:/usr/bin:/bin`,
         SYSTEMCTL_LOG: systemctlLog,
         FRIDAY_CHROMIUM_BIN: "chromium-browser",
+        // Do not inherit a real host profile path. This test verifies the
+        // Snap-aware default derived from the temporary HOME above.
+        FRIDAY_COMPUTER_BROWSER_PROFILE_DIR: "",
       },
     });
 

@@ -106,9 +106,15 @@ export interface TurnFinalizerContribution {
   finalize(payload: AgentExtensionJsonValue, context: TurnFinalizerContext): void | Promise<void>;
 }
 
+export type AgentToolContributionContent =
+  | Readonly<{ readonly type: "text"; readonly text: string }>
+  | Readonly<{ readonly type: "image"; readonly data: string; readonly mimeType: string }>;
+
 export interface AgentToolContributionResult {
-  /** JSON-safe result rendered back to the model as bounded tool-result text. */
-  readonly output: AgentExtensionJsonValue;
+  /** JSON-safe result rendered back to the model as bounded tool-result text when content is not supplied. */
+  readonly output?: AgentExtensionJsonValue | undefined;
+  /** Optional native tool-result content. Use this for bounded image results such as Computer visual probes. */
+  readonly content?: readonly AgentToolContributionContent[] | undefined;
   /** Throwing is preferred; this flag adapts protocols such as MCP that return errors as values. */
   readonly isError?: boolean | undefined;
   readonly terminate?: boolean | undefined;

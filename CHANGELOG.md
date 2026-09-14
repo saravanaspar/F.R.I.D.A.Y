@@ -32,6 +32,9 @@ published release artifacts and generated release notes.
 
 ### Linux Agent Computer (Phase 5)
 
+- Added structure-first browser perception for the Linux/Sway CDP provider: bounded semantic elements now carry roles, names, state, actions, context, geometry, confidence, observation ids, observation-scoped refs, and structural deltas instead of requiring the model to reason over a full DOM text dump.
+- Added action-time semantic revalidation and stale-ref protection. Model-facing element actions require `obs-N:eM` refs, low-confidence/obscured/high-impact activations fail closed until explicitly verified, and selector-based compatibility remains below the model boundary only.
+- Added bounded micro-vision probes for ambiguous browser targets. Protected/challenge regions are refused, text mode returns safe local verification for non-vision models, image mode returns only the requested PNG crop as native current-turn tool content, and one-use probe tokens bind verification to the exact semantic target.
 - Made Linux Computer smoke acceptance readiness-based: it now retries live Sway output and Chromium CDP startup, recovers from stale systemd-published Sway sockets after restarts, and fails closed after a bounded retry window instead of racing freshly started services.
 - Started the first Linux/Sway platform slice behind the existing `ComputerNodeAdapter` instead of adding a new plugin or executor: opt-in provider registration, Sway physical/headless output discovery, shared-profile Chromium CDP targets per Agent screen, CPU/RAM/renderer telemetry, and Linux-specific Doctor diagnostics.
 - Added provider-side observation-safety enforcement for the Linux browser path: input values and protected/CAPTCHA-shaped DOM are omitted before attestation, sensitive URL/title/assignment data is redacted again, screenshots and human keystroke history are not exposed, and protected typing targets require human takeover.
@@ -43,6 +46,9 @@ published release artifacts and generated release notes.
 
 ### Shared Agent Computer
 
+- Extended the generic Agent-tool contribution seam to carry native image content without base64-in-JSON, while stripping image parts before durable Session history so visual probes remain ephemeral and do not inflate later model context.
+- Gave sibling subagents distinct Computer owner identities so concurrently delegated Agents can lease independent Agent screens instead of accidentally sharing the parent job's screen lease.
+- Expanded Computer/Turn Loop acceptance coverage for semantic refs, stale semantic drift, confidence/high-impact gating, protected regions, one-use visual confirmation, current-turn image handling, independent subagent ownership, and the login-wall human-takeover continuation path.
 - Started Phase 4 with a provider-neutral `computer` capability and `ComputerNodeAdapter` boundary for future Linux and Windows platform providers instead of adding a second executor or job system.
 - Added resource-aware Computer admission across RAM, CPU, browser renderer count, GPU load, screen workload, browser requirements, and free Agent screens. Overloaded requests return `WAITING_FOR_COMPUTER`, and queued waits are retried when node telemetry or lease availability changes.
 - Added exclusive expiring `ScreenLease` records plus generation-bound `ControlLease` ownership so stale GUI actions cannot survive lease changes or human takeover.

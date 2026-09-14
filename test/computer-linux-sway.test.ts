@@ -28,6 +28,13 @@ const SWAY_OUTPUTS = JSON.stringify([
 function fakeCdp(options: {
   readonly activeProtected?: boolean;
   readonly elementProtected?: boolean;
+  readonly structuredName?: string;
+  readonly structuredContext?: string;
+  readonly structuredObscured?: boolean;
+  readonly structuredFocused?: boolean;
+  readonly validationName?: string;
+  readonly validationContext?: string;
+  readonly probeUnsafe?: boolean;
 } = {}): LinuxCdpClient & { readonly calls: Array<{ targetId?: string; method: string; params?: Readonly<Record<string, unknown>> }> } {
   const calls: Array<{ targetId?: string; method: string; params?: Readonly<Record<string, unknown>> }> = [];
   const targets: LinuxCdpTarget[] = [{
@@ -62,6 +69,7 @@ function fakeCdp(options: {
         return { frameId: "frame-1" };
       }
       if (method === "Input.insertText" || method === "Input.dispatchKeyEvent" || method === "Input.dispatchMouseEvent") return {};
+      if (method === "Page.captureScreenshot") return { data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB" };
       if (method === "Runtime.callFunctionOn") {
         const functionDeclaration = String(params?.functionDeclaration ?? "");
         if (functionDeclaration.includes("getBoundingClientRect")) {
@@ -82,8 +90,81 @@ function fakeCdp(options: {
       if (method !== "Runtime.evaluate") throw new Error(`unexpected target command: ${method}`);
       const expression = String(params?.expression ?? "");
       if (expression === "location.href") return { result: { value: nextUrl } };
+      if (expression === "({width: innerWidth, height: innerHeight})") return { result: { value: { width: 1280, height: 720 } } };
       if (expression.includes("readyState: document.readyState")) {
         return { result: { value: { href: nextUrl, readyState: "complete" } } };
+      }
+      if (expression.includes("const region = input.bbox")) {
+        return {
+          result: {
+            value: {
+              unsafe: options.probeUnsafe === true,
+              text: [options.structuredName ?? "Add", options.structuredContext ?? "Chicken Biryani | ₹249"],
+              scrollX: 0,
+              scrollY: 0,
+              innerWidth: 1280,
+              innerHeight: 720,
+            },
+          },
+        };
+      }
+      if (expression.includes("const protectedTarget = protectedPattern.test(signature)")) {
+        return {
+          result: {
+            value: {
+              found: true,
+              protected: options.elementProtected === true,
+              visible: true,
+              enabled: true,
+              obscured: options.structuredObscured === true,
+              name: options.validationName ?? options.structuredName ?? "Add",
+              context: options.validationContext ?? options.structuredContext ?? "Chicken Biryani | ₹249",
+              role: "button",
+              x: 320,
+              y: 240,
+              left: 280,
+              top: 220,
+              right: 360,
+              bottom: 260,
+              pageLeft: 280,
+              pageTop: 220,
+              pageRight: 360,
+              pageBottom: 260,
+            },
+          },
+        };
+      }
+      if (expression.includes("const interactiveSelector = [")) {
+        return {
+          result: {
+            value: [{
+              selector: "#safe-button",
+              role: "button",
+              name: options.structuredName ?? "Add",
+              context: options.structuredContext ?? "Chicken Biryani | ₹249",
+              left: 280,
+              top: 220,
+              right: 360,
+              bottom: 260,
+              pageLeft: 280,
+              pageTop: 220,
+              pageRight: 360,
+              pageBottom: 260,
+              visible: true,
+              enabled: true,
+              focused: options.structuredFocused === true,
+              interactive: true,
+              clickable: true,
+              editable: false,
+              selectable: false,
+              scrollable: false,
+              draggable: false,
+              protected: false,
+              obscured: options.structuredObscured === true,
+              actions: ["click"],
+            }],
+          },
+        };
       }
       if (expression.includes("const el = document.activeElement;")) {
         return { result: { value: { protected: options.activeProtected === true, expected: true } } };
@@ -115,10 +196,24 @@ function adapterFixture(options: {
   readonly executable?: (command: string) => Promise<boolean>;
   readonly activeProtected?: boolean;
   readonly elementProtected?: boolean;
+  readonly structuredName?: string;
+  readonly structuredContext?: string;
+  readonly structuredObscured?: boolean;
+  readonly structuredFocused?: boolean;
+  readonly validationName?: string;
+  readonly validationContext?: string;
+  readonly probeUnsafe?: boolean;
 } = {}) {
   const cdp = fakeCdp({
     ...(options.activeProtected === undefined ? {} : { activeProtected: options.activeProtected }),
     ...(options.elementProtected === undefined ? {} : { elementProtected: options.elementProtected }),
+    ...(options.structuredName === undefined ? {} : { structuredName: options.structuredName }),
+    ...(options.structuredContext === undefined ? {} : { structuredContext: options.structuredContext }),
+    ...(options.structuredObscured === undefined ? {} : { structuredObscured: options.structuredObscured }),
+    ...(options.structuredFocused === undefined ? {} : { structuredFocused: options.structuredFocused }),
+    ...(options.validationName === undefined ? {} : { validationName: options.validationName }),
+    ...(options.validationContext === undefined ? {} : { validationContext: options.validationContext }),
+    ...(options.probeUnsafe === undefined ? {} : { probeUnsafe: options.probeUnsafe }),
   });
   const adapter = createLinuxSwayComputerAdapter({
     environment: {
@@ -217,6 +312,177 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
     await service.close();
   });
 
+  it("returns structured semantic refs, preserves local element ids across observations, and rejects stale refs", async () => {
+    const { adapter } = adapterFixture();
+    await adapter.snapshot();
+
+    const first = await adapter.observeScreen("HEADLESS-1", 1, undefined, {
+      scope: "interactive",
+      query: "Add",
+      maxElements: 10,
+    });
+    expect(first.domSummary).toBeUndefined();
+    expect(first.observationId).toBe("obs-1");
+    expect(first.elements).toHaveLength(1);
+    expect(first.elements?.[0]).toMatchObject({
+      id: "e1",
+      ref: "obs-1:e1",
+      role: "button",
+      name: "Add",
+      actions: ["click"],
+      source: "dom",
+    });
+
+    const second = await adapter.observeScreen("HEADLESS-1", 1, undefined, {
+      scope: "interactive",
+      query: "Add",
+      maxElements: 10,
+    });
+    expect(second.observationId).toBe("obs-2");
+    expect(second.elements?.[0]).toMatchObject({ id: "e1", ref: "obs-2:e1" });
+    expect(second.delta).toMatchObject({ baseObservationId: "obs-1", retained: 1, added: [], updated: [], removedIds: [] });
+
+    await expect(adapter.runBrowserAction?.({
+      screenId: "HEADLESS-1",
+      controlGeneration: 1,
+      action: { kind: "click", target: "obs-1:e1" },
+      automationOrder: ["cdp"],
+    })).rejects.toThrow(/STALE_REF.*reinspect_required=true/);
+  });
+
+  it("rejects a semantic ref if the live target label or context changed after observation", async () => {
+    const { adapter, cdp } = adapterFixture({
+      structuredName: "Continue",
+      structuredContext: "Review details",
+      validationName: "Delete",
+      validationContext: "Delete account",
+    });
+    await adapter.snapshot();
+    const observation = await adapter.observeScreen("HEADLESS-1", 1, undefined, { scope: "interactive", maxElements: 10 });
+    const ref = observation.elements?.[0]?.ref;
+    if (!ref) throw new Error("expected semantic ref");
+
+    await expect(adapter.runBrowserAction?.({
+      screenId: "HEADLESS-1",
+      controlGeneration: 1,
+      action: { kind: "click", target: ref },
+      automationOrder: ["cdp"],
+    })).rejects.toThrow(/STALE_REF.*semantic_target_changed=true/);
+    expect(cdp.calls.some((call) => call.method === "Input.dispatchMouseEvent")).toBe(false);
+  });
+
+  it("gates high-impact semantic actions behind a bounded visual probe token and returns the crop as native image data", async () => {
+    const { adapter, cdp } = adapterFixture({ structuredName: "Place Order", structuredContext: "₹529 total" });
+    await adapter.snapshot();
+    const observation = await adapter.observeScreen("HEADLESS-1", 1, undefined, { scope: "interactive", maxElements: 10 });
+    const ref = observation.elements?.[0]?.ref;
+    if (!ref) throw new Error("expected semantic ref");
+
+    const deferred = await adapter.runBrowserAction?.({
+      screenId: "HEADLESS-1",
+      controlGeneration: 1,
+      action: { kind: "click", target: ref },
+      automationOrder: ["cdp"],
+    });
+    expect(deferred).toMatchObject({
+      performed: false,
+      visualProbeRequired: { ref, reason: "high-impact-action", recommendedSize: "small" },
+    });
+    expect(cdp.calls.some((call) => call.method === "Input.dispatchMouseEvent")).toBe(false);
+
+    const probe = await adapter.visualProbe?.({
+      screenId: "HEADLESS-1",
+      controlGeneration: 1,
+      ref,
+      size: "tiny",
+      return: "image",
+    });
+    expect(probe).toMatchObject({
+      observationId: observation.observationId,
+      safety: { protectedRegionOmitted: true, challengeRegionOmitted: true },
+      ref,
+      targetMatch: true,
+      image: { mimeType: "image/png" },
+    });
+    expect(probe?.width).toBeLessThanOrEqual(128);
+    expect(probe?.height).toBeLessThanOrEqual(128);
+    expect(probe?.probeToken).toMatch(/^probe-/);
+    if (!probe?.probeToken) throw new Error("expected visual probe token");
+    expect(cdp.calls.some((call) => call.method === "Page.captureScreenshot")).toBe(true);
+
+    const performed = await adapter.runBrowserAction?.({
+      screenId: "HEADLESS-1",
+      controlGeneration: 1,
+      action: { kind: "click", target: ref, visualProbeToken: probe.probeToken },
+      automationOrder: ["cdp"],
+    });
+    expect(performed).toMatchObject({ performed: true, mode: "cdp" });
+    expect(cdp.calls.some((call) => call.method === "Input.dispatchMouseEvent" && call.params?.type === "mousePressed")).toBe(true);
+  });
+
+  it("also gates activation-key submission on a high-impact focused semantic target", async () => {
+    const { adapter, cdp } = adapterFixture({ structuredName: "Place Order", structuredContext: "₹529 total", structuredFocused: true });
+    await adapter.snapshot();
+    const observation = await adapter.observeScreen("HEADLESS-1", 1, undefined, { scope: "interactive", maxElements: 10 });
+    const ref = observation.elements?.[0]?.ref;
+    if (!ref) throw new Error("expected semantic ref");
+
+    const deferred = await adapter.runBrowserAction?.({
+      screenId: "HEADLESS-1",
+      controlGeneration: 1,
+      action: { kind: "press", key: "Enter", target: ref },
+      automationOrder: ["cdp"],
+    });
+    expect(deferred).toMatchObject({
+      performed: false,
+      visualProbeRequired: { ref, reason: "high-impact-action" },
+    });
+    expect(cdp.calls.some((call) => call.method === "Input.dispatchKeyEvent")).toBe(false);
+
+    const probe = await adapter.visualProbe?.({
+      screenId: "HEADLESS-1",
+      controlGeneration: 1,
+      ref,
+      size: "small",
+      return: "text",
+    });
+    if (!probe?.probeToken) throw new Error("expected visual probe token");
+
+    await expect(adapter.runBrowserAction?.({
+      screenId: "HEADLESS-1",
+      controlGeneration: 1,
+      action: { kind: "press", key: "Enter", target: ref, visualProbeToken: probe.probeToken },
+      automationOrder: ["cdp"],
+    })).resolves.toMatchObject({ performed: true });
+    expect(cdp.calls.some((call) => call.method === "Input.dispatchKeyEvent" && call.params?.type === "keyDown")).toBe(true);
+  });
+
+  it("requires micro vision for low-confidence semantic targets and refuses protected visual regions", async () => {
+    const { adapter } = adapterFixture({ structuredObscured: true, probeUnsafe: true });
+    await adapter.snapshot();
+    const observation = await adapter.observeScreen("HEADLESS-1", 1, undefined, { scope: "interactive", maxElements: 10 });
+    const ref = observation.elements?.[0]?.ref;
+    if (!ref) throw new Error("expected semantic ref");
+
+    await expect(adapter.runBrowserAction?.({
+      screenId: "HEADLESS-1",
+      controlGeneration: 1,
+      action: { kind: "click", target: ref },
+      automationOrder: ["cdp"],
+    })).resolves.toMatchObject({
+      performed: false,
+      visualProbeRequired: { ref, reason: "low-confidence", recommendedSize: "tiny" },
+    });
+
+    await expect(adapter.visualProbe?.({
+      screenId: "HEADLESS-1",
+      controlGeneration: 1,
+      ref,
+      size: "tiny",
+      return: "text",
+    })).rejects.toThrow(/protected or challenge visual region requires human takeover/);
+  });
+
   it("rejects provider-level protected typing targets even when the caller marks the text non-sensitive", async () => {
     const { adapter } = adapterFixture();
     await adapter.snapshot();
@@ -259,7 +525,7 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
     await adapter.runBrowserAction?.({
       screenId: "HEADLESS-1",
       controlGeneration: 1,
-      action: { kind: "press", key: "Enter" },
+      action: { kind: "press", key: "Enter", target: "#safe-input" },
       automationOrder: ["cdp"],
     });
 
