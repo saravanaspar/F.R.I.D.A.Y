@@ -24,6 +24,8 @@ import { createEventsPlugin } from "../plugins/events/index.js";
 import { TURN_LOOP_CAPABILITY, type InboundTurn } from "../plugins/turn-loop/contract.js";
 import { PluginTestHost } from "./helpers/plugin-host.js";
 import { WebSocket } from "ws";
+import { SESSION_JOBS_CAPABILITY, type SessionJobRecord } from "../plugins/session-jobs/contract.js";
+import { ARTIFACTS_CAPABILITY } from "../plugins/artifacts/contract.js";
 
 const execFileAsync = promisify(execFile);
 const roots: string[] = [];
@@ -320,6 +322,62 @@ describe("Phase 1 client gateway", () => {
     expect((published.report as { diff: { patch: string } }).diff.patch).toContain("+changed through client project workspace");
     await post("/v1/projects/worktrees/remove", { projectId: "atlas", directory, force: true, deleteBranch: true });
 
+    await gateway.stop();
+    await host.dispose();
+  });
+
+  it("exposes authenticated job and artifact metadata for desktop clients", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "friday-client-phase6-resources-"));
+    roots.push(stateDir);
+    process.env.FRIDAY_STATE_DIR = stateDir;
+    const host = new PluginTestHost();
+    await host.activatePlugin(capabilitiesPlugin);
+    await host.activatePlugin(createEventsPlugin({ autoStartWorker: false }));
+    await host.activatePlugin(devicesPlugin);
+    const now = new Date().toISOString();
+    const job = {
+      id: "job-phase6",
+      destinationId: "conversation:phase6",
+      label: "Phase 6 job",
+      requestPreview: "run tests",
+      origin: { authority: "local", channel: "client", accountId: "desktop-phase6", conversationId: "phase6", senderId: "operator" },
+      status: "running",
+      createdAt: now,
+      updatedAt: now,
+      timeline: [],
+      directives: [],
+    } as unknown as SessionJobRecord;
+    provideCapability(SESSION_JOBS_CAPABILITY, {
+      list: () => [job],
+      get: (id: string) => id === job.id ? job : undefined,
+      cancel: async () => ({ ...job, status: "cancelled", updatedAt: new Date().toISOString() }),
+    } as never);
+    provideCapability(ARTIFACTS_CAPABILITY, {
+      storage: async () => ({ artifacts: 1, totalBytes: 12, quotaBytes: 1_000, availableBytes: 988, utilization: 0.012 }),
+      inspect: async (ref: string) => ({ ref, id: "artifact-1", fileName: "report.txt", mimeType: "text/plain", sizeBytes: 12, sha256: "a".repeat(64), createdAt: now }),
+    } as never);
+    await host.activatePlugin(clientsPlugin);
+    await host.completePluginBootstrap();
+    const devices = requireCapability(DEVICES_CAPABILITY);
+    const gateway = requireCapability(CLIENT_GATEWAY_CAPABILITY);
+    const keys = generateKeyPairSync("ed25519");
+    const descriptor: DeviceDescriptor = { deviceId: "desktop-phase6", name: "Phase 6 client", type: "test", publicKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString() };
+    const pairing = await devices.beginPairing(descriptor);
+    await devices.approvePairing(pairing.pairingId);
+    const status = await gateway.start({ port: 0 });
+    const base = `http://127.0.0.1:${status.port}`;
+    const post = async (path: string, input: Record<string, unknown>) => {
+      const challenge = await devices.issueChallenge(descriptor.deviceId);
+      const signature = sign(null, Buffer.from(challenge.challenge), keys.privateKey).toString("base64url");
+      const response = await fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceId: descriptor.deviceId, challenge: challenge.challenge, signature, ...input }) });
+      expect(response.status).toBeLessThan(400);
+      return response.json() as Promise<Record<string, unknown>>;
+    };
+    expect((await post("/v1/session-jobs/list", { activeOnly: true })).jobs).toHaveLength(1);
+    expect((await post("/v1/session-jobs/get", { jobId: job.id })).job).toMatchObject({ id: job.id });
+    expect((await post("/v1/session-jobs/cancel", { jobId: job.id, reason: "operator stop" })).job).toMatchObject({ status: "cancelled" });
+    expect((await post("/v1/artifacts/storage", {})).storage).toMatchObject({ artifacts: 1, totalBytes: 12 });
+    expect((await post("/v1/artifacts/inspect", { ref: "artifact://artifact-1" })).artifact).toMatchObject({ fileName: "report.txt" });
     await gateway.stop();
     await host.dispose();
   });
