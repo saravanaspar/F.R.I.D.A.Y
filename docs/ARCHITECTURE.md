@@ -2,6 +2,54 @@
 
 F.R.I.D.A.Y has one core brain and many clients. Agents, Sessions, Session Jobs, Memory, Scheduler, Tools, Sandbox, Permissions, Vault, Events, Artifacts, Skills, MCP, Subagents, and observability remain the existing authorities. New product domains compose those contracts.
 
+## Model-context trust and prompt provenance
+
+The model-facing prompt is not an authority boundary. FRIDAY's runtime remains
+the authority for permissions, leases, secrets, tool schemas, lifecycle phases,
+workspace ownership, and durable state. The `prompts` capability only formats
+host-resolved context using a typed trust lattice:
+
+```text
+core-policy
+  > host-policy
+  > user-config
+  > project-guidance
+  > runtime-context
+  > untrusted-data
+```
+
+Each prompt section also declares `stable` or `volatile` cache scope. Authority
+and cacheability are deliberately independent: persistent user/profile/Skill
+configuration may be stable without becoming host policy, while current time,
+Project state, Computer leases, and hook counters stay volatile. External
+material such as tool output, source files, webpages, Computer UI/OCR/vision
+text, MCP/API results, logs, attachments, Memory recall, and quoted messages is
+untrusted data and cannot change FRIDAY's instructions merely by containing
+imperative language.
+
+Provider cache layout may place volatile sections after lower-authority stable
+sections. That physical order does not define trust: the typed authority label
+does. Lower-authority content cannot forge reserved FRIDAY prompt-section or
+host-context envelopes to change its provenance.
+
+Agent Profiles are strong persistent user configuration. Their detailed role
+instructions should materially control approach, depth, priorities, domain
+conventions, verification, and communication, but remain subordinate to
+core/host policy and the user's newer explicit objective. Personas remain
+presentation-only. The active Project's exact bounded `AGENTS.md` may contribute
+repository-local `project-guidance` only when opened as a regular file without
+following a symlink; arbitrary repository documents do not gain instruction
+authority. Skills are advertised only after the Skills owner has performed its
+bounded static trust scan for prompt-injection/host-boundary forgery and
+dangerous procedure content, and Skill discovery never follows symlinked Skill
+roots/files/directories.
+
+Compaction preserves the same provenance rules. Hidden assistant reasoning is
+excluded, direct user messages are the only conversational source that can
+establish durable user goals/preferences, and host-produced historical
+summaries do not upgrade quoted tool/web/file/UI instructions into fresh user
+authority.
+
 ## New domains
 
 ```text
@@ -12,6 +60,19 @@ apps/desktop apps/android
 ```
 
 An Agent Profile is a persistent named teammate; a Subagent remains a temporary worker. A Computer Node is shared by the user and Agents, with separate leased screens and a persistent browser supervisor. Human takeover pauses computer input, protects secrets, then forces fresh observation and replanning before work resumes.
+
+Sibling Subagents for one Project job intentionally share that job's Project
+workspace and filesystem so they see the same checked-out state and outputs.
+Turn Loop serializes ordinary shared-workspace mutation tool invocations across
+the parent and children; prompts require parallel implementers to partition disjoint files or
+logical areas, and agents must not leave background writers mutating the shared
+workspace while sibling implementation work is active. This is coordination,
+not filesystem isolation. Computer ownership is different: every concurrently
+active Agent receives its own screen lease. A profile's default screen is a hard
+preference for the root Agent and a soft preference for Subagents, allowing
+sibling Agents to fall back to other free Agent screens. Browser profile/cache,
+login state, downloads, home directory, and Project filesystem remain shared by
+the Computer Node as designed.
 
 Linux is first-class through a managed Sway/wlroots session, Chromium/Playwright/CDP, and headless agent outputs. Windows keeps F.R.I.D.A.Y Core in WSL2 and adds a native Computer Node helper for browser/CDP, UI Automation, virtual displays, and serialized raw input. The Android app is a thin Kotlin/Compose client; the desktop app is Electron/React. Neither owns durable work.
 

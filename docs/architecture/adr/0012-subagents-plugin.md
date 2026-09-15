@@ -20,6 +20,22 @@ moving those responsibilities into `subagents`.
 The parent registry can be persisted through generic session custom entries.
 `sessions` remains unaware of subagent semantics.
 
+Children created for one parent Project job intentionally inherit that job's
+active Project workspace/filesystem unless another owner explicitly provides
+isolation. `subagents` still does not own filesystem synchronization: Turn Loop
+serializes ordinary child mutation-tool invocations for the same workspace and
+the model doctrine requires parallel implementers to partition disjoint files
+or logical areas. Background writers are not made safe by that tool-level
+serialization and must not be left mutating the shared workspace during sibling
+implementation work.
+
+Computer display ownership is separate from shared Project/browser state. Turn
+Loop derives a distinct Computer owner for each child so concurrent Subagents
+receive different Agent screen leases. A profile's preferred screen is soft for
+children so siblings can fall back to other free screens. The Computer Node's
+browser profile/cache/login state, home/filesystem, downloads, and Project
+workspace may remain shared exactly as the Computer architecture specifies.
+
 ## Boundary
 
 `subagents` does not own:

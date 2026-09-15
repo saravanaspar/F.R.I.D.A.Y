@@ -154,7 +154,7 @@ export class ConditionalHookStore {
     return Number(result.changes) === 1;
   }
 
-  invoke(ownerScope: string, id: string): ConditionalHookRule | undefined {
+  invoke(ownerScope: string, id: string, expectedPhase: ConditionalHookPhase): ConditionalHookRule | undefined {
     this.#assertOpen();
     this.#db.exec("BEGIN IMMEDIATE");
     try {
@@ -162,6 +162,9 @@ export class ConditionalHookStore {
       if (!current || !current.enabled || (current.maxInvocations !== null && current.invocationCount >= current.maxInvocations)) {
         this.#db.exec("COMMIT");
         return undefined;
+      }
+      if (current.phase !== expectedPhase) {
+        throw new Error(`Conditional-hook phase mismatch: rule ${current.id} is ${current.phase}, host phase is ${expectedPhase}`);
       }
       const now = new Date().toISOString();
       const result = this.#db.prepare(`

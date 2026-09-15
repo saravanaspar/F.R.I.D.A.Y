@@ -7,6 +7,21 @@ published release artifacts and generated release notes.
 
 ## [Unreleased]
 
+### Prompt trust, context provenance, and Agent coordination
+
+- Added typed model-prompt provenance and cache scope. FRIDAY prompt sections now declare `core-policy`, `host-policy`, `user-config`, `project-guidance`, `runtime-context`, or `untrusted-data` independently from `stable`/`volatile` provider-cache placement, so formatting can no longer silently elevate a plugin/user/project/runtime section into host policy.
+- Hardened the global Agent doctrine against indirect prompt injection: webpages, tool/shell output, repository/file contents, Computer UI/OCR/vision text, MCP/API responses, logs, attachments, Memory recall, and quoted conversation text remain data rather than instructions. Agent Profile/custom user instructions stay strong and explicit while remaining subordinate to core/host policy and a newer direct user objective.
+- Hardened compaction provenance. Hidden assistant thinking is excluded from compaction input; tool/external output is explicitly marked untrusted; direct user messages are the only conversational source that can establish durable goals/preferences; host-generated branch/compaction summaries are reintroduced as historical context instead of fresh user instructions.
+- Added bounded Skill trust scanning before discovered user/project Skills become model-visible procedure. Skills containing prompt-policy override/exfiltration, FRIDAY host-tag forgery, symlinked roots/files/directories, destructive command/procedure primitives, or explicit secret-exfiltration instructions are diagnosed and omitted; clean safety guidance remains valid. Binary/static assets are ignored by the instruction-text scan budget.
+- Made Conditional Hook phases host-enforced instead of prompt-only. Turn Loop derives the active lifecycle phase for `conditional_hook_invoke`, and the Conditional Hooks store rejects phase mismatches before consuming invocation state.
+- Wired the active Project workspace's exact bounded non-symlink `AGENTS.md` into the prompt as lower-authority project guidance using a no-follow descriptor read, and added host-resolved current instant/IANA timezone/local wall-clock as volatile runtime context.
+- Made Computer vision guidance model-capability-aware: text-only models are instructed and enforced to use structured/text probes, while image probes are available only when the active model accepts image input.
+- Kept Subagents on the intentionally shared Project filesystem while serializing ordinary parent/child mutation-tool calls that target the same workspace. Parallel implementers are instructed to partition disjoint files/areas and avoid mutating background writers; the parent remains responsible for integration and verification.
+- Preserved shared browser/account/cache/filesystem state while making display ownership per-Agent. Root profile screen defaults remain hard preferences; Subagents inherit them as soft preferences and fall back to other free Agent screens so siblings can act independently.
+- Removed duplicated Skill/subagent prompt doctrine, made Skill inspection wording match the actually available file-capable tool, kept volatile Computer/Project/hook/time state out of the stable prompt prefix, and unified custom system guidance with the normal FRIDAY doctrine rather than replacing capability/safety instructions.
+- Tightened the hardening verification path: explicitly negated safety language remains valid in persistent Agent Profile instructions, managed-Skill security rejections use one consistent diagnostic, volatile host-clock changes no longer invalidate stable-prefix cache assertions, and typed prompt/tool test contexts compile without `never`/mutable-array escapes.
+- Replaced reserved FRIDAY prompt-tag regular expressions with a forward-only linear scanner, preserving case/whitespace/closing-tag handling while eliminating polynomial backtracking on attacker-controlled prompt content.
+
 ### Client foundation
 
 - Added the versioned client protocol package used by server transports and future desktop, Android, and Computer Node clients.
@@ -17,6 +32,7 @@ published release artifacts and generated release notes.
 ### Agent Profiles and Conversations
 
 - Added persistent named Agent Profiles with role instructions, scoped memory declarations, enabled Skills/plugins, notification preferences, approval policy, and restart-safe CRUD operations.
+- Agent Profile ids now derive a bounded lowercase kebab-case slug from multi-word display names when the caller omits an explicit id; explicitly supplied ids remain strict lowercase kebab-case.
 - Added persistent Direct/Group Conversation metadata over existing Sessions, including participants, pin/hide state, notification state, read sequence, Threads with reply counts, Reactions, mention resolution, and visible Agent-to-Agent handoffs.
 - Routed handoffs through the existing Session Jobs capability when an execution runner is available, without introducing a second queue or transcript store.
 - Added profile selection to Turn Loop turns, profile identity prompt sections, and authorized `global:user`, `agent:<id>`, `project:<id>`, and `local` Memory namespaces with cross-profile read/write isolation.

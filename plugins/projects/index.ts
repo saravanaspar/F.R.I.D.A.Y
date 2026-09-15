@@ -540,16 +540,19 @@ function registerAgentProjectTools(
     render(context) {
       if (!context.projectId || !context.projectRoot || !context.projectWorkspace || !context.projectExecutionTarget) return undefined;
       const isolated = resolve(context.projectWorkspace) !== resolve(context.projectRoot);
-      return [
-        "<friday_project_context>",
-        `Project: ${context.projectId}`,
-        `Canonical root: ${context.projectRoot}`,
-        `Active workspace: ${context.projectWorkspace}`,
-        `Execution target: ${context.projectExecutionTarget.id} (${context.projectExecutionTarget.kind})`,
-        `Isolated coding worktree: ${isolated ? "yes" : "no"}`,
-        "Run shell/edit/process/IPython operations against the active workspace. Use project_validate for configured deterministic test/build commands, project_diff to inspect/publish the complete patch, and project_commit before requesting project_promote. Promotion mutates the canonical repository and always requires explicit authorization.",
-        "</friday_project_context>",
-      ].join("\n");
+      return {
+        authority: "runtime-context",
+        cache: "volatile",
+        content: [
+          `Project: ${context.projectId}`,
+          `Canonical root: ${context.projectRoot}`,
+          `Active workspace: ${context.projectWorkspace}`,
+          `Execution target: ${context.projectExecutionTarget.id} (${context.projectExecutionTarget.kind})`,
+          `Isolated coding worktree: ${isolated ? "yes" : "no"}`,
+          "Run shell/edit/process/IPython operations against the active workspace. Use project_validate for configured deterministic test/build commands, project_diff to inspect/publish the complete patch, and project_commit before requesting project_promote. Promotion mutates the canonical repository and always requires explicit authorization.",
+          "Sibling subagents for the same parent job may intentionally share this active workspace. FRIDAY serializes ordinary shared-workspace mutation tool calls, but agents must still partition concurrent implementation onto disjoint files/areas and must not leave mutating background processes running while sibling implementation work is active.",
+        ].join("\n"),
+      };
     },
   });
 

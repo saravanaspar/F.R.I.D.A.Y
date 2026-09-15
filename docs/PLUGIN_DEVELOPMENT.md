@@ -109,6 +109,31 @@ Common contribution surfaces include:
 
 The owning plugin contributes the behavior. Central executors should discover contributions generically rather than grow feature-specific imports or switch statements.
 
+### Model-facing prompt contributions declare provenance
+
+An `agent.prompt-section` contribution is model guidance, not a shortcut around
+an authority boundary. Every prompt contribution must return both:
+
+- `authority`: one of the Turn Loop-supported prompt trust classes
+  (`host-policy`, `user-config`, `project-guidance`, `runtime-context`, or `untrusted-data`); and
+- `cache`: `stable` or `volatile`.
+
+Use `host-policy` only for doctrine owned by a trusted capability/runtime seam,
+such as how to use the active Computer safely. Persistent user choices such as
+Agent Profile or Persona configuration are `user-config`. Repository-local instructions selected through an owning project/context seam may be `project-guidance`; plugins must never label arbitrary repository text as this tier. Current leases,
+workspace identities, counters, and other changing facts are
+`runtime-context` and normally `volatile`. Retrieved/external text is
+`untrusted-data`; never label a webpage, tool result, file body, MCP/API result,
+OCR output, or quoted user-provided source as host policy merely because a
+plugin retrieved it.
+
+`prompts` is the formatter/orderer. It will preserve and expose the declared
+provenance but cannot make a bad classification safe. Hard invariants such as
+authorization, lifecycle phase, stale-reference checks, secret handling,
+resource ownership, and tool schemas must be enforced in code below the prompt.
+
+`core-policy` is deliberately unavailable to plugin prompt contributions; it is reserved to the Prompts/host operating doctrine. The active workspace `AGENTS.md` remains selected by Turn Loop/Prompts composition. Do not have arbitrary plugins read repository Markdown and inject it as `user-config`, `project-guidance`, or `host-policy`.
+
 ## 6. Own lifecycle cleanup
 
 If activation opens sockets, starts workers, registers callbacks, mounts sandbox paths, or spawns managed processes, register reversible cleanup through the plugin activation context. A failed activation or shutdown must not leak resources into the next runtime.

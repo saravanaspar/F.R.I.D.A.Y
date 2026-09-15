@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -34,6 +34,7 @@ import { withTestModel } from "./helpers/faux-model.js";
 const roots: string[] = [];
 const previousProvider = process.env.FRIDAY_MODEL_PROVIDER;
 const previousModelId = process.env.FRIDAY_MODEL_ID;
+const previousTimezone = process.env.FRIDAY_TIMEZONE;
 
 function tempRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "friday-turn-agent-"));
@@ -86,6 +87,8 @@ afterEach(() => {
   else process.env.FRIDAY_MODEL_PROVIDER = previousProvider;
   if (previousModelId === undefined) delete process.env.FRIDAY_MODEL_ID;
   else process.env.FRIDAY_MODEL_ID = previousModelId;
+  if (previousTimezone === undefined) delete process.env.FRIDAY_TIMEZONE;
+  else process.env.FRIDAY_TIMEZONE = previousTimezone;
 });
 
 describe("Turn Loop agent executor", () => {
@@ -466,6 +469,78 @@ describe("Turn Loop agent executor", () => {
     }
   });
 
+  it("derives conditional-hook phases from tool lifecycle instead of trusting the model declaration alone", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "faux";
+    process.env.FRIDAY_MODEL_ID = "faux-1";
+    const stateDir = tempRoot();
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(sessionsPlugin);
+    await friday.activatePlugin(promptsPlugin);
+    await friday.activatePlugin(modelPlugin);
+    await friday.activatePlugin(agentPlugin);
+
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
+    const phases: string[] = [];
+    let actions = 0;
+    const contributions: AgentToolContribution[] = [
+      {
+        id: "test-action",
+        name: "test_action",
+        label: "Test action",
+        description: "Perform one observable test action.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        async execute() { actions += 1; return { output: { ok: true } }; },
+      },
+      {
+        id: "conditional-hook-test",
+        name: "conditional_hook_invoke",
+        label: "Conditional hook test",
+        description: "Test host-derived conditional-hook phase propagation.",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            phase: { type: "string", enum: ["turn", "before-action", "after-action", "before-handover"] },
+          },
+          required: ["id", "phase"],
+          additionalProperties: false,
+        },
+        async execute(_input, _signal, context) {
+          phases.push(String(context?.conditionalHookPhase));
+          return { output: { active: true } };
+        },
+      },
+    ];
+    const executor = createAgentTurnExecutor({
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: withTestModel(requireCapability(MODEL_CAPABILITY), faux),
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions: requireCapability(SESSIONS_CAPABILITY),
+      tools: { createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService,
+      toolContributions: () => contributions,
+    }, { stateDir, maxCachedSessions: 2 });
+
+    try {
+      const hookId = "hook-00000000-0000-0000-0000-000000000001";
+      faux.setResponses([
+        modelRuntime.fauxAssistantMessage(modelRuntime.fauxToolCall("conditional_hook_invoke", { id: hookId, phase: "after-action" }), { stopReason: "toolUse" }),
+        modelRuntime.fauxAssistantMessage(modelRuntime.fauxToolCall("test_action", {}), { stopReason: "toolUse" }),
+        modelRuntime.fauxAssistantMessage(modelRuntime.fauxToolCall("conditional_hook_invoke", { id: hookId, phase: "after-action" }), { stopReason: "toolUse" }),
+        modelRuntime.fauxAssistantMessage("done"),
+      ]);
+      const result = await executor.execute({ turn: turn("hook-phase", "exercise the hook lifecycle"), decision: decision("session:new") });
+      expect(result.text).toBe("done");
+      expect(actions).toBe(1);
+      expect(phases).toEqual(["after-action"]);
+    } finally {
+      await executor.dispose();
+      faux.unregister();
+    }
+  });
+
   it("passes native image content from plugin-contributed tools back to the model without JSON/base64 text wrapping", async () => {
     process.env.FRIDAY_MODEL_PROVIDER = "faux";
     process.env.FRIDAY_MODEL_ID = "faux-1";
@@ -715,6 +790,7 @@ describe("Turn Loop agent executor", () => {
     const testModels = withTestModel(models, faux);
     const contexts: string[] = [];
     const systemPrompts: string[] = [];
+    const stableSystemPromptPrefixes: string[] = [];
     const metricIncrements: Array<{ name: string; value: number }> = [];
     const observability = {
       increment(name: string, value = 1) { metricIncrements.push({ name, value }); },
@@ -734,8 +810,8 @@ describe("Turn Loop agent executor", () => {
 
     try {
       faux.setResponses([
-        (context) => { contexts.push(JSON.stringify(context.messages)); systemPrompts.push(context.systemPrompt ?? ""); return modelRuntime.fauxAssistantMessage("first"); },
-        (context) => { contexts.push(JSON.stringify(context.messages)); systemPrompts.push(context.systemPrompt ?? ""); return modelRuntime.fauxAssistantMessage("second"); },
+        (context) => { contexts.push(JSON.stringify(context.messages)); systemPrompts.push(context.systemPrompt ?? ""); stableSystemPromptPrefixes.push(context.stableSystemPromptPrefix ?? ""); return modelRuntime.fauxAssistantMessage("first"); },
+        (context) => { contexts.push(JSON.stringify(context.messages)); systemPrompts.push(context.systemPrompt ?? ""); stableSystemPromptPrefixes.push(context.stableSystemPromptPrefix ?? ""); return modelRuntime.fauxAssistantMessage("second"); },
       ]);
       const opened = await executor.execute({
         turn: turn("mem-1", "How do stable prefixes improve provider cache reuse?"),
@@ -752,7 +828,11 @@ describe("Turn Loop agent executor", () => {
       });
 
       expect(systemPrompts).toHaveLength(2);
-      expect(systemPrompts[0]).toBe(systemPrompts[1]);
+      expect(stableSystemPromptPrefixes).toHaveLength(2);
+      expect(stableSystemPromptPrefixes[0]).toBe(stableSystemPromptPrefixes[1]);
+      expect(stableSystemPromptPrefixes[0]).not.toContain('id="runtime-clock"');
+      expect(systemPrompts[0]).toContain('id="runtime-clock" authority="runtime-context" cache="volatile"');
+      expect(systemPrompts[1]).toContain('id="runtime-clock" authority="runtime-context" cache="volatile"');
       expect(systemPrompts[0]).not.toContain("Stable prefixes improve provider cache reuse");
       expect(systemPrompts[1]).not.toContain("UPDATED memory");
       expect(contexts[0]).toContain("<friday_runtime_context>");
@@ -822,6 +902,7 @@ describe("Turn Loop agent executor", () => {
   it("executes Project turns in the server-resolved workspace and returns the trusted diff", async () => {
     process.env.FRIDAY_MODEL_PROVIDER = "faux";
     process.env.FRIDAY_MODEL_ID = "faux-1";
+    process.env.FRIDAY_TIMEZONE = "Asia/Kolkata";
     const stateDir = tempRoot();
     const friday = new PluginTestHost();
     await friday.activatePlugin(capabilitiesPlugin);
@@ -834,8 +915,11 @@ describe("Turn Loop agent executor", () => {
     const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
     const workspace = join(stateDir, "project-worktree");
     const projectRoot = join(stateDir, "project-root");
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(join(workspace, "AGENTS.md"), "Run project-local validation before reporting completion.\n", "utf8");
     const toolCalls: Array<{ cwd: string; targetId?: string }> = [];
     const acquireCalls: Array<{ projectId: string; ownerId: string; targetId?: string }> = [];
+    let systemPrompt = "";
     const tools = {
       createTool() { throw new Error("not used"); },
       createAllTools(cwd: string, options?: { executionTarget?: { id: string } }) {
@@ -873,7 +957,10 @@ describe("Turn Loop agent executor", () => {
     }, { stateDir });
 
     try {
-      faux.setResponses([modelRuntime.fauxAssistantMessage("implemented project change")]);
+      faux.setResponses([(context) => {
+        systemPrompt = context.systemPrompt ?? "";
+        return modelRuntime.fauxAssistantMessage("implemented project change");
+      }]);
       const projectTurn: InboundTurn = { ...turn("project-1", "change the project"), projectId: "atlas", projectTargetId: "core-host" };
       const result = await executor.execute({ turn: projectTurn, decision: decision("session:new"), jobId: "job-project" });
       expect(acquireCalls).toEqual([{ projectId: "atlas", ownerId: "job-project", targetId: "core-host" }]);
@@ -881,6 +968,10 @@ describe("Turn Loop agent executor", () => {
       expect(result.text).toContain("implemented project change");
       expect(result.text).toContain("Project diff artifact: artifact:00000000-0000-0000-0000-000000000001");
       expect(result.text).toContain("+project change");
+      expect(systemPrompt).toContain('id="project-context:AGENTS.md" authority="project-guidance" cache="stable"');
+      expect(systemPrompt).toContain("Run project-local validation before reporting completion.");
+      expect(systemPrompt).toContain('id="runtime-clock" authority="runtime-context" cache="volatile"');
+      expect(systemPrompt).toContain("User timezone: Asia/Kolkata");
     } finally {
       await executor.dispose();
       faux.unregister();
@@ -908,7 +999,7 @@ describe("Turn Loop agent executor", () => {
     const toolCalls: Array<{ cwd: string; targetId?: string; computer?: ComputerExecutionBinding }> = [];
     const managedRuns: Array<{ sessionId: string; runId: string; ownerKind: "main-agent" | "subagent" }> = [];
     const screenRequests: Array<{
-      ownerId: string; preferredNodeId?: string; preferredScreenId?: string; requireBrowser?: boolean;
+      ownerId: string; preferredNodeId?: string; preferredScreenId?: string; preferredScreenMode?: "required" | "soft"; requireBrowser?: boolean;
       demand?: { memoryMb?: number; browserRenderers?: number; gpu?: boolean };
     }> = [];
     const releases: Array<{ screenLeaseId: string; ownerId: string }> = [];
@@ -953,7 +1044,7 @@ describe("Turn Loop agent executor", () => {
     const computer = {
       node(nodeId: string) { return nodeId === "desk-1" ? ({ id: "desk-1" } as never) : undefined; },
       async waitForScreen(
-        request: { ownerId: string; preferredNodeId?: string; preferredScreenId?: string; requireBrowser?: boolean; demand?: { memoryMb?: number; browserRenderers?: number; gpu?: boolean } },
+        request: { ownerId: string; preferredNodeId?: string; preferredScreenId?: string; preferredScreenMode?: "required" | "soft"; requireBrowser?: boolean; demand?: { memoryMb?: number; browserRenderers?: number; gpu?: boolean } },
         _signal?: AbortSignal,
         onWaiting?: (state: { readonly state: "waiting"; readonly code: "WAITING_FOR_COMPUTER"; readonly ownerId: string; readonly reasons: readonly string[] }) => void | Promise<void>,
       ) {

@@ -34,6 +34,8 @@ sudo apt install sway chromium pipewire wireplumber
 
 The setup helper auto-detects `chromium`, `chromium-browser`, `google-chrome-stable`, or `google-chrome`. When Ubuntu's Chromium Snap is detected, the default FRIDAY browser profile is placed under `~/snap/chromium/common/friday-computer-profile`, because strict Snap confinement does not grant arbitrary access to hidden directories such as `~/.friday`.
 
+That browser profile is intentionally shared across Agent screens. Separate Agents receive separate Sway outputs/CDP targets and therefore independent visible screens/actions, but they reuse the same provider-owned Chromium profile/context for cache, cookies, authenticated sessions, downloads, and normal browser state. Do not create one Chromium profile per Agent unless a future privacy/isolation policy explicitly requires it; the Phase 5 design is shared account/browser state with independent screen leases.
+
 ## Kubuntu/KDE compatibility mode
 
 Kubuntu normally keeps Plasma/KWin as the Human desktop and runs a separate headless Sway compositor for Agent screens. From the FRIDAY repository run:
@@ -69,6 +71,8 @@ sway -c ~/.config/friday/sway.conf
 ```
 
 The config keeps the physical output as Human, creates two headless outputs by default, imports `SWAYSOCK`/`WAYLAND_DISPLAY` into the user manager, and restarts the shared Chromium supervisor. Set `FRIDAY_COMPUTER_AGENT_SCREENS` before running setup to change the count. `FRIDAY_COMPUTER_HUMAN_OUTPUT` can pin a physical output name; `FRIDAY_COMPUTER_AGENT_OUTPUTS` can explicitly classify additional Sway output names as Agent outputs.
+
+Turn Loop gives each concurrently active Agent a distinct Computer owner id. A root Agent profile may pin its configured default screen, while Subagents treat the same profile default as a soft preference and fall back to another free Agent output. This prevents sibling Agents from serializing behind one preferred display while preserving the shared Chromium profile/cache/account state above.
 
 ## Manual deployment
 
@@ -164,10 +168,12 @@ Implemented so far:
 - built-in opt-in `linux-sway` Computer adapter;
 - Sway physical/headless output discovery and per-screen Chromium CDP target allocation;
 - shared persistent FRIDAY Chromium profile;
+- per-Agent screen leases/targets with soft Subagent fallback from a shared profile's preferred screen;
 - CPU/RAM/renderer admission telemetry;
 - bounded semantic DOM observations with observation-scoped refs, confidence, geometry, and structural deltas;
 - stale-ref/semantic-drift revalidation plus obscured/high-impact action gating;
 - bounded CDP micro-vision probes with protected-region refusal and one-use confirmation tokens;
+- model-capability-aware visual probing: text-only models are kept on structured/text verification and image crops are rejected unless the active model accepts image input;
 - provider-side observation redaction and protected-input refusal;
 - real CDP mouse/key browser input with action settle/readiness checks;
 - provider-specific Computer Doctor details plus canonical `friday doctor` integration;

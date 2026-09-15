@@ -342,18 +342,21 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
     render(context) {
       const binding = context.computerExecution;
       if (!binding) return undefined;
-      return [
-        "<friday_computer_context>",
-        `Computer node: ${binding.nodeId}`,
-        `Leased screen: ${binding.screenId}`,
-        `Initial control generation: ${binding.generation}`,
-        "Computer-control strategy: prefer structured computer_observe results over pixels. Query/filter the UI instead of requesting broad content. Element refs are observation-scoped: after any new observation, use its new obs-N:eM ref. A delta may preserve the local eM identity for continuity, but the older full ref is still stale.",
-        "Use semantic refs (for example obs-12:e7) for click/type/scroll. Elements may advertise toggle/select/expand semantics; invoke those browser controls with click on the same ref, then re-observe state. If computer_browser returns performed=false with visualProbeRequired, call computer_visual_probe for that exact ref, starting with the recommended tiny/small crop, then retry the same action once with the returned probeToken.",
-        "Request return=image only when the active model can use pixels and structured data is insufficient. Escalate crop size progressively: tiny -> small -> medium -> window -> full. Never jump to full-screen vision for a normal control.",
-        "After actions, use the returned structural delta and verification before requesting more vision. Re-observe when refs are stale. Use computer_browser only for non-secret input. Passwords, OTPs, CAPTCHAs, and other sensitive input require human takeover; never place those values in tool arguments.",
-        "If a Computer tool reports resumedAfterHumanTakeover=true, the interrupted action was not replayed. Treat the attached fresh observation as the new source of truth and replan before acting again.",
-        "</friday_computer_context>",
-      ].join("\n");
+      const vision = context.modelCapabilities?.imageInput === true;
+      return {
+        authority: "host-policy",
+        cache: "volatile",
+        content: [
+          `Computer node: ${binding.nodeId}`,
+          `Leased screen: ${binding.screenId}`,
+          `Initial control generation: ${binding.generation}`,
+          "Computer-control strategy: prefer structured computer_observe results over pixels. Query/filter the UI instead of requesting broad content. Element refs are observation-scoped: after any new observation, use its new obs-N:eM ref. A delta may preserve the local eM identity for continuity, but the older full ref is still stale.",
+          "Use semantic refs (for example obs-12:e7) for click/type/scroll. Elements may advertise toggle/select/expand semantics; invoke those browser controls with click on the same ref, then re-observe state. If computer_browser returns performed=false with visualProbeRequired, call computer_visual_probe for that exact ref, starting with the recommended tiny/small crop, then retry the same action once with the returned probeToken.",
+          `Vision image input available: ${vision ? "yes" : "no"}. ${vision ? "Use return=image only when structured data is insufficient." : "This model cannot consume pixels; use return=text only and do not request image probes."} Escalate crop size progressively: tiny -> small -> medium -> window -> full. Never jump to full-screen vision for a normal control.`,
+          "After actions, use the returned structural delta and verification before requesting more vision. Re-observe when refs are stale. Use computer_browser only for non-secret input. Passwords, OTPs, CAPTCHAs, and other sensitive input require human takeover; never place those values in tool arguments.",
+          "If a Computer tool reports resumedAfterHumanTakeover=true, the interrupted action was not replayed. Treat the attached fresh observation as the new source of truth and replan before acting again.",
+        ].join("\n"),
+      };
     },
   });
 
@@ -470,6 +473,9 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
       const context = executionContext;
       const initialBinding = currentComputerBinding(service, context);
       const request = visualProbeRequest(input);
+      if (request.return === "image" && context?.modelCapabilities?.imageInput !== true) {
+        throw new Error("computer_visual_probe return=image requires an active model with image input; use return=text");
+      }
       await authorizeAgentComputer(permissions, context!, initialBinding, "visual");
       const binding = await waitForAgentBrowserAdmission(service, context!, initialBinding, signal);
       if (binding.generation !== initialBinding.generation) {

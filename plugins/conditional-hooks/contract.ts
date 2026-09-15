@@ -26,7 +26,7 @@ export interface ConditionalHooksService {
     maxInvocations: number | null;
   }): ConditionalHookRule;
   remove(ownerScope: string, id: string): boolean;
-  invoke(ownerScope: string, id: string): ConditionalHookRule | undefined;
+  invoke(ownerScope: string, id: string, phase: ConditionalHookPhase): ConditionalHookRule | undefined;
   status(): { total: number; active: number; exhausted: number };
 }
 

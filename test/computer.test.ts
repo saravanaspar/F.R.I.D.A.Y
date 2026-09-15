@@ -13,7 +13,7 @@ import {
 } from "../plugins/computer/contract.js";
 import { createEventsPlugin } from "../plugins/events/index.js";
 import { PERMISSIONS_CAPABILITY, type PermissionRequest, type PermissionsService } from "../plugins/permissions/contract.js";
-import { AGENT_TOOL_CONTRIBUTION } from "../plugins/turn-loop/contract.js";
+import { AGENT_TOOL_CONTRIBUTION, type AgentToolExecutionContext, type TurnProgressUpdate } from "../plugins/turn-loop/contract.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION } from "../plugins/system/contract.js";
 import { PluginTestHost } from "./helpers/plugin-host.js";
 
@@ -187,6 +187,39 @@ describe("Phase 4 Shared Agent Computer", () => {
       requested.controlLease.generation,
       { kind: "type", target: "password", text: "never-log-this", sensitive: true },
     )).rejects.toThrow(/human takeover|protected-credential/);
+
+    await service.close();
+  });
+
+  it("treats a soft preferred screen as a preference so concurrent Agents receive different free screens", async () => {
+    const adapter = fakeAdapter();
+    adapter.setSnapshot(Object.freeze({
+      ...healthySnapshot(),
+      screens: Object.freeze([
+        ...healthySnapshot().screens,
+        { id: "agent-2", label: "Agent 2", kind: "agent" as const, width: 1_920, height: 1_080 },
+      ]),
+    }));
+    const service = createComputerService({ idFactory: sequentialIds() });
+    await service.registerNode(adapter);
+
+    const first = await service.requestScreen({ ownerId: "agent-a", preferredScreenId: "agent-1", preferredScreenMode: "soft" });
+    const second = await service.requestScreen({ ownerId: "agent-b", preferredScreenId: "agent-1", preferredScreenMode: "soft" });
+    expect(first).toMatchObject({ state: "acquired", screenLease: { screenId: "agent-1", ownerId: "agent-a" } });
+    expect(second).toMatchObject({ state: "acquired", screenLease: { screenId: "agent-2", ownerId: "agent-b" } });
+
+    await service.close();
+  });
+
+  it("rejects unknown preferred screen modes instead of silently hard-pinning them", async () => {
+    const service = createComputerService({ idFactory: sequentialIds() });
+    await service.registerNode(fakeAdapter());
+
+    await expect(service.requestScreen({
+      ownerId: "agent-invalid-mode",
+      preferredScreenId: "agent-1",
+      preferredScreenMode: "anything" as never,
+    })).rejects.toThrow(/preferredScreenMode must be required or soft/);
 
     await service.close();
   });
@@ -630,7 +663,7 @@ describe("Phase 4 Shared Agent Computer", () => {
   it("exposes permission-gated Agent observe/browser tools only against the active leased Computer generation", async () => {
     const adapter = fakeAdapter();
     const authorization: PermissionRequest[] = [];
-    const progressUpdates: Array<{ jobStatus?: string; computerWait?: { reasons: readonly string[] } }> = [];
+    const progressUpdates: TurnProgressUpdate[] = [];
     const permissions: PermissionsService = {
       normalizeMode: () => "auto",
       async authorize(request) { authorization.push(request); return { allowed: true, approvedBy: "policy" }; },
@@ -659,16 +692,17 @@ describe("Phase 4 Shared Agent Computer", () => {
       admission: { requireBrowser: true, demand: { browserRenderers: 1, gpu: true } },
       generation: grant.controlLease.generation,
     };
-    const executionContext = {
+    const executionContext: AgentToolExecutionContext = {
       cwd: "/workspace/project",
       sessionId: "session-computer-tools",
       jobId: "job-agent-tools",
-      permissionMode: "auto" as const,
+      permissionMode: "auto",
+      modelCapabilities: { imageInput: true },
       computerExecution: binding,
-      async reportProgress(update: { jobStatus?: string; computerWait?: { reasons: readonly string[] } }) { progressUpdates.push(update); },
+      async reportProgress(update) { progressUpdates.push(update); },
       deferAfterReply() {},
       deferOnFailure() {},
-    } as never;
+    };
     const tools = collectContributions(AGENT_TOOL_CONTRIBUTION);
     expect(tools.map((tool) => tool.id).sort()).toEqual(["computer-browser", "computer-observe", "computer-visual-probe"]);
     expect(tools.map((tool) => tool.name).sort()).toEqual(["computer_browser", "computer_observe", "computer_visual_probe"]);
@@ -708,6 +742,11 @@ describe("Phase 4 Shared Agent Computer", () => {
         { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB" },
       ],
     });
+    await expect(visual.execute(
+      { ref: "obs-1:e1", size: "tiny", return: "image" },
+      undefined,
+      { ...executionContext, modelCapabilities: { imageInput: false } },
+    )).rejects.toThrow(/requires an active model with image input/i);
     await expect(browser.execute({ action: "click", target: "#legacy-selector" }, undefined, executionContext))
       .rejects.toThrow(/current semantic ref/);
     await expect(visual.execute({ ref: "#legacy-selector", size: "tiny", return: "text" }, undefined, executionContext))

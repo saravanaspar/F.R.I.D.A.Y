@@ -1,5 +1,6 @@
-import type { ChildAgentDoctrineOptions, RlmPromptOptions } from "./types.js";
 import { FRIDAY_OPERATING_DOCTRINE } from "./orchestrator.js";
+import { renderPromptSections } from "./provenance.js";
+import type { ChildAgentDoctrineOptions, PromptSection, RlmPromptOptions } from "./types.js";
 
 const IPYTHON_CONTROL_PROMPT = [
   "IPython is the agent's long-lived notebook: a persistent control environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Use it to keep intermediate variables, inspect and transform outputs, write small helper functions, and preserve useful state across turns or compaction.",
@@ -62,83 +63,90 @@ export function buildRlmPromptPlan(options: RlmPromptOptions): RlmPromptPlan {
   const depth = options.depth ?? 0;
   const activeTools = options.activeTools ?? [];
   const hasIpython = options.activeTools === undefined ? true : activeTools.includes("ipython");
-  const canRunShellSkills = hasIpython || activeTools.includes("bash");
 
-  const stableParts = [
-    FRIDAY_OPERATING_DOCTRINE,
-    "",
-    `Working directory: ${options.cwd}`,
-  ];
+  const stableSections: PromptSection[] = [{
+    id: "friday-operating-doctrine",
+    authority: "core-policy",
+    cache: "stable",
+    content: FRIDAY_OPERATING_DOCTRINE,
+  }];
+  const hostLines: string[] = [];
 
   if ((options.kernelPackages?.length ?? 0) > 0) {
-    stableParts.push(`Pre-installed Python packages: ${options.kernelPackages!.join(", ")}.`);
-  }
-
-  if (installedSkills.length > 0) {
-    const installed = installedSkills.map((skill) => `\`${skill}\``).join(", ");
-    stableParts.push("");
-    if (hasIpython) {
-      stableParts.push(`Installed Python skill modules (pre-imported): ${installed}.`);
-      stableParts.push(
-        "Read each skill's SKILL.md for its API. Inspect a module with `help(<skill>)` or `dir(<skill>)`, then inspect a documented callable with `inspect.signature(<skill>.<function>)`.",
-      );
-    } else if (canRunShellSkills) {
-      stableParts.push(`Installed skills available as shell commands: ${installed}.`);
-    }
-    if (canRunShellSkills) {
-      stableParts.push("When a skill exposes a CLI, discover its usage with `<skill> --help`.");
-    }
+    hostLines.push(`Pre-installed Python packages: ${options.kernelPackages!.join(", ")}.`);
   }
 
   if (hasAgentMessage) {
-    stableParts.push(
+    hostLines.push(
       "Agent messaging is restricted to your parent, siblings, and direct children; deeper communication relays through the intermediate child.",
     );
   }
   if (hasAgentObserve) {
-    stableParts.push(
+    hostLines.push(
       "Agent observation is restricted to your parent, siblings, and direct children; deeper inspection relays through the intermediate child.",
     );
   }
 
   if (allowRecursion && hasIpython) {
-    stableParts.push(
-      "",
+    hostLines.push(
       "A callable `rlm` is already in your global namespace. `await rlm('sub-task')` spawns a child and returns immediately after task admission with `rlm_child_id`, `name`, `session_dir`, and `model`; it never waits for or returns the child's answer.",
       "Choose a stable child name with `await rlm('sub-task', name='api-reviewer')`; names must be unique among siblings. If omitted, the host generates a readable unique name.",
       "A child inherits your model. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector.",
       "For 2–32 independent tasks, prefer `await rlm.gather([...])`: FRIDAY admits them as a bounded concurrent batch and waits for all terminal states. Use `await rlm.spawn_many([...])` plus `await rlm.wait_subagents(handles)` when you need explicit fan-out/fan-in control.",
       "Honor an explicit user request for multiple independent agents when it is safe and meaningful. Otherwise choose the team size from the prompt and decomposition: use parallel children for genuinely independent work, and keep trivial or serial work in the current agent.",
       "The host applies an operator concurrency ceiling and live RAM-aware admission. Queued children are intentional under memory pressure; never bypass that resource gate or replace it with unsafe host execution.",
+      "Subagents share the parent project filesystem/workspace unless the host explicitly provides isolation. Parallel research, review, and read-only analysis are safe defaults. For implementation, partition siblings onto disjoint files or logically independent areas; shared-workspace mutating core tools are host-serialized, but the parent still owns integration, conflict resolution, tests, and final verification. Host serialization covers tool invocations, not arbitrary background writers: do not launch watchers, daemons, or background processes that keep mutating the shared project while sibling implementation work is active. Never use project files as an ad-hoc mailbox.",
     );
     if (hasAgentMessage) {
-      stableParts.push(
+      hostLines.push(
         "Children reply explicitly with `await agent_message.send(message, receiver_role='parent')` when an answer is needed. Use `await rlm.list_subagents()` to recover direct child handles after admission.",
       );
     } else {
-      stableParts.push("Use `await rlm.list_subagents()` to recover direct child handles after admission.");
+      hostLines.push("Use `await rlm.list_subagents()` to recover direct child handles after admission.");
     }
     if (hasAgentObserve) {
-      stableParts.push("Use `agent_observe` for bounded inspection of a direct child's rollout.");
+      hostLines.push("Use `agent_observe` for bounded inspection of a direct child's rollout.");
     } else {
-      stableParts.push("Inspect files a child wrote when you need to collect its work without an observation capability.");
+      hostLines.push("Without an observation capability, collect child results through explicit parent replies when available. Inspect shared project state only when the task itself requires it; project files are not a messaging channel.");
     }
-    stableParts.push(
+    hostLines.push(
       "Use a single `await rlm(...)` for one detached child; use `rlm.gather` for true bounded concurrent fan-out/fan-in. Delete a direct child explicitly with `await rlm.delete_subagent(child)` when it is no longer needed.",
     );
   }
 
-  if (hasIpython) stableParts.push("", IPYTHON_CONTROL_PROMPT);
+  if (hasIpython) hostLines.push(IPYTHON_CONTROL_PROMPT);
+  if (hostLines.length > 0) {
+    stableSections.push({
+      id: "rlm-execution-doctrine",
+      authority: "host-policy",
+      cache: "stable",
+      content: hostLines.join("\n\n"),
+    });
+  }
 
-  const volatileParts = [
-    `Conversation log: ${options.messagesPath}`,
-    `Recursive agent depth: ${depth}`,
-  ];
+  const volatileSections: PromptSection[] = [];
   const childDoctrine = buildChildAgentDoctrine(options);
-  if (childDoctrine) volatileParts.push(childDoctrine);
+  if (childDoctrine) {
+    volatileSections.push({
+      id: "child-agent-doctrine",
+      authority: "host-policy",
+      cache: "volatile",
+      content: childDoctrine,
+    });
+  }
+  volatileSections.push({
+    id: "rlm-runtime-context",
+    authority: "runtime-context",
+    cache: "volatile",
+    content: [
+      `Working directory: ${options.cwd}`,
+      `Conversation log: ${options.messagesPath}`,
+      `Recursive agent depth: ${depth}`,
+    ].join("\n"),
+  });
 
-  const stablePrefix = stableParts.join("\n");
-  const volatileSuffix = volatileParts.join("\n");
+  const stablePrefix = renderPromptSections(stableSections);
+  const volatileSuffix = renderPromptSections(volatileSections);
   const prompt = volatileSuffix ? `${stablePrefix}\n\n${volatileSuffix}` : stablePrefix;
   return Object.freeze({ prompt, stablePrefix, volatileSuffix });
 }
@@ -163,8 +171,8 @@ export function buildSubagentGuidance(
   lines.push("Use `await rlm.list_subagents()` after kernel restart or compaction.");
   if (options.hasAgentObserve) lines.push("Use `agent_observe` for bounded transcript inspection.");
   lines.push(
-    "Have children write files and read those files for fan-in.",
-    "Delegate parallel context-heavy research or independent implementation; do a single known lookup, edit, or command inline.",
+    "Subagents share the parent project filesystem/workspace unless the host explicitly provides isolation. Parallel research, review, and read-only analysis are safe defaults. For implementation, assign siblings disjoint files or serialize edits; never let sibling agents concurrently edit the same file. Host serialization does not make arbitrary mutating background processes safe, so do not launch them during sibling implementation work. Never use project files as an ad-hoc mailbox.",
+    "Delegate parallel context-heavy research or carefully partitioned implementation; do a single known lookup, edit, or command inline. The parent remains responsible for integration, conflict resolution, tests, and final verification.",
   );
   return lines.join("\n");
 }

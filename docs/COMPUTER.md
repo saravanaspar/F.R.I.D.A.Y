@@ -54,6 +54,8 @@ Browser readiness is also rechecked after a screen has already been leased. The 
 
 A `ScreenLease` is exclusive to one Agent owner and expires unless renewed. Releasing or expiring it aborts pending Computer actions before the screen can be reused.
 
+Concurrent Agents never intentionally share one Agent screen lease. Turn Loop derives a distinct Computer owner identity for every Subagent while preserving the parent job attribution. An Agent Profile's `defaultComputerScreen` is a hard pin for the root Agent, but a **soft preference** for Subagents: the first child may receive that screen and later siblings fall back to other free Agent screens instead of queuing behind it. This affects only display/control ownership. The Computer Node still deliberately shares the same OS user, home/filesystem, downloads, persistent browser profile/context, cache, cookies/login state, and provider-managed browser supervisor across those Agent screens.
+
 Turn Loop keeps an active Computer lease alive with a run-scoped heartbeat at roughly one-third of the original lease lifetime. Renewal continues while a human holds manual-only takeover because the underlying Agent screen is still reserved for the same Session Job. If renewal fails, the Agent run is aborted and cannot silently continue after ownership expires.
 
 Each leased screen also has a `ControlLease`. Agent actions must present the current generation. The generation changes whenever control changes or human activity invalidates pending work. Stale generations fail closed with an instruction to re-observe and replan.
@@ -72,6 +74,8 @@ Higher-level orchestration should use API/MCP before Computer browser automation
 The provider returns which mode was used and a fresh bounded observation. Browser action contents are not written to Computer Events. Explicitly sensitive typing is rejected by the generic action path and must use human takeover or a dedicated protected-credential flow.
 
 Every provider observation must carry a positive model-safety attestation that secrets, keystrokes, CAPTCHA contents, and sensitive screenshots were omitted. Computer validates that attestation at runtime and then applies defense-in-depth redaction to credential/token/OTP/PIN/CAPTCHA-shaped URL, DOM, accessibility, tab, and process text before any Agent or Client surface can consume it. Full-screen/raw screenshot bytes never cross the normal Computer observation path. Providers may expose a bounded `visualProbe` crop only after provider-side protected/challenge-region checks; the Computer core validates the crop size/MIME and model-facing Turn Loop can pass that crop as native image tool content. Normal observations remain structure-first and screenshot-free. Phase 5/8 provider conformance tests must prove this attestation against the real browser/UI primitives they implement.
+
+Turn Loop also supplies the active model's input capabilities to Computer. The prompt explicitly tells a text-only model to use `computer_visual_probe(return="text")`, and the tool rejects `return="image"` unless the active model actually accepts image input. Vision-capable models may request pixels only for the smallest ambiguous crop and should escalate `tiny -> small -> medium -> window -> full` rather than sending broad screenshots by default. Image probe payloads are current-turn-only and are stripped before durable Session persistence.
 
 ## Agent Computer tools
 

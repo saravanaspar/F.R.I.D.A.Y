@@ -1,10 +1,11 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "fs";
 import ignore from "ignore";
 import { reportOperationalError } from "@friday/operational-errors";
 import { homedir } from "os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
 import { parseFrontmatter } from "./frontmatter.js";
 import { canonicalizePath } from "./paths.js";
+import { analyzeSkillDirectorySecuritySync, analyzeSkillTextSecurity } from "./security.js";
 import type { SkillDiagnostic } from "./diagnostics.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 
@@ -288,6 +289,26 @@ function loadSkillsFromDirInternal(
 		return { skills, diagnostics };
 	}
 
+	try {
+		const directoryStats = lstatSync(dir);
+		if (directoryStats.isSymbolicLink()) {
+			diagnostics.push({
+				type: "warning",
+				message: "skill discovery skipped a symlinked path",
+				path: dir,
+			});
+			return { skills, diagnostics };
+		}
+		if (!directoryStats.isDirectory()) {
+			diagnostics.push({ type: "warning", message: "skill discovery root is not a directory", path: dir });
+			return { skills, diagnostics };
+		}
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "failed to inspect skill discovery root";
+		diagnostics.push({ type: "warning", message, path: dir });
+		return { skills, diagnostics };
+	}
+
 	const root = rootDir ?? dir;
 	const ig = ignoreMatcher ?? ignore();
 	addIgnoreRules(ig, dir, root);
@@ -302,15 +323,16 @@ function loadSkillsFromDirInternal(
 
 			const fullPath = join(dir, entry.name);
 
-			let isFile = entry.isFile();
 			if (entry.isSymbolicLink()) {
-				try {
-					isFile = statSync(fullPath).isFile();
-				} catch {
-					continue;
-				}
+				diagnostics.push({
+					type: "warning",
+					message: "skill discovery skipped a symlinked path",
+					path: fullPath,
+				});
+				continue;
 			}
 
+			const isFile = entry.isFile();
 			const relPath = toPosixPath(relative(root, fullPath));
 			if (!isFile || ig.ignores(relPath)) {
 				continue;
@@ -336,19 +358,18 @@ function loadSkillsFromDirInternal(
 
 			const fullPath = join(dir, entry.name);
 
-			// For symlinks, check if they point to a directory and follow them
-			let isDirectory = entry.isDirectory();
-			let isFile = entry.isFile();
+			// Skill discovery is a trust boundary: never follow symlinked files or
+			// directories out of the configured user/project/explicit root.
 			if (entry.isSymbolicLink()) {
-				try {
-					const stats = statSync(fullPath);
-					isDirectory = stats.isDirectory();
-					isFile = stats.isFile();
-				} catch {
-					// Broken symlink, skip it
-					continue;
-				}
+				diagnostics.push({
+					type: "warning",
+					message: "skill discovery skipped a symlinked path",
+					path: fullPath,
+				});
+				continue;
 			}
+			const isDirectory = entry.isDirectory();
+			const isFile = entry.isFile();
 
 			const relPath = toPosixPath(relative(root, fullPath));
 			const ignorePath = isDirectory ? `${relPath}/` : relPath;
@@ -388,8 +409,19 @@ function loadSkillFromFile(
 
 	try {
 		const rawContent = readFileSync(filePath, "utf-8");
-		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(rawContent);
 		const skillDir = dirname(filePath);
+		const securityIssues = basename(filePath) === "SKILL.md"
+			? analyzeSkillDirectorySecuritySync(skillDir)
+			: analyzeSkillTextSecurity(rawContent, basename(filePath));
+		if (securityIssues.length > 0) {
+			for (const issue of securityIssues) diagnostics.push({
+				type: "warning",
+				message: `skill security scan rejected ${issue.kind}: ${issue.message}${issue.path ? ` (${issue.path})` : ""}`,
+				path: filePath,
+			});
+			return { skill: null, diagnostics };
+		}
+		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(rawContent);
 		const parentDirName = basename(skillDir);
 
 		// Validate description
@@ -551,7 +583,15 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 		}
 
 		try {
-			const stats = statSync(resolvedPath);
+			const stats = lstatSync(resolvedPath);
+			if (stats.isSymbolicLink()) {
+				allDiagnostics.push({
+					type: "warning",
+					message: "skill discovery skipped a symlinked path",
+					path: resolvedPath,
+				});
+				continue;
+			}
 			const source = getSource(resolvedPath);
 			if (stats.isDirectory()) {
 				addSkills(loadSkillsFromDirInternal(resolvedPath, source, true));

@@ -421,6 +421,8 @@ export interface ComputerScreenRequest {
   readonly ownerId: string;
   readonly preferredNodeId?: string | undefined;
   readonly preferredScreenId?: string | undefined;
+  /** Required pins to one screen; soft prefers it but may use another free Agent screen. */
+  readonly preferredScreenMode?: "required" | "soft" | undefined;
   readonly requireBrowser?: boolean | undefined;
   readonly demand?: ComputerResourceDemand | undefined;
   readonly leaseTtlMs?: number | undefined;

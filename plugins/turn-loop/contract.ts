@@ -137,6 +137,10 @@ export interface AgentToolExecutionContext {
   readonly enabledSkills?: readonly string[] | undefined;
   readonly enabledPlugins?: readonly string[] | undefined;
   readonly defaultComputerScreen?: string | undefined;
+  /** Capabilities of the active model, resolved by Turn Loop before tool/prompt construction. */
+  readonly modelCapabilities?: Readonly<{ imageInput: boolean }> | undefined;
+  /** Host-derived lifecycle phase available only while executing conditional_hook_invoke. */
+  readonly conditionalHookPhase?: "turn" | "before-action" | "after-action" | "before-handover" | undefined;
   readonly notificationPreference?: "all" | "important" | "muted" | undefined;
   readonly approvalPolicy?: string | undefined;
   readonly permissionMode?: "ask" | "auto" | "full" | undefined;
@@ -180,10 +184,19 @@ export interface AgentInputContribution {
   prepare(context: AgentToolExecutionContext): Promise<AgentPreparedInput | undefined>;
 }
 
-/** Plugins can layer dynamic host-owned policy/persona sections into the system prompt. */
+export type AgentPromptSectionAuthority = "host-policy" | "user-config" | "project-guidance" | "runtime-context" | "untrusted-data";
+export type AgentPromptSectionCacheScope = "stable" | "volatile";
+
+export interface AgentPromptSection {
+  readonly content: string;
+  readonly authority: AgentPromptSectionAuthority;
+  readonly cache: AgentPromptSectionCacheScope;
+}
+
+/** Plugins can layer typed model-visible sections without silently changing their authority. */
 export interface AgentPromptSectionContribution {
   readonly id: string;
-  render(context: AgentToolExecutionContext): string | undefined;
+  render(context: AgentToolExecutionContext): AgentPromptSection | undefined;
 }
 
 export interface AgentAfterTurnContext extends AgentToolExecutionContext {

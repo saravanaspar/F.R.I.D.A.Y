@@ -70,11 +70,21 @@ describe("conditional hooks", () => {
 
     const ownerScope = principalScope(alice.principal);
     const section = collectContributions(AGENT_PROMPT_SECTION_CONTRIBUTION).find((entry) => entry.id === "conditional-hooks")!;
-    expect(section.render({ ownerScope } as never)).toContain(id);
+    expect(section.render({ ownerScope } as never)?.content).toContain(id);
     const tool = collectContributions(AGENT_TOOL_CONTRIBUTION).find((entry) => entry.name === "conditional_hook_invoke")!;
-    await expect(tool.execute({ id }, undefined, { ownerScope } as never)).resolves.toMatchObject({ output: { active: true, invocationCount: 1, remaining: 1 } });
-    await expect(tool.execute({ id }, undefined, { ownerScope } as never)).resolves.toMatchObject({ output: { active: true, invocationCount: 2, remaining: 0 } });
-    await expect(tool.execute({ id }, undefined, { ownerScope } as never)).resolves.toMatchObject({ output: { active: false } });
+    await expect(tool.execute({ id, phase: "after-action" }, undefined, { ownerScope, conditionalHookPhase: "after-action" } as never))
+      .resolves.toMatchObject({ output: { active: true, invocationCount: 1, remaining: 1 } });
+    await expect(tool.execute({ id, phase: "after-action" }, undefined, { ownerScope, conditionalHookPhase: "before-action" } as never))
+      .rejects.toThrow(/not valid at host phase/);
+    await expect(tool.execute({ id, phase: "before-action" }, undefined, { ownerScope, conditionalHookPhase: "before-action" } as never))
+      .rejects.toThrow(/phase mismatch/);
+    expect(requireCapability(CONDITIONAL_HOOKS_CAPABILITY).list(ownerScope)).toEqual([
+      expect.objectContaining({ id, invocationCount: 1, enabled: true }),
+    ]);
+    await expect(tool.execute({ id, phase: "after-action" }, undefined, { ownerScope, conditionalHookPhase: "after-action" } as never))
+      .resolves.toMatchObject({ output: { active: true, invocationCount: 2, remaining: 0 } });
+    await expect(tool.execute({ id, phase: "after-action" }, undefined, { ownerScope, conditionalHookPhase: "after-action" } as never))
+      .resolves.toMatchObject({ output: { active: false } });
     expect(section.render({ ownerScope } as never)).toBeUndefined();
 
     await friday.dispose();
