@@ -20,6 +20,7 @@ published release artifacts and generated release notes.
 - Preserved shared browser/account/cache/filesystem state while making display ownership per-Agent. Root profile screen defaults remain hard preferences; Subagents inherit them as soft preferences and fall back to other free Agent screens so siblings can act independently.
 - Removed duplicated Skill/subagent prompt doctrine, made Skill inspection wording match the actually available file-capable tool, kept volatile Computer/Project/hook/time state out of the stable prompt prefix, and unified custom system guidance with the normal FRIDAY doctrine rather than replacing capability/safety instructions.
 - Tightened the hardening verification path: explicitly negated safety language remains valid in persistent Agent Profile instructions, managed-Skill security rejections use one consistent diagnostic, volatile host-clock changes no longer invalidate stable-prefix cache assertions, and typed prompt/tool test contexts compile without `never`/mutable-array escapes.
+- Replaced reserved FRIDAY prompt-tag regular expressions with a forward-only linear scanner, preserving case/whitespace/closing-tag handling while eliminating polynomial backtracking on attacker-controlled prompt content.
 
 ### Client foundation
 
