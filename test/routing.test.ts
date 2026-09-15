@@ -39,7 +39,10 @@ const memoryHint: RoutingMemoryHint = {
 function validSessionDecision() {
   return {
     destination: { kind: "session", id: "session:pscls" },
-    execution: { profile: "agent" },
+    execution: {
+    profile: "agent",
+    capabilityProfile: "general",
+  },
     confidence: 0.97,
   };
 }

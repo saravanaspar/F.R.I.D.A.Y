@@ -11,6 +11,7 @@ import { readSavedChannels } from "../plugins/channels/config.js";
 import { CHANNELS_CAPABILITY } from "../plugins/channels/contract.js";
 import { CHANNELS_TRUSTED_CAPABILITY } from "../plugins/channels/trusted-contract.js";
 import { EVENTS_CAPABILITY } from "../plugins/events/contract.js";
+import { ROUTING_CAPABILITY, type RoutingDecision, type RoutingMessage, type RoutingService } from "../plugins/routing/contract.js";
 import { createEventsService } from "../plugins/events/events.js";
 import sessionsPlugin from "../plugins/sessions/index.js";
 import agentProfilesPlugin from "../plugins/agent-profiles/index.js";
@@ -105,109 +106,157 @@ describe("channels plugin", () => {
     expect(trusted).not.toHaveProperty("ingestLocal");
   });
 
-  it("starts interactive ingress live-only and does not replay a failed prompt later", async () => {
+  it("ignores pre-integration Telegram history but retries admitted post-integration work", async () => {
     const home = temp();
     process.env.FRIDAY_HOME = home;
     const friday = new PluginTestHost();
     await friday.activatePlugin(capabilitiesPlugin);
-    let eventNow = new Date("2000-01-01T00:00:00.000Z");
+    let eventNow = new Date("2100-01-01T00:00:00.000Z");
     const events = createEventsService({ stateDir: join(home, "events"), now: () => eventNow });
     await friday.activatePlugin(definePlugin({ id: "test-events", provides: [EVENTS_CAPABILITY] }, (ctx) => {
       ctx.services.provide(EVENTS_CAPABILITY, events);
       ctx.effect(() => events.close());
     }));
 
-    const eventData = (id: string, text: string) => ({
+    const beforeIntegration = Date.now() - 60_000;
+    const eventData = (id: string, text: string, timestamp: number) => ({
       id,
       principal: { channel: "telegram", accountId: "default", conversationId: "chat-1", senderId: "operator-1" },
       text,
-      timestamp: Date.now(),
+      timestamp,
       attachments: [],
       chatType: "dm",
     });
-
     events.publish({
       id: "stale-before-integration",
       type: "channel.ingress.accepted",
       source: "channels",
       subject: "channel:telegram:default",
-      data: eventData("telegram-old", "old prompt"),
+      occurredAt: new Date(beforeIntegration).toISOString(),
+      data: eventData("telegram-old", "old prompt", beforeIntegration),
     });
-    const unregisterLegacy = events.registerConsumer({
-      id: "channels.turn-ingress.v1",
-      types: ["channel.ingress.accepted"],
-      startAt: "beginning",
-    }, async () => {
-      throw new Error("old runtime failed this prompt");
-    });
-    await expect(events.runPending({ maxDeliveries: 10 })).resolves.toEqual([
-      {
-        consumerId: "channels.turn-ingress.v1",
-        eventId: "stale-before-integration",
-        status: "error",
-        error: "old runtime failed this prompt",
-      },
-    ]);
-    unregisterLegacy();
 
+    let failedOnce = false;
     const turns: string[] = [];
-    await friday.activatePlugin(definePlugin({ id: "turn-ingress-live-only-test" }, (ctx) => {
+    await friday.activatePlugin(definePlugin({ id: "turn-ingress-integration-boundary-test" }, (ctx) => {
       ctx.on(TURN_INGRESS_HOOK, (turn) => {
-        if (turn.text === "fail once") throw new Error("simulated interactive turn failure");
+        if (turn.text === "fail once" && !failedOnce) {
+          failedOnce = true;
+          throw new Error("simulated interactive turn failure");
+        }
         turns.push(turn.text);
       });
     }));
     await friday.activatePlugin(createVaultPlugin({ stateDir: join(home, "vault"), workspaceRoot: process.cwd() }));
-    await friday.activatePlugin(createChannelsPlugin({ autoStart: false }));
+    await friday.activatePlugin(createChannelsPlugin({
+      autoStart: false,
+      telegram: {
+        credentialRef: "vault://channels/telegram/default/bot-token",
+        allowedSenderIds: ["operator-1"],
+      },
+    }));
 
     const consumer = events.consumer("channels.turn-ingress.v1");
-    expect(consumer?.cursorSequence).toBe(0);
-    expect(consumer?.retry.maxAttempts).toBe(1);
+    expect(consumer?.retry.maxAttempts).toBe(3);
     await expect(events.runPending({ maxDeliveries: 10 })).resolves.toEqual([
       { consumerId: "channels.turn-ingress.v1", eventId: "stale-before-integration", status: "success" },
     ]);
     expect(turns).toEqual([]);
 
-    eventNow = new Date("2100-01-01T00:00:00.000Z");
+    const afterIntegration = Date.now() + 2_000;
     events.publish({
-      id: "fresh-after-integration",
+      id: "post-integration-failure",
       type: "channel.ingress.accepted",
       source: "channels",
       subject: "channel:telegram:default",
-      data: eventData("telegram-fresh", "fresh prompt"),
+      occurredAt: new Date(afterIntegration).toISOString(),
+      data: eventData("telegram-failed", "fail once", afterIntegration),
     });
     await expect(events.runPending({ maxDeliveries: 10 })).resolves.toEqual([
-      { consumerId: "channels.turn-ingress.v1", eventId: "fresh-after-integration", status: "success" },
+      expect.objectContaining({ consumerId: "channels.turn-ingress.v1", eventId: "post-integration-failure", status: "error" }),
     ]);
-    expect(turns).toEqual(["fresh prompt"]);
+    expect(turns).toEqual([]);
 
-    events.publish({
-      id: "failed-interactive-turn",
-      type: "channel.ingress.accepted",
-      source: "channels",
-      subject: "channel:telegram:default",
-      data: eventData("telegram-failed", "fail once"),
-    });
+    eventNow = new Date(eventNow.getTime() + 2_000);
     await expect(events.runPending({ maxDeliveries: 10 })).resolves.toEqual([
-      {
-        consumerId: "channels.turn-ingress.v1",
-        eventId: "failed-interactive-turn",
-        status: "dead-letter",
-        error: "simulated interactive turn failure",
+      { consumerId: "channels.turn-ingress.v1", eventId: "post-integration-failure", status: "success" },
+    ]);
+    expect(turns).toEqual(["fail once"]);
+  });
+
+  it("routes one same-conversation burst in one classifier batch and emits one aggregate Agent turn", async () => {
+    const home = temp();
+    process.env.FRIDAY_HOME = home;
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    const events = createEventsService({ stateDir: join(home, "events") });
+    await friday.activatePlugin(definePlugin({ id: "test-events", provides: [EVENTS_CAPABILITY] }, (ctx) => {
+      ctx.services.provide(EVENTS_CAPABILITY, events);
+      ctx.effect(() => events.close());
+    }));
+    const batches: string[][] = [];
+    const routing: RoutingService = Object.freeze({
+      async route(message: RoutingMessage): Promise<RoutingDecision> {
+        return Object.freeze({
+          messageId: message.id,
+          destination: Object.freeze({ kind: "transient" as const, id: "transient:utility" }),
+          execution: Object.freeze({ profile: "utility" as const, capabilityProfile: "none" as const }),
+          confidence: 1,
+        });
       },
-    ]);
-
-    events.publish({
-      id: "fresh-after-failure",
-      type: "channel.ingress.accepted",
-      source: "channels",
-      subject: "channel:telegram:default",
-      data: eventData("telegram-after-failure", "new prompt"),
+      async routeBatch(messages: readonly RoutingMessage[]): Promise<readonly RoutingDecision[]> {
+        batches.push(messages.map((message) => message.text));
+        return Object.freeze(messages.map((message) => Object.freeze({
+          messageId: message.id,
+          destination: Object.freeze({ kind: "transient" as const, id: "transient:utility" }),
+          execution: Object.freeze({ profile: "utility" as const, capabilityProfile: "none" as const }),
+          confidence: 1,
+        })));
+      },
+      subscribe() { return () => {}; },
+      recentContext() { return Object.freeze([]); },
     });
-    await expect(events.runPending({ maxDeliveries: 10 })).resolves.toEqual([
-      { consumerId: "channels.turn-ingress.v1", eventId: "fresh-after-failure", status: "success" },
-    ]);
-    expect(turns).toEqual(["fresh prompt", "new prompt"]);
+    await friday.activatePlugin(definePlugin({ id: "test-routing", provides: [ROUTING_CAPABILITY] }, (ctx) => {
+      ctx.services.provide(ROUTING_CAPABILITY, routing);
+    }));
+    const turns: InboundTurn[] = [];
+    await friday.activatePlugin(definePlugin({ id: "turn-ingress-batch-test" }, (ctx) => {
+      ctx.on(TURN_INGRESS_HOOK, (turn) => { turns.push(turn); });
+    }));
+    await friday.activatePlugin(createVaultPlugin({ stateDir: join(home, "vault"), workspaceRoot: process.cwd() }));
+    await friday.activatePlugin(createChannelsPlugin({
+      autoStart: false,
+      telegram: {
+        credentialRef: "vault://channels/telegram/default/bot-token",
+        allowedSenderIds: ["operator-1"],
+      },
+    }));
+
+    const base = Date.now() + 2_000;
+    for (const [index, text] of ["hi", "what can you do?", "summarize our next step"].entries()) {
+      events.publish({
+        id: `burst-${index}`,
+        type: "channel.ingress.accepted",
+        source: "channels",
+        subject: "channel:telegram:default",
+        occurredAt: new Date(base + index).toISOString(),
+        data: {
+          id: `telegram-${index}`,
+          principal: { channel: "telegram", accountId: "default", conversationId: "chat-1", senderId: "operator-1" },
+          text,
+          timestamp: base + index,
+          attachments: [],
+          chatType: "dm",
+        },
+      });
+    }
+
+    await events.runPending({ maxDeliveries: 10 });
+    expect(batches).toEqual([["hi", "what can you do?", "summarize our next step"]]);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.text).toContain("hi");
+    expect(turns[0]?.text).toContain("what can you do?");
+    expect(turns[0]?.text).toContain("summarize our next step");
   });
 
   it("contributes a scheduled reminder whose destination is bound to the originating conversation", async () => {

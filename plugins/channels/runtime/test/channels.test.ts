@@ -800,11 +800,13 @@ describe("access policy and chunking", () => {
 });
 
 describe("Telegram transport", () => {
-  it("drops Telegram backlog at startup, then accepts only updates that arrive after integration is live", async () => {
+  it("uses the persisted Telegram integration boundary without discarding valid post-integration backlog on restart", async () => {
     const responses = [
       { ok: true, result: { id: 99, username: "friday_bot" } },
-      { ok: true, result: [{ update_id: 1, message: { message_id: 7, date: 2, chat: { id: 10, type: "private" }, from: { id: 11, first_name: "Ada" }, text: "stale-before-start" } }] },
-      { ok: true, result: [{ update_id: 2, message: { message_id: 8, date: 3, chat: { id: 10, type: "private" }, from: { id: 11, first_name: "Ada" }, text: "fresh-after-start" } }] },
+      { ok: true, result: [
+        { update_id: 1, message: { message_id: 7, date: 1, chat: { id: 10, type: "private" }, from: { id: 11, first_name: "Ada" }, text: "stale-before-integration" } },
+        { update_id: 2, message: { message_id: 8, date: 2, chat: { id: 10, type: "private" }, from: { id: 11, first_name: "Ada" }, text: "valid-after-integration" } },
+      ] },
     ];
     const fetchMock = vi.fn(async () => ({
       ok: true,
@@ -816,6 +818,7 @@ describe("Telegram transport", () => {
       credentialRef: "vault://channels/telegram/default/bot-token",
       allowedSenderIds: ["11"],
       pollTimeoutSeconds: 1,
+      activatedAt: 2_500,
     }, {
       consume: async (ref, consumer) => {
         expect(ref).toBe("vault://channels/telegram/default/bot-token");
@@ -828,12 +831,13 @@ describe("Telegram transport", () => {
     await transport.start((message) => { seen.push(message.text); });
     await new Promise((resolve) => setTimeout(resolve, 10));
     await transport.stop();
-    expect(seen).toEqual(["fresh-after-start"]);
+    expect(seen).toEqual(["valid-after-integration"]);
     const getUpdatesBodies = fetchMock.mock.calls
       .filter(([input]) => String(input).endsWith("/getUpdates"))
       .map(([, init]) => JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
-    expect(getUpdatesBodies[0]).toMatchObject({ offset: -1, limit: 1, timeout: 0 });
-    expect(getUpdatesBodies[1]).toMatchObject({ offset: 2 });
+    expect(getUpdatesBodies[0]).toMatchObject({ offset: 0 });
+    expect(getUpdatesBodies[1]).toMatchObject({ offset: 3 });
+    expect(getUpdatesBodies.some((body) => body.offset === -1)).toBe(false);
     // An immediately-empty long-poll response must yield instead of creating
     // an unbounded promise/microtask spin that starves timers and shutdown.
     expect(fetchMock.mock.calls.length).toBeLessThan(12);

@@ -7,7 +7,7 @@ import agentPlugin from "../plugins/agent/index.js";
 import { AGENT_CAPABILITY } from "../plugins/agent/contract.js";
 import type { AgentProfilesService } from "../plugins/agent-profiles/contract.js";
 import type { ComputerExecutionBinding, ComputerService } from "../plugins/computer/contract.js";
-import type { AgentInputContribution, AgentModelRequestPolicyContribution, AgentToolContribution } from "../plugins/turn-loop/contract.js";
+import type { AgentInputContribution, AgentModelRequestPolicyContribution, AgentPromptSectionContribution, AgentToolContribution } from "../plugins/turn-loop/contract.js";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import modelPlugin from "../plugins/model/index.js";
@@ -921,6 +921,25 @@ describe("Turn Loop agent executor", () => {
       createTool() { throw new Error("not used"); },
       createAllTools() { return {}; },
     } as unknown as ToolsService;
+    const contributedTool: AgentToolContribution = {
+      id: "heavy.utility-test",
+      sourcePluginId: "computer",
+      name: "heavy_utility_test",
+      label: "Heavy utility test",
+      description: "A deliberately irrelevant tool that must not be exposed on a transient utility turn.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      async execute() { return { output: { ok: true } }; },
+    };
+    const promptSections: AgentPromptSectionContribution[] = [
+      {
+        id: "heavy-host-policy",
+        render: () => ({ content: "HEAVY CAPABILITY POLICY MUST NOT APPEAR", authority: "host-policy", cache: "stable" }),
+      },
+      {
+        id: "utility-persona",
+        render: () => ({ content: "UTILITY PERSONA CONFIG SHOULD REMAIN", authority: "user-config", cache: "stable" }),
+      },
+    ];
     const executor = createAgentTurnExecutor({
       agent: requireCapability(AGENT_CAPABILITY),
       model: testModels,
@@ -928,24 +947,198 @@ describe("Turn Loop agent executor", () => {
       sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
       sessions: requireCapability(SESSIONS_CAPABILITY),
       tools,
+      toolContributions: () => [contributedTool],
+      promptSectionContributions: () => promptSections,
     }, { stateDir });
 
     try {
-      faux.setResponses([modelRuntime.fauxAssistantMessage("utility answer")]);
+      let requestTools = "unobserved";
+      let systemPrompt = "";
+      faux.setResponses([(context) => {
+        const request = context as unknown as { tools?: readonly { name?: string }[]; systemPrompt?: string };
+        requestTools = JSON.stringify((request.tools ?? []).map((tool) => tool.name ?? ""));
+        systemPrompt = request.systemPrompt ?? "";
+        return modelRuntime.fauxAssistantMessage("utility answer");
+      }]);
       const result = await executor.execute({
         turn: turn("u1", "one off"),
         decision: {
           messageId: "u1",
           destination: { kind: "transient", id: "transient:utility" },
-          execution: { profile: "utility" },
+          execution: { profile: "utility", capabilityProfile: "none" },
           confidence: 1,
         },
       });
       expect(result).toEqual({ text: "utility answer" });
+      expect(requestTools).toBe("[]");
+      expect(systemPrompt).not.toContain("HEAVY CAPABILITY POLICY MUST NOT APPEAR");
+      expect(systemPrompt).not.toContain("heavy_utility_test");
+      expect(systemPrompt).toContain("UTILITY PERSONA CONFIG SHOULD REMAIN");
       expect(existsSync(join(stateDir, "sessions"))).toBe(false);
     } finally {
       await executor.dispose();
       faux.unregister();
+    }
+  });
+
+  it("leases a Computer screen and exposes only Computer tools for a transient Computer utility turn", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "faux";
+    process.env.FRIDAY_MODEL_ID = "faux-1";
+    const stateDir = tempRoot();
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(sessionsPlugin);
+    await friday.activatePlugin(promptsPlugin);
+    await friday.activatePlugin(modelPlugin);
+    await friday.activatePlugin(agentPlugin);
+
+    const models = requireCapability(MODEL_CAPABILITY);
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
+    const testModels = withTestModel(models, faux);
+    const tools = {
+      createTool() { throw new Error("not used"); },
+      createAllTools() { return {}; },
+    } as unknown as ToolsService;
+    const toolContributions: AgentToolContribution[] = [
+      {
+        id: "computer-browser-test",
+        sourcePluginId: "computer",
+        name: "computer_browser",
+        label: "Computer browser",
+        description: "Computer-only browser control",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        async execute() { return { output: { ok: true } }; },
+      },
+      {
+        id: "unrelated-heavy-test",
+        sourcePluginId: "tools",
+        name: "heavy_unrelated_tool",
+        label: "Heavy unrelated tool",
+        description: "Must not be exposed on a Computer-only utility turn",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        async execute() { return { output: { ok: true } }; },
+      },
+    ];
+    const promptSections: AgentPromptSectionContribution[] = [
+      {
+        id: "computer-active-screen",
+        render(context) {
+          const binding = context.computerExecution;
+          if (!binding) return undefined;
+          return {
+            content: `COMPUTER SCREEN ${binding.nodeId}:${binding.screenId}`,
+            authority: "host-policy",
+            cache: "volatile",
+          };
+        },
+      },
+      {
+        id: "heavy-unrelated-policy",
+        render: () => ({ content: "UNRELATED HEAVY POLICY", authority: "host-policy", cache: "stable" }),
+      },
+      {
+        id: "utility-persona",
+        render: () => ({ content: "UTILITY PERSONA CONFIG SHOULD REMAIN", authority: "user-config", cache: "stable" }),
+      },
+    ];
+    const screenRequests: Array<{ ownerId: string; preferredNodeId?: string }> = [];
+    const releases: Array<{ screenLeaseId: string; ownerId: string }> = [];
+    const cleanups: string[] = [];
+    const computer = {
+      async waitForScreen(request: { ownerId: string; preferredNodeId?: string }) {
+        screenRequests.push({ ...request });
+        const acquiredAt = Date.now();
+        return {
+          state: "acquired" as const,
+          screenLease: {
+            id: "utility-screen-lease",
+            nodeId: "local-linux",
+            screenId: "agent-screen-2",
+            ownerId: request.ownerId,
+            acquiredAt: new Date(acquiredAt).toISOString(),
+            expiresAt: new Date(acquiredAt + 60_000).toISOString(),
+          },
+          controlLease: {
+            id: "utility-control",
+            screenLeaseId: "utility-screen-lease",
+            nodeId: "local-linux",
+            screenId: "agent-screen-2",
+            holder: "agent" as const,
+            holderId: request.ownerId,
+            agentOwnerId: request.ownerId,
+            generation: 1,
+            acquiredAt: new Date(acquiredAt).toISOString(),
+            lastActivityAt: new Date(acquiredAt).toISOString(),
+            handBackAfterMs: null,
+            transcriptPolicy: {
+              captureKeystrokes: false as const,
+              captureSecrets: false as const,
+              captureSensitiveScreenshots: false as const,
+            },
+          },
+        };
+      },
+      async renewScreenLease(screenLeaseId: string, ownerId: string, ttlMs?: number) {
+        const renewedAt = Date.now();
+        return {
+          id: screenLeaseId,
+          nodeId: "local-linux",
+          screenId: "agent-screen-2",
+          ownerId,
+          acquiredAt: new Date(renewedAt).toISOString(),
+          expiresAt: new Date(renewedAt + (ttlMs ?? 60_000)).toISOString(),
+        };
+      },
+      controlLease() { return { holder: "agent" } as never; },
+      async cleanupRunProcesses(binding: ComputerExecutionBinding) { cleanups.push(binding.screenLeaseId); return true; },
+      async releaseScreen(screenLeaseId: string, ownerId: string) { releases.push({ screenLeaseId, ownerId }); return true; },
+    } as unknown as ComputerService;
+    const executor = createAgentTurnExecutor({
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: testModels,
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions: requireCapability(SESSIONS_CAPABILITY),
+      tools,
+      toolContributions: () => toolContributions,
+      promptSectionContributions: () => promptSections,
+      optional: { computer: () => computer },
+    }, { stateDir });
+
+    try {
+      let requestTools: string[] = [];
+      let systemPrompt = "";
+      faux.setResponses([(context) => {
+        const request = context as unknown as { tools?: readonly { name?: string }[]; systemPrompt?: string };
+        requestTools = (request.tools ?? []).flatMap((tool) => tool.name ? [tool.name] : []);
+        systemPrompt = request.systemPrompt ?? "";
+        return modelRuntime.fauxAssistantMessage("playing Shakaboom");
+      }]);
+      const result = await executor.execute({
+        turn: turn("computer-u1", "open a new screen and open youtube play shakaboom"),
+        decision: {
+          messageId: "computer-u1",
+          destination: { kind: "transient", id: "transient:utility" },
+          execution: { profile: "utility", capabilityProfile: "computer" },
+          confidence: 1,
+        },
+      });
+
+      expect(result).toEqual({ text: "playing Shakaboom" });
+      expect(requestTools).toEqual(["computer_browser"]);
+      expect(systemPrompt).toContain("COMPUTER SCREEN local-linux:agent-screen-2");
+      expect(systemPrompt).toContain("UTILITY PERSONA CONFIG SHOULD REMAIN");
+      expect(systemPrompt).not.toContain("UNRELATED HEAVY POLICY");
+      expect(systemPrompt).not.toContain("heavy_unrelated_tool");
+      expect(screenRequests).toHaveLength(1);
+      expect(screenRequests[0]?.preferredNodeId).toBeUndefined();
+      expect(cleanups).toEqual(["utility-screen-lease"]);
+      expect(releases).toEqual([{ screenLeaseId: "utility-screen-lease", ownerId: screenRequests[0]!.ownerId }]);
+    } finally {
+      await executor.dispose();
+      faux.unregister();
+      await friday.dispose();
     }
   });
 

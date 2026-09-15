@@ -7,10 +7,18 @@ published release artifacts and generated release notes.
 
 ## [Unreleased]
 
-### Live-only interactive channel ingress
+### Capability-aware utility execution
 
-- Telegram now establishes a fresh provider cursor when the transport starts, discarding queued updates that arrived while the integration was offline instead of replaying them as new prompts.
-- Migrated interactive channel turn delivery to a live-only durable consumer and made explicit turn failures one-shot/dead-lettered, so a prompt that already failed cannot unexpectedly receive a delayed answer after FRIDAY is restarted or repaired.
+- Split transient utility routing from capability selection. Pure conversational turns can use `capabilityProfile=none`, Computer/browser/UI requests use `capabilityProfile=computer`, and other one-off Agent work can retain the general capability surface instead of treating every utility turn as tool-free.
+- Computer-routed utility turns now acquire their own Computer screen lease even without a Project Computer target, expose only Computer-contributed tools plus Computer-specific prompt policy, and keep unrelated tools, Skills, Project context, recursion packages, and capability prompt sections out of the model request.
+- Kept older routed work backward compatible by widening missing capability-profile metadata to `general`; host validation rejects invalid destination/capability combinations, and batching keys include the capability profile so no-tool and Computer work are not accidentally merged.
+
+### Durable post-integration channel batching
+
+- Telegram now persists a one-time integration activation boundary instead of flushing the provider cursor on every process start. Provider messages older than that boundary are ignored, while valid post-integration messages survive FRIDAY restarts and retain bounded retry/recovery.
+- Same-sender/same-conversation bursts are coalesced into bounded batches. Routing classifies up to 100 messages with one classifier request, validates one decision per message, never batches across trusted continuity scopes, groups compatible Agent work, and delivers immediate results as one cumulative channel reply.
+- Added private append-only daily routing JSONL traces under the FRIDAY state root with classifier prompts, provider-visible response content, parsed decisions, model/stop metadata, usage when exposed, and bounded error details; SQLite/events remain the authoritative durable control plane.
+- Transient utility Agent turns now use a minimal prompt/tool surface: no tool schemas, Skills catalog, Project context, recursion packages, or unrelated host/runtime capability sections are injected, while core prompt policy, runtime facts, and explicit user/persona configuration remain available.
 
 ### Credential-scoped model onboarding
 

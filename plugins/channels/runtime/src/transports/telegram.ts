@@ -19,6 +19,8 @@ export interface TelegramChannelConfig extends ChannelAccessPolicy {
   readonly pollTimeoutSeconds?: number | undefined;
   readonly requireMention?: boolean | undefined;
   readonly mentionPatterns?: readonly string[] | undefined;
+  /** Persisted integration boundary. Provider messages older than this are intentionally ignored. */
+  readonly activatedAt?: number | undefined;
 }
 
 interface TelegramApiResponse<T> {
@@ -129,7 +131,6 @@ export class TelegramChannelTransport implements ChannelTransport {
       const me = await this.#request<TelegramUser>("getMe", {});
       this.#botUsername = me.username;
       this.#controller = new AbortController();
-      await this.#discardPendingUpdates(this.#controller.signal);
       this.#state = "running";
       this.#pollPromise = this.#poll(this.#controller.signal).catch((error: unknown) => {
         reportUnlessExpectedAbort({ component: "channels.telegram", operation: "polling loop terminated", error }, this.#controller?.signal);
@@ -217,22 +218,6 @@ export class TelegramChannelTransport implements ChannelTransport {
     return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze([String(result.message_id)]) });
   }
 
-  async #discardPendingUpdates(signal: AbortSignal): Promise<void> {
-    // Establish a live-only provider cursor before FRIDAY begins accepting turns.
-    // Telegram documents a negative offset as selecting from the tail while
-    // forgetting earlier queued updates. Asking for the single newest update
-    // therefore clears messages accumulated while this integration was offline
-    // without replaying them as fresh user turns after startup.
-    const pendingTail = await this.#request<TelegramUpdate[]>("getUpdates", {
-      offset: -1,
-      limit: 1,
-      timeout: 0,
-      allowed_updates: ["message", "edited_message", "channel_post", "callback_query"],
-    }, signal);
-    const latest = pendingTail.at(-1);
-    if (latest) this.#offset = Math.max(this.#offset, latest.update_id + 1);
-  }
-
   async #poll(signal: AbortSignal): Promise<void> {
     let backoff = 500;
     while (!signal.aborted) {
@@ -272,6 +257,13 @@ export class TelegramChannelTransport implements ChannelTransport {
 
   async #handleMessage(message: TelegramMessage): Promise<void> {
     if (!this.#handler) return;
+    const activatedAt = this.#config.activatedAt;
+    if (activatedAt !== undefined && Number.isFinite(activatedAt)) {
+      // Telegram message dates have one-second precision. Round the host boundary
+      // down so a message created during the activation second is not lost.
+      const activationSecond = Math.floor(activatedAt / 1_000) * 1_000;
+      if (message.date * 1_000 < activationSecond) return;
+    }
     const threadId = message.message_thread_id === undefined ? undefined : String(message.message_thread_id);
     const sender = message.from;
     const senderChat = message.sender_chat;
