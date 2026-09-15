@@ -33,7 +33,7 @@ The host validates the exact destination/profile pair and confidence range befor
 
 Routing subscribes only to sanitized ordinary Channel messages. Credential-capture marker messages are ignored. Successful decisions are recorded as `routing.message.routed` Events containing message/principal identifiers, destination, execution profile and confidence but **not conversation text**. Failures publish a generic `routing.message.failed` occurrence without provider error text. Events therefore provide operational history without becoming a duplicate chat transcript.
 
-Routing model selection uses `FRIDAY_ROUTING_PROVIDER` / `FRIDAY_ROUTING_MODEL_ID` when configured and otherwise falls back to the ordinary `FRIDAY_MODEL_PROVIDER` / `FRIDAY_MODEL_ID`. Bootstrap does not require model credentials; classification resolves model configuration lazily when an actual message arrives.
+Routing model selection uses `FRIDAY_ROUTING_PROVIDER` / `FRIDAY_ROUTING_MODEL_ID` when configured and otherwise falls back to the ordinary `FRIDAY_MODEL_PROVIDER` / `FRIDAY_MODEL_ID`. Router-only bootstrap establishes the routing provider/model and any required credential before the runtime is published. When the provider exposes live credential-scoped discovery, setup filters the generated model catalog against that live list so retired or ACL-inaccessible routing ids fail during setup rather than on the first classified message.
 
 ## Safety boundary
 

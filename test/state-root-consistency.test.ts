@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { getAutonomyStateRoot } from "../plugins/autonomy/runner.js";
 import { getSelfImprovementStateRoot } from "../plugins/self-improvement/runner.js";
+import { getDevicesStateDir } from "../plugins/devices/index.js";
 
 describe("mission-state root consistency", () => {
   const resolvers = [
@@ -16,4 +17,11 @@ describe("mission-state root consistency", () => {
       expect(resolver(undefined, { FRIDAY_HOME: "./home" })).toBe(resolve("./home"));
     });
   }
+  it("devices follows FRIDAY_STATE_DIR before FRIDAY_HOME", () => {
+    expect(getDevicesStateDir({ FRIDAY_STATE_DIR: "./mission", FRIDAY_HOME: "./home" }))
+      .toBe(join(resolve("./mission"), "devices"));
+    expect(getDevicesStateDir({ FRIDAY_HOME: "./home" }))
+      .toBe(join(resolve("./home"), "devices"));
+  });
+
 });

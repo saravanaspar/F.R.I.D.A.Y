@@ -129,6 +129,7 @@ export class TelegramChannelTransport implements ChannelTransport {
       const me = await this.#request<TelegramUser>("getMe", {});
       this.#botUsername = me.username;
       this.#controller = new AbortController();
+      await this.#discardPendingUpdates(this.#controller.signal);
       this.#state = "running";
       this.#pollPromise = this.#poll(this.#controller.signal).catch((error: unknown) => {
         reportUnlessExpectedAbort({ component: "channels.telegram", operation: "polling loop terminated", error }, this.#controller?.signal);
@@ -138,6 +139,8 @@ export class TelegramChannelTransport implements ChannelTransport {
         }
       });
     } catch (error) {
+      this.#controller?.abort();
+      this.#controller = undefined;
       reportOperationalError({ component: "channels.telegram", operation: "start transport", error });
       this.#state = "error";
       this.#detail = "Telegram startup failed";
@@ -212,6 +215,22 @@ export class TelegramChannelTransport implements ChannelTransport {
       },
     });
     return Object.freeze({ channel: this.channel, accountId: this.accountId, conversationId: target.conversationId, messageIds: Object.freeze([String(result.message_id)]) });
+  }
+
+  async #discardPendingUpdates(signal: AbortSignal): Promise<void> {
+    // Establish a live-only provider cursor before FRIDAY begins accepting turns.
+    // Telegram documents a negative offset as selecting from the tail while
+    // forgetting earlier queued updates. Asking for the single newest update
+    // therefore clears messages accumulated while this integration was offline
+    // without replaying them as fresh user turns after startup.
+    const pendingTail = await this.#request<TelegramUpdate[]>("getUpdates", {
+      offset: -1,
+      limit: 1,
+      timeout: 0,
+      allowed_updates: ["message", "edited_message", "channel_post", "callback_query"],
+    }, signal);
+    const latest = pendingTail.at(-1);
+    if (latest) this.#offset = Math.max(this.#offset, latest.update_id + 1);
   }
 
   async #poll(signal: AbortSignal): Promise<void> {

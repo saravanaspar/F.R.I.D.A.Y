@@ -178,7 +178,7 @@ friday
 
 On the first setup, F.R.I.D.A.Y asks for **Quick setup** or **Custom setup**. Existing/local onboarding is not removed. Both modes begin with the same mandatory local security block:
 
-1. a routing/system model and its credential when required;
+1. a routing/system provider, its credential when required, then a model selected from the provider's live credential-visible model list when supported;
 2. at least **one enabled ingress channel** with one explicitly confirmed exact operator identity;
 3. an explicit host privilege policy: **restricted approved-operation broker** or **no privileged operations**.
 
@@ -186,7 +186,7 @@ A main reasoning model is no longer mandatory during bootstrap. In router-only m
 
 Runtime defaults are not published until the routing model and first exact operator pairing are complete. `allowAll` may widen transport admission, but it never creates an operator implicitly. The host privilege policy is independent from Agent permission mode: `full` Agent permission still cannot sudo when host privilege mode is `none`. Broker mode never grants an arbitrary root shell; sudo authentication/installation happens only in the local terminal, and remote operations use only the fixed root-owned helper with `sudo -n`. Secrets are never written to `runtime.env`.
 
-After bootstrap, a trusted channel can continue onboarding and administration with typed actions for the main/routing models, permissions/timezone, additional channels, Voice, sandbox, execution Python, MCP, Skills, self-improvement source, Doctor and diagnostics. Channel `diagnostics.doctor` runs the same canonical check set as local `friday doctor`; only the presentation differs. `onboarding.main-model.setup` is conversational: it can ask for provider/model choices and, when needed, choose API-key or supported OAuth authentication. API-key input and OAuth code/redirect prompts use protected channel interactions, and resulting credentials go directly to Vault instead of through ordinary router/main-model text. Successful Voice, execution-Python, sandbox, MCP and Skills operations advance the resumable onboarding state automatically.
+After bootstrap, a trusted channel can continue onboarding and administration with typed actions for the main/routing models, permissions/timezone, additional channels, Voice, sandbox, execution Python, MCP, Skills, self-improvement source, Doctor and diagnostics. Channel `diagnostics.doctor` runs the same canonical check set as local `friday doctor`; only the presentation differs. `onboarding.main-model.setup` is conversational: it asks for the provider, establishes API-key or supported OAuth authentication when needed, then—when the provider exposes live discovery—shows only credential-visible models that also have FRIDAY runtime descriptors. API-key input and OAuth code/redirect prompts use protected channel interactions, and resulting credentials go directly to Vault instead of through ordinary router/main-model text. Successful Voice, execution-Python, sandbox, MCP and Skills operations advance the resumable onboarding state automatically.
 
 Useful setup commands:
 

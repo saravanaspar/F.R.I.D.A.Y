@@ -469,6 +469,56 @@ describe("Turn Loop agent executor", () => {
     }
   });
 
+  it("accepts capability-style contribution ids while keeping model-facing tool names provider-safe", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "faux";
+    process.env.FRIDAY_MODEL_ID = "faux-1";
+    const stateDir = tempRoot();
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(sessionsPlugin);
+    await friday.activatePlugin(promptsPlugin);
+    await friday.activatePlugin(modelPlugin);
+    await friday.activatePlugin(agentPlugin);
+
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
+    const calls: string[] = [];
+    const contributions: AgentToolContribution[] = [{
+      id: "channels.ask-user",
+      name: "ask_user",
+      label: "Ask user",
+      description: "Ask the current user for clarification.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      async execute() { calls.push("ask_user"); return { output: { ok: true } }; },
+    }];
+    const executor = createAgentTurnExecutor({
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: withTestModel(requireCapability(MODEL_CAPABILITY), faux),
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions: requireCapability(SESSIONS_CAPABILITY),
+      tools: { createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService,
+      toolContributions: () => contributions,
+    }, { stateDir, maxCachedSessions: 2 });
+
+    try {
+      faux.setResponses([
+        modelRuntime.fauxAssistantMessage(modelRuntime.fauxToolCall("ask_user", {}), { stopReason: "toolUse" }),
+        modelRuntime.fauxAssistantMessage("done"),
+      ]);
+      const result = await executor.execute({ turn: turn("dotted-contribution-id", "ask me something"), decision: decision("session:new") });
+      expect(result.text).toBe("done");
+      expect(calls).toEqual(["ask_user"]);
+
+      contributions[0] = { ...contributions[0]!, name: "ask.user" };
+      await expect(executor.execute({ turn: turn("invalid-tool-name", "try again"), decision: decision("session:new") }))
+        .rejects.toThrow("agent tool name from channels.ask-user must contain only letters, numbers, underscores, or hyphens");
+    } finally {
+      await executor.dispose();
+      faux.unregister();
+    }
+  });
+
   it("derives conditional-hook phases from tool lifecycle instead of trusting the model declaration alone", async () => {
     process.env.FRIDAY_MODEL_PROVIDER = "faux";
     process.env.FRIDAY_MODEL_ID = "faux-1";

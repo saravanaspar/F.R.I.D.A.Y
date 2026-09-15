@@ -800,10 +800,11 @@ describe("access policy and chunking", () => {
 });
 
 describe("Telegram transport", () => {
-  it("uses an opaque Vault ref, default-denies unknown senders, and normalizes allowed messages", async () => {
+  it("drops Telegram backlog at startup, then accepts only updates that arrive after integration is live", async () => {
     const responses = [
       { ok: true, result: { id: 99, username: "friday_bot" } },
-      { ok: true, result: [{ update_id: 1, message: { message_id: 7, date: 2, chat: { id: 10, type: "private" }, from: { id: 11, first_name: "Ada" }, text: "hello" } }] },
+      { ok: true, result: [{ update_id: 1, message: { message_id: 7, date: 2, chat: { id: 10, type: "private" }, from: { id: 11, first_name: "Ada" }, text: "stale-before-start" } }] },
+      { ok: true, result: [{ update_id: 2, message: { message_id: 8, date: 3, chat: { id: 10, type: "private" }, from: { id: 11, first_name: "Ada" }, text: "fresh-after-start" } }] },
     ];
     const fetchMock = vi.fn(async () => ({
       ok: true,
@@ -827,10 +828,15 @@ describe("Telegram transport", () => {
     await transport.start((message) => { seen.push(message.text); });
     await new Promise((resolve) => setTimeout(resolve, 10));
     await transport.stop();
-    expect(seen).toContain("hello");
+    expect(seen).toEqual(["fresh-after-start"]);
+    const getUpdatesBodies = fetchMock.mock.calls
+      .filter(([input]) => String(input).endsWith("/getUpdates"))
+      .map(([, init]) => JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    expect(getUpdatesBodies[0]).toMatchObject({ offset: -1, limit: 1, timeout: 0 });
+    expect(getUpdatesBodies[1]).toMatchObject({ offset: 2 });
     // An immediately-empty long-poll response must yield instead of creating
     // an unbounded promise/microtask spin that starves timers and shutdown.
-    expect(fetchMock.mock.calls.length).toBeLessThan(10);
+    expect(fetchMock.mock.calls.length).toBeLessThan(12);
     expect(secretValues.length).toBeGreaterThan(0);
     expect(JSON.stringify(transport.status())).not.toContain("telegram-token");
   });

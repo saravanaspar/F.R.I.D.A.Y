@@ -468,6 +468,14 @@ function pythonEnvironment(paths: readonly string[]): Record<string, string> | u
   return unique.length === 0 ? undefined : { PYTHONPATH: unique.join(process.platform === "win32" ? ";" : ":") };
 }
 
+function contributedToolId(value: string, label: string): string {
+  const id = value.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)) {
+    throw new Error(`${label} must use capability-style identifier characters and be at most 128 characters`);
+  }
+  return id;
+}
+
 function contributedToolName(value: string, label: string): string {
   const name = value.trim();
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(name)) {
@@ -503,7 +511,7 @@ function contributionTools(
     ? contributions
     : contributions.filter((contribution) => contribution.sourcePluginId !== undefined && enabledPlugins.includes(contribution.sourcePluginId));
   return selected.map((contribution) => {
-    const id = contributedToolName(contribution.id, "agent tool contribution id");
+    const id = contributedToolId(contribution.id, "agent tool contribution id");
     const name = contributedToolName(contribution.name, `agent tool name from ${id}`);
     if (!contribution.parameters || typeof contribution.parameters !== "object" || Array.isArray(contribution.parameters)) {
       throw new Error(`Agent tool ${name} parameters must be a JSON Schema object`);

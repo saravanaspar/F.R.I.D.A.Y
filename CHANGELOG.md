@@ -7,6 +7,18 @@ published release artifacts and generated release notes.
 
 ## [Unreleased]
 
+### Live-only interactive channel ingress
+
+- Telegram now establishes a fresh provider cursor when the transport starts, discarding queued updates that arrived while the integration was offline instead of replaying them as new prompts.
+- Migrated interactive channel turn delivery to a live-only durable consumer and made explicit turn failures one-shot/dead-lettered, so a prompt that already failed cannot unexpectedly receive a delayed answer after FRIDAY is restarted or repaired.
+
+### Credential-scoped model onboarding
+
+- Reordered API-key onboarding to `provider -> credential -> live provider model discovery -> FRIDAY-compatible model choice`, preventing stale generated-catalog entries from being offered when the configured credential cannot access them. Main and routing selections reuse one discovery result per provider during a setup session.
+- Added bounded, secret-redacting live model discovery in the Model subsystem for Google, OpenAI, Anthropic, DeepSeek, xAI, Groq, and Mistral, while retaining the generated catalog as the source of execution/capability metadata and falling back to the existing catalog flow for providers without a safe discovery adapter.
+- Updated protected remote credential validation and trusted-channel main-model onboarding to use the same discovery boundary, so retired or ACL-inaccessible model ids fail before runtime settings are published.
+- Corrected Devices state-root precedence to honor mission-scoped `FRIDAY_STATE_DIR` before `FRIDAY_HOME`, preventing client/gateway tests and mission runtimes from accidentally reusing globally paired device state.
+
 ### Prompt trust, context provenance, and Agent coordination
 
 - Added typed model-prompt provenance and cache scope. FRIDAY prompt sections now declare `core-policy`, `host-policy`, `user-config`, `project-guidance`, `runtime-context`, or `untrusted-data` independently from `stable`/`volatile` provider-cache placement, so formatting can no longer silently elevate a plugin/user/project/runtime section into host policy.

@@ -11,6 +11,8 @@ export interface ModelService {
   readonly getModel: ModelRuntime["getModel"];
   readonly getModels: ModelRuntime["getModels"];
   readonly getProviders: ModelRuntime["getProviders"];
+  readonly supportsLiveModelDiscovery: ModelRuntime["supportsLiveModelDiscovery"];
+  readonly discoverAvailableModelIds: ModelRuntime["discoverAvailableModelIds"];
   readonly complete: ModelRuntime["complete"];
   readonly completeSimple: ModelRuntime["completeSimple"];
   readonly stream: ModelRuntime["stream"];

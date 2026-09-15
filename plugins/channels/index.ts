@@ -487,12 +487,33 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
     });
     ctx.effect(unsubscribeTurnIngress);
 
+    const ingressLiveSince = new Date().toISOString();
     const unregisterIngressConsumer = events.registerConsumer({
       id: CHANNEL_INGRESS_CONSUMER,
       types: [CHANNEL_INGRESS_EVENT],
-      startAt: "beginning",
-    }, async ({ event, signal }) => {
+      // Interactive channel turns are live-only. New installs start at the
+      // current event tail, while existing consumer state is retained so the
+      // stable consumer id does not pin an orphaned cursor forever.
+      startAt: "latest",
+      // A user-facing prompt gets one execution attempt. If it fails, the user
+      // receives that failure now and can resend; FRIDAY must not answer it
+      // unexpectedly minutes later after a repair or restart.
+      retry: { maxAttempts: 1 },
+    }, async ({ event, delivery, signal }) => {
       signal?.throwIfAborted();
+      // Existing installations can already have failed v1 deliveries waiting
+      // behind the durable cursor. Drop only previously *failed* historical
+      // turns. An event that was merely admitted before a crash, or whose lease
+      // was abandoned/cancelled, is still recoverable and must not be lost.
+      if (event.publishedAt < ingressLiveSince && delivery.attempt > 1) {
+        const priorFailure = events.deliveryHistory({
+          consumerId: CHANNEL_INGRESS_CONSUMER,
+          eventId: event.id,
+          status: "error",
+          limit: 1,
+        });
+        if (priorFailure.length > 0) return;
+      }
       const message = persistedIngress(event.data);
       const target = {
         channel: message.principal.channel,

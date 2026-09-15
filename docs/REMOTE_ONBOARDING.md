@@ -8,7 +8,7 @@ F.R.I.D.A.Y v1.0.3 keeps the complete local setup surface while making the first
 
 **Quick setup** performs only the mandatory local block:
 
-1. configure and verify the routing/system model;
+1. choose the routing/system provider, establish its credential when required, and select a model from the live credential-visible list when the provider supports discovery;
 2. configure at least one ingress channel and explicitly pair one exact sender as operator; and
 3. select the host privilege policy: `broker` or `none`.
 
@@ -23,6 +23,10 @@ Persistent progress lives in private `FRIDAY_HOME/onboarding/state.json`. Mandat
 The routing model is mandatory; the main reasoning model is not. In router-only mode F.R.I.D.A.Y can route deterministic control-plane requests to typed actions such as onboarding status, Doctor, runtime settings, Voice, sandbox, MCP and Skills, and can parse bounded concrete schedules. Routing is classified by ownership rather than difficulty: System operates F.R.I.D.A.Y itself, Scheduler manages concrete schedules, and every other user objective goes to an Agent/main-model destination even when it is short or simple. `transient:utility` is still a main-model Agent path, not permission for the router to answer the user. Requests that require ordinary Agent work therefore receive an explicit message to configure the main model instead of silently using the router as a full reasoning model.
 
 Legacy v1.0.2 installations that stored only a main model remain valid. v1.0.3 derives the routing model from that main model until a dedicated router is selected.
+
+## Credential-scoped model discovery
+
+For API-key providers with a supported model-list endpoint, setup treats the provider as the authority for **availability** and FRIDAY's generated model catalog as the authority for **runtime metadata/capabilities**. The flow is `provider -> credential -> live model list -> intersection with FRIDAY descriptors -> model choice`. A key is not persisted from local interactive setup until live discovery succeeds. If a previously saved model is no longer returned for that credential, setup warns and requires another choice instead of silently retaining the stale id. The same discovered list is reused when main and routing models use the same provider during one setup session. Providers without a safe live-discovery adapter retain the existing catalog-based flow.
 
 ## System result presentation
 
@@ -45,7 +49,7 @@ There is no remote sudo-password prompt, arbitrary `sudo <generated command>`, r
 
 ## Trusted-channel administration
 
-After bootstrap, system actions can manage non-secret runtime settings, additional channel configuration, protected channel credentials, Voice, execution Python and the existing sandbox/MCP/Skills/self-repository surfaces. `onboarding.main-model.setup` provides a conversational main-model flow: provider/model selection uses trusted-channel prompts, and authentication can use protected API-key capture or a supported OAuth/device-code flow before runtime settings are updated. Successful Voice, execution-Python, sandbox, MCP and Skills actions automatically advance their onboarding step.
+After bootstrap, system actions can manage non-secret runtime settings, additional channel configuration, protected channel credentials, Voice, execution Python and the existing sandbox/MCP/Skills/self-repository surfaces. `onboarding.main-model.setup` provides a conversational main-model flow: the provider is selected first, authentication uses protected API-key capture or a supported OAuth/device-code flow, and providers with live discovery are queried before model choice. Only model ids both visible to that credential and understood by FRIDAY's runtime descriptor catalog are offered; stale catalog entries are not selectable. Successful Voice, execution-Python, sandbox, MCP and Skills actions automatically advance their onboarding step.
 
 Additional channel configuration does not trust a sender automatically. Credentials are captured in a protected channel interaction and written directly to canonical Vault references. Trusting/revoking an identity remains a separate Permissions operation.
 

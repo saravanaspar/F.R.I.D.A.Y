@@ -1,7 +1,7 @@
 import { chmod, mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runOnboarding as runOnboardingRaw, runRouterBootstrap, type OnboardingOptions } from "../src/onboarding.js";
 import { maybeManageChannels } from "../src/onboarding-channels.js";
 import { readSavedChannels, updateSavedChannel } from "../plugins/channels/config.js";
@@ -10,11 +10,16 @@ import { normalizeCustomProvider, readCustomModels, upsertCustomModel } from "..
 import {
   getRuntimeEnvironmentPath,
   loadRuntimeEnvironment,
+  RUNTIME_ENV_KEYS,
   parseRuntimeEnvironment,
   updateRuntimeSettings,
 } from "../plugins/runtime-settings/runtime-env.js";
 
 const temporaryDirectories: string[] = [];
+
+beforeEach(() => {
+  for (const key of RUNTIME_ENV_KEYS) vi.stubEnv(key, "");
+});
 
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "friday-onboarding-"));
@@ -23,6 +28,7 @@ async function temporaryDirectory(): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
@@ -141,6 +147,103 @@ describe("FRIDAY onboarding", () => {
     expect(builds).toBe(0);
     await runOnboarding({ ...common, setupSandbox: true });
     expect(builds).toBe(1);
+  });
+
+  it("captures the provider credential before model selection and shows only live key-scoped models", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "");
+    const home = await temporaryDirectory();
+    const events: string[] = [];
+    let modelChoices: readonly string[] = [];
+    let routingChoices: readonly string[] = [];
+    let discoveryCalls = 0;
+
+    const saved = await runOnboarding({
+      home,
+      setupSandbox: false,
+      configureChannels: false,
+      catalog: {
+        providers: () => ["google"],
+        models: () => [
+          { id: "gemini-2.5-flash-lite", name: "Gemini 2.5 Flash-Lite" },
+          { id: "gemini-3.5-flash-lite", name: "Gemini 3.5 Flash Lite", featured: true },
+        ],
+      },
+      modelDiscovery: {
+        supports: (provider) => provider === "google",
+        async list(provider, apiKey) {
+          discoveryCalls += 1;
+          events.push(`discover:${provider}:${apiKey}`);
+          return ["gemini-3.5-flash-lite", "provider-only-unknown-model"];
+        },
+      },
+      io: {
+        isInteractive: true,
+        select: async (input) => {
+          events.push(`select:${input.message}`);
+          if (input.message === "Choose your provider") return "google";
+          if (input.message === "Choose a model") {
+            modelChoices = input.choices.map((choice) => choice.value);
+            return "gemini-3.5-flash-lite";
+          }
+          if (input.message === "Routing model") return "separate";
+          if (input.message === "Routing model provider") return "google";
+          if (input.message === "Routing model model") {
+            routingChoices = input.choices.map((choice) => choice.value);
+            return "gemini-3.5-flash-lite";
+          }
+          if (input.message === "Permission mode") return "ask";
+          throw new Error(`unexpected selector: ${input.message}`);
+        },
+        confirm: async () => true,
+        secretQuestion: async () => { events.push("secret"); return "test-google-key"; },
+        question: async (message) => { throw new Error(`unexpected question: ${message}`); },
+        text: async (_prompt, initial) => initial ?? "UTC",
+        write: () => undefined,
+      },
+    });
+
+    expect(saved).toMatchObject({
+      modelProvider: "google",
+      modelId: "gemini-3.5-flash-lite",
+      routingProvider: "google",
+      routingModelId: "gemini-3.5-flash-lite",
+    });
+    expect(discoveryCalls).toBe(1);
+    expect(modelChoices).toEqual(["gemini-3.5-flash-lite"]);
+    expect(routingChoices).toEqual(["gemini-3.5-flash-lite"]);
+    expect(events.indexOf("secret")).toBeLessThan(events.indexOf("select:Choose a model"));
+    expect(events).toContain("discover:google:test-google-key");
+  });
+
+  it("rejects an explicitly requested model that the live credential cannot access", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "");
+    const home = await temporaryDirectory();
+
+    await expect(runOnboarding({
+      home,
+      provider: "google",
+      model: "gemini-2.5-flash-lite",
+      setupSandbox: false,
+      configureChannels: false,
+      catalog: {
+        providers: () => ["google"],
+        models: () => [
+          { id: "gemini-2.5-flash-lite" },
+          { id: "gemini-3.5-flash-lite" },
+        ],
+      },
+      modelDiscovery: {
+        supports: () => true,
+        list: async () => ["gemini-3.5-flash-lite"],
+      },
+      io: {
+        isInteractive: true,
+        confirm: async () => true,
+        secretQuestion: async () => "test-google-key",
+        question: async (message) => { throw new Error(`unexpected question: ${message}`); },
+        write: () => undefined,
+      },
+    })).rejects.toThrow("google/gemini-2.5-flash-lite is not available to the configured credential");
   });
 
   it("uses rich selector and confirmation hooks when the terminal UI provides them", async () => {

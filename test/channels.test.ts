@@ -105,6 +105,111 @@ describe("channels plugin", () => {
     expect(trusted).not.toHaveProperty("ingestLocal");
   });
 
+  it("starts interactive ingress live-only and does not replay a failed prompt later", async () => {
+    const home = temp();
+    process.env.FRIDAY_HOME = home;
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    let eventNow = new Date("2000-01-01T00:00:00.000Z");
+    const events = createEventsService({ stateDir: join(home, "events"), now: () => eventNow });
+    await friday.activatePlugin(definePlugin({ id: "test-events", provides: [EVENTS_CAPABILITY] }, (ctx) => {
+      ctx.services.provide(EVENTS_CAPABILITY, events);
+      ctx.effect(() => events.close());
+    }));
+
+    const eventData = (id: string, text: string) => ({
+      id,
+      principal: { channel: "telegram", accountId: "default", conversationId: "chat-1", senderId: "operator-1" },
+      text,
+      timestamp: Date.now(),
+      attachments: [],
+      chatType: "dm",
+    });
+
+    events.publish({
+      id: "stale-before-integration",
+      type: "channel.ingress.accepted",
+      source: "channels",
+      subject: "channel:telegram:default",
+      data: eventData("telegram-old", "old prompt"),
+    });
+    const unregisterLegacy = events.registerConsumer({
+      id: "channels.turn-ingress.v1",
+      types: ["channel.ingress.accepted"],
+      startAt: "beginning",
+    }, async () => {
+      throw new Error("old runtime failed this prompt");
+    });
+    await expect(events.runPending({ maxDeliveries: 10 })).resolves.toEqual([
+      {
+        consumerId: "channels.turn-ingress.v1",
+        eventId: "stale-before-integration",
+        status: "error",
+        error: "old runtime failed this prompt",
+      },
+    ]);
+    unregisterLegacy();
+
+    const turns: string[] = [];
+    await friday.activatePlugin(definePlugin({ id: "turn-ingress-live-only-test" }, (ctx) => {
+      ctx.on(TURN_INGRESS_HOOK, (turn) => {
+        if (turn.text === "fail once") throw new Error("simulated interactive turn failure");
+        turns.push(turn.text);
+      });
+    }));
+    await friday.activatePlugin(createVaultPlugin({ stateDir: join(home, "vault"), workspaceRoot: process.cwd() }));
+    await friday.activatePlugin(createChannelsPlugin({ autoStart: false }));
+
+    const consumer = events.consumer("channels.turn-ingress.v1");
+    expect(consumer?.cursorSequence).toBe(0);
+    expect(consumer?.retry.maxAttempts).toBe(1);
+    await expect(events.runPending({ maxDeliveries: 10 })).resolves.toEqual([
+      { consumerId: "channels.turn-ingress.v1", eventId: "stale-before-integration", status: "success" },
+    ]);
+    expect(turns).toEqual([]);
+
+    eventNow = new Date("2100-01-01T00:00:00.000Z");
+    events.publish({
+      id: "fresh-after-integration",
+      type: "channel.ingress.accepted",
+      source: "channels",
+      subject: "channel:telegram:default",
+      data: eventData("telegram-fresh", "fresh prompt"),
+    });
+    await expect(events.runPending({ maxDeliveries: 10 })).resolves.toEqual([
+      { consumerId: "channels.turn-ingress.v1", eventId: "fresh-after-integration", status: "success" },
+    ]);
+    expect(turns).toEqual(["fresh prompt"]);
+
+    events.publish({
+      id: "failed-interactive-turn",
+      type: "channel.ingress.accepted",
+      source: "channels",
+      subject: "channel:telegram:default",
+      data: eventData("telegram-failed", "fail once"),
+    });
+    await expect(events.runPending({ maxDeliveries: 10 })).resolves.toEqual([
+      {
+        consumerId: "channels.turn-ingress.v1",
+        eventId: "failed-interactive-turn",
+        status: "dead-letter",
+        error: "simulated interactive turn failure",
+      },
+    ]);
+
+    events.publish({
+      id: "fresh-after-failure",
+      type: "channel.ingress.accepted",
+      source: "channels",
+      subject: "channel:telegram:default",
+      data: eventData("telegram-after-failure", "new prompt"),
+    });
+    await expect(events.runPending({ maxDeliveries: 10 })).resolves.toEqual([
+      { consumerId: "channels.turn-ingress.v1", eventId: "fresh-after-failure", status: "success" },
+    ]);
+    expect(turns).toEqual(["fresh prompt", "new prompt"]);
+  });
+
   it("contributes a scheduled reminder whose destination is bound to the originating conversation", async () => {
     await activate();
     const reminder = collectContributions(SCHEDULED_ACTION_CONTRIBUTION)

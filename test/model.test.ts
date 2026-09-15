@@ -33,6 +33,8 @@ describe("model plugin", () => {
     expect(typeof service.complete).toBe("function");
     expect(typeof service.getModel).toBe("function");
     expect(typeof service.getProviders).toBe("function");
+    expect(typeof service.supportsLiveModelDiscovery).toBe("function");
+    expect(typeof service.discoverAvailableModelIds).toBe("function");
     expect(service.getProviders()).toContain("deepseek");
     expect(service.getModels("deepseek").length).toBeGreaterThan(0);
     expect((service as unknown as { registerModel?: unknown }).registerModel).toBeUndefined();
@@ -42,6 +44,71 @@ describe("model plugin", () => {
     expect(typeof registry.unregisterModel).toBe("function");
 
     uninstallCapabilityRegistry();
+  });
+
+
+  it("discovers only Google generateContent models visible to the supplied credential across pages", async () => {
+    const requests: Array<{ url: string; key: string | null }> = [];
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      const url = new URL(String(input));
+      requests.push({ url: url.toString(), key: new Headers(init?.headers).get("x-goog-api-key") });
+      if (!url.searchParams.has("pageToken")) {
+        return new Response(JSON.stringify({
+          models: [
+            { name: "models/gemini-3.5-flash-lite", supportedGenerationMethods: ["generateContent", "countTokens"] },
+            { name: "models/text-embedding-999", supportedGenerationMethods: ["embedContent"] },
+          ],
+          nextPageToken: "next-page",
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({
+        models: [
+          { name: "models/gemma-4-31b-it", supportedGenerationMethods: ["generateContent"] },
+        ],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    const ids = await modelRuntime.discoverAvailableModelIds("google", "secret-test-key", { fetchImpl });
+
+    expect(ids).toEqual(["gemini-3.5-flash-lite", "gemma-4-31b-it"]);
+    expect(requests).toHaveLength(2);
+    expect(requests.every((request) => request.key === "secret-test-key")).toBe(true);
+    expect(requests[1]!.url).toContain("pageToken=next-page");
+  });
+
+  it("does not leak provider credentials in model-discovery failures", async () => {
+    const secret = "do-not-log-this-key";
+    const fetchImpl: typeof globalThis.fetch = async () => new Response(JSON.stringify({
+      error: { message: `API key ${secret} is invalid` },
+    }), { status: 400, headers: { "content-type": "application/json" } });
+
+    let message = "";
+    try {
+      await modelRuntime.discoverAvailableModelIds("google", secret, { fetchImpl });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("HTTP 400");
+    expect(message).toContain("[REDACTED]");
+    expect(message).toContain("is invalid");
+    expect(message).not.toContain(secret);
+  });
+
+  it("uses credential-scoped language-model discovery for xAI and keeps aliases selectable", async () => {
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      expect(String(input)).toBe("https://api.x.ai/v1/language-models");
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer xai-test-key");
+      return new Response(JSON.stringify({
+        models: [
+          { id: "grok-4.6", aliases: ["grok-4.6-latest"] },
+          { id: "grok-code-fast-1", aliases: [] },
+        ],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    await expect(modelRuntime.discoverAvailableModelIds("xai", "xai-test-key", { fetchImpl }))
+      .resolves.toEqual(["grok-4.6", "grok-4.6-latest", "grok-code-fast-1"]);
   });
 
   it("derives bounded TTFT and cache metrics from content-free model telemetry", async () => {

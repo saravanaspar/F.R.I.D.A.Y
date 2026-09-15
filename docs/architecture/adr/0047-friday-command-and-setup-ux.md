@@ -25,14 +25,23 @@ The installed command surface is:
 - `friday onboard` is a deprecated compatibility alias for `friday setup`;
 - stopped-runtime backup and Vault recovery commands remain fixed host operations.
 
-On the first `friday setup`, the main model, any required provider credential,
-the user's IANA wall-clock timezone, and at least one enabled ingress channel are
-required. One exact sender on an enabled channel must also be explicitly confirmed
+On first-run bootstrap, the routing/system model is mandatory while the main
+reasoning model may be configured later. For providers that require an API key and
+expose a supported model-list endpoint, setup establishes the credential before
+model selection, asks the provider for the models visible to that credential, and
+intersects those ids with FRIDAY's generated runtime descriptor catalog. The
+provider is authoritative for current availability; FRIDAY remains authoritative
+for execution metadata/capabilities. A stale descriptor that the credential can no
+longer access is therefore not offered, and an explicitly supplied unavailable id
+fails closed. Providers without a safe discovery adapter retain catalog selection.
+
+The user's IANA wall-clock timezone and at least one enabled ingress channel are
+also required. One exact sender on an enabled channel must be explicitly confirmed
 and persisted as the initial operator; `allowAll` never grants operator authority
-implicitly. Runtime defaults are not published until those channel invariants are
-satisfied. Routing reuses the main model and permission mode defaults to `ask`;
-sandbox/Python and additional channel/bridge setup remain optional. Later
-`friday setup` runs the full configuration manager and may keep existing values.
+implicitly. Runtime defaults are not published until the mandatory router/channel
+invariants are satisfied. Permission mode defaults to `ask`; sandbox/Python and
+additional channel/bridge setup remain optional. Later `friday setup` runs the full
+configuration manager and may keep existing values.
 
 Runtime-owned operations such as MCP and skill installation are not copied into
 the setup host. `friday` never reads terminal lines as conversational ingress,
@@ -51,8 +60,11 @@ FRIDAY does not add an internal daemon mode.
 ## Consequences
 
 The common user flow becomes `install -> friday setup -> friday`. First setup is
-still bounded, but it establishes a durable wall-clock timezone and at least one
-real ingress path before the runtime is considered configured. Plugin operations
+still bounded, but it establishes a usable routing model, a durable wall-clock
+timezone and at least one real ingress path before the runtime is considered
+configured. When live model discovery is supported, credential capture precedes
+model choice so provider retirements/ACLs are reflected during setup rather than
+first appearing as runtime 404/authorization failures. Plugin operations
 use the same typed runtime contracts through Telegram, Discord, or another
 configured network channel; no local conversational channel exists.
 

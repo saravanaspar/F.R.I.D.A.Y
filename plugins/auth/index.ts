@@ -139,6 +139,13 @@ const authPlugin: FridayPlugin = definePlugin({
       inputMode: "opaque-token",
       async validateSecret(secret: Uint8Array) {
         const apiKey = Buffer.from(secret).toString("utf8");
+        if (model.supportsLiveModelDiscovery(provider)) {
+          const available = new Set(await model.discoverAvailableModelIds(provider, apiKey));
+          if (!models.some((candidate) => available.has(String(candidate.id)))) {
+            throw new Error(`${provider} credential exposes no FRIDAY-compatible models`);
+          }
+          return;
+        }
         const response = await model.completeSimple(
           testModel as never,
           { messages: [{ role: "user", content: "Reply only with OK.", timestamp: Date.now() }] },

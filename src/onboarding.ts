@@ -36,6 +36,11 @@ export interface OnboardingModelCatalog {
   models(provider: string): readonly OnboardingModelDescriptor[];
 }
 
+export interface OnboardingModelDiscovery {
+  supports(provider: string): boolean;
+  list(provider: string, apiKey: string): Promise<readonly string[]>;
+}
+
 export type OnboardingPermissionMode = RuntimePermissionMode;
 export type OnboardingSettings = RuntimeSettings;
 
@@ -89,6 +94,8 @@ export interface OnboardingOptions {
   readonly requireMainCredential?: boolean | undefined;
   readonly io?: OnboardingIO | undefined;
   readonly catalog?: OnboardingModelCatalog | undefined;
+  /** Live provider model discovery used to key-scope interactive model choices. */
+  readonly modelDiscovery?: OnboardingModelDiscovery | undefined;
   readonly probeSandbox?: (() => OnboardingSandboxProbeResult) | undefined;
   readonly ensureSandbox?: (() => OnboardingSandboxSetupResult | Promise<OnboardingSandboxSetupResult>) | undefined;
   /** Test/integration seam for probing a custom OpenAI-compatible descriptor before registration. */
@@ -104,6 +111,7 @@ export interface RouterBootstrapOptions {
   readonly timezone?: string | undefined;
   readonly io?: OnboardingIO | undefined;
   readonly catalog?: OnboardingModelCatalog | undefined;
+  readonly modelDiscovery?: OnboardingModelDiscovery | undefined;
   readonly verifyCustomModel?: OnboardingOptions["verifyCustomModel"] | undefined;
 }
 
@@ -129,6 +137,19 @@ async function defaultCatalog(home: string): Promise<OnboardingModelCatalog> {
     })),
   };
 }
+
+async function defaultModelDiscovery(): Promise<OnboardingModelDiscovery> {
+  const model = await import("@friday/model");
+  return Object.freeze({
+    supports: (provider: string) => model.supportsLiveModelDiscovery(provider),
+    list: (provider: string, apiKey: string) => model.discoverAvailableModelIds(provider, apiKey),
+  });
+}
+
+const DISABLED_MODEL_DISCOVERY: OnboardingModelDiscovery = Object.freeze({
+  supports: () => false,
+  list: async () => Object.freeze([]),
+});
 
 const CUSTOM_PROVIDER = "__friday_custom_openai_compatible__";
 
@@ -198,6 +219,180 @@ function strictApiKey(value: string): string {
     throw new Error("Send only the API key value; do not include a label, quotes, or code fences");
   }
   return token;
+}
+
+interface PreparedProviderModels {
+  readonly models: readonly OnboardingModelDescriptor[];
+  readonly credentialReady: boolean;
+  readonly live: boolean;
+}
+
+type ProviderModelSessions = Map<string, PreparedProviderModels>;
+
+function distinctCatalogModels(catalog: OnboardingModelCatalog, provider: string): readonly OnboardingModelDescriptor[] {
+  const byId = new Map<string, OnboardingModelDescriptor>();
+  for (const model of catalog.models(provider)) {
+    const id = model.id.trim();
+    if (!id || byId.has(id)) continue;
+    byId.set(id, model);
+  }
+  return Object.freeze([...byId.values()]);
+}
+
+function intersectLiveModels(
+  provider: string,
+  catalog: OnboardingModelCatalog,
+  availableIds: readonly string[],
+): readonly OnboardingModelDescriptor[] {
+  const available = new Set(availableIds.map((id) => id.trim()).filter(Boolean));
+  const compatible = distinctCatalogModels(catalog, provider).filter((model) => available.has(model.id));
+  if (available.size === 0) {
+    throw new Error(`${provider} returned no generative models for this credential`);
+  }
+  if (compatible.length === 0) {
+    throw new Error(`${provider} returned ${available.size} model(s), but none have FRIDAY runtime descriptors; update the FRIDAY model catalog`);
+  }
+  return Object.freeze(compatible);
+}
+
+async function prepareProviderModels(
+  provider: string,
+  home: string,
+  io: OnboardingIO,
+  catalog: OnboardingModelCatalog,
+  discovery: OnboardingModelDiscovery,
+  sessions: ProviderModelSessions,
+): Promise<PreparedProviderModels> {
+  const cached = sessions.get(provider);
+  if (cached) return cached;
+
+  const staticModels = distinctCatalogModels(catalog, provider);
+  if (!io.isInteractive || !discovery.supports(provider) || !modelProviderTypicallyNeedsApiKey(provider)) {
+    const prepared = Object.freeze({ models: staticModels, credentialReady: false, live: false });
+    sessions.set(provider, prepared);
+    return prepared;
+  }
+
+  const model = await import("@friday/model");
+  const vault = await import("@friday/vault");
+  const environment: NodeJS.ProcessEnv = { ...process.env, FRIDAY_HOME: home };
+  const store = new vault.VaultStore({
+    stateDir: vault.getVaultStateDir(environment),
+    workspaceRoot: getFridayWorkspace(environment),
+  });
+  const ref = modelCredentialVaultRef(provider);
+  const exists = store.exists(ref);
+  const ambientCredential = model.getEnvApiKey(provider);
+
+  const discover = async (apiKey: string): Promise<PreparedProviderModels> => {
+    const availableIds = await task(io, `Fetching ${provider} models available to this credential`, () => discovery.list(provider, apiKey));
+    const models = intersectLiveModels(provider, catalog, availableIds);
+    showSuccess(io, `Live model access verified · ${models.length} FRIDAY-compatible of ${new Set(availableIds).size} available`);
+    return Object.freeze({ models, credentialReady: true, live: true });
+  };
+
+  showInfo(io, `Credential · ${exists ? "stored securely in Vault" : ambientCredential ? "available from your environment" : "not configured"}`);
+
+  let captureApproved = false;
+  if (exists) {
+    const replace = await confirm(io, `Replace the saved ${provider} API key?`, false);
+    if (replace) {
+      captureApproved = true;
+    } else {
+      try {
+        let prepared: PreparedProviderModels | undefined;
+        await store.consume(ref, async (secret) => {
+          const secretBytes = Buffer.from(secret);
+          try {
+            prepared = await discover(secretBytes.toString("utf8"));
+          } finally {
+            secretBytes.fill(0);
+          }
+        });
+        if (prepared) {
+          sessions.set(provider, prepared);
+          return prepared;
+        }
+      } catch (error) {
+        showWarning(io, `Saved ${provider} credential could not discover usable models · ${error instanceof Error ? error.message : String(error)}`);
+        showInfo(io, `Enter a replacement ${provider} API key to continue with live model discovery.`);
+      }
+    }
+  } else if (ambientCredential) {
+    try {
+      const prepared = await discover(ambientCredential);
+      const persistAmbient = await confirm(
+        io,
+        `Save the ${provider} credential from your environment into FRIDAY Vault for unattended/service restarts?`,
+        true,
+      );
+      if (persistAmbient) {
+        const bytes = Buffer.from(ambientCredential, "utf8");
+        try {
+          store.create({ ref, kind: "model-api-key", secret: bytes });
+          showSuccess(io, `Credential saved for ${provider}`);
+        } catch (error) {
+          showWarning(io, `Credential could not be saved to Vault · ${error instanceof Error ? error.message : String(error)}`);
+          showWarning(io, `${provider} remains environment-managed; unattended services must inject the same credential.`);
+        } finally {
+          bytes.fill(0);
+        }
+      } else {
+        showWarning(io, `${provider} remains environment-managed; unattended services must inject the same credential.`);
+      }
+      sessions.set(provider, prepared);
+      return prepared;
+    } catch (error) {
+      showWarning(io, `Environment credential could not discover usable ${provider} models · ${error instanceof Error ? error.message : String(error)}`);
+      showInfo(io, `Enter a ${provider} API key to continue with live model discovery.`);
+    }
+  }
+
+  if (!captureApproved) {
+    captureApproved = await confirm(
+      io,
+      exists ? `Provide a replacement ${provider} API key?` : `Add an API key for ${provider}?`,
+      true,
+    );
+  }
+  if (!captureApproved) {
+    throw new Error(`${provider} API-key setup is required to show only models available to this credential`);
+  }
+
+  showInfo(io, "Your key is masked while typing, used to fetch the live model list, then stored in FRIDAY Vault.");
+  for (;;) {
+    const raw = io.secretQuestion
+      ? await io.secretQuestion("API key (input hidden): ")
+      : await io.question("API key: ");
+    let token: string;
+    try {
+      token = strictApiKey(raw);
+    } catch (error) {
+      io.write(`${error instanceof Error ? error.message : String(error)}\nTry again, or press Ctrl+C to exit.\n`);
+      continue;
+    }
+
+    let prepared: PreparedProviderModels;
+    try {
+      prepared = await discover(token);
+    } catch (error) {
+      showWarning(io, `Credential was not saved · ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
+
+    const bytes = Buffer.from(token, "utf8");
+    try {
+      if (exists) store.rotate(ref, bytes);
+      else store.create({ ref, kind: "model-api-key", secret: bytes });
+    } catch (error) {
+      throw new Error(`Credential was verified but could not be saved to FRIDAY Vault: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    } finally {
+      bytes.fill(0);
+    }
+    showSuccess(io, `Credential verified by live model discovery and saved for ${provider}`);
+    sessions.set(provider, prepared);
+    return prepared;
+  }
 }
 
 async function maybeConfigureProviderCredential(
@@ -460,16 +655,31 @@ async function resolveSelection(
   currentModel: string | undefined,
   io: OnboardingIO,
   catalog: OnboardingModelCatalog,
+  discovery: OnboardingModelDiscovery,
+  sessions: ProviderModelSessions,
   home: string,
   label: string,
   verifyCustomModel?: OnboardingOptions["verifyCustomModel"],
-): Promise<{ provider: string; modelId: string }> {
+): Promise<{ provider: string; modelId: string; credentialReady: boolean }> {
   const providerLabel = label === "Main model" ? "Choose your provider" : `${label} provider`;
   const modelLabel = label === "Main model" ? "Choose a model" : `${label} model`;
   const provider = await resolveProvider(providedProvider, currentProvider, io, catalog, providerLabel);
-  if (provider === CUSTOM_PROVIDER) return configureCustomSelection(io, home, label, verifyCustomModel);
-  const modelId = await resolveModel(providedModel, currentModel, provider, io, catalog, modelLabel);
-  return { provider, modelId };
+  if (provider === CUSTOM_PROVIDER) {
+    const custom = await configureCustomSelection(io, home, label, verifyCustomModel);
+    return { ...custom, credentialReady: true };
+  }
+  const prepared = await prepareProviderModels(provider, home, io, catalog, discovery, sessions);
+  const modelId = await resolveModel(
+    providedModel,
+    currentModel,
+    provider,
+    io,
+    catalog,
+    modelLabel,
+    prepared.models,
+    prepared.live,
+  );
+  return { provider, modelId, credentialReady: prepared.credentialReady };
 }
 
 async function resolveModel(
@@ -479,10 +689,29 @@ async function resolveModel(
   io: OnboardingIO,
   catalog: OnboardingModelCatalog,
   label: string,
+  availableModels?: readonly OnboardingModelDescriptor[],
+  strictAvailability = false,
 ): Promise<string> {
-  if (provided?.trim()) return provided.trim();
+  const source = availableModels ?? catalog.models(provider);
+  const known = new Set(source.map((model) => model.id));
+  if (provided?.trim()) {
+    const selected = provided.trim();
+    if (strictAvailability && !known.has(selected)) {
+      throw new Error(`${provider}/${selected} is not available to the configured credential`);
+    }
+    return selected;
+  }
   if (!io.isInteractive) return nonEmpty(current, label);
-  const models: OnboardingSelectChoice[] = [...catalog.models(provider)]
+  if (strictAvailability && source.length === 0) {
+    throw new Error(`No FRIDAY-compatible ${provider} models are available to the configured credential`);
+  }
+
+  let initial = current;
+  if (strictAvailability && current && !known.has(current)) {
+    showWarning(io, `Previously selected ${provider}/${current} is no longer available to this credential; choose another model.`);
+    initial = undefined;
+  }
+  const models: OnboardingSelectChoice[] = [...source]
     .sort((left, right) => Number(Boolean(right.featured)) - Number(Boolean(left.featured)) || left.id.localeCompare(right.id))
     .slice(0, 120)
     .map((model) => ({
@@ -491,7 +720,7 @@ async function resolveModel(
       hint: model.name && model.name !== model.id ? model.id : model.featured ? "featured" : undefined,
       keywords: [model.id, model.name ?? "", model.featured ? "featured recommended" : ""],
     }));
-  return choose(io, label, models, current, { searchable: true, maxItems: 9 });
+  return choose(io, label, models, initial, { searchable: true, maxItems: 9 });
 }
 
 async function resolvePermission(
@@ -534,8 +763,10 @@ async function resolveRouting(
   main: { provider: string; modelId: string },
   io: OnboardingIO,
   catalog: OnboardingModelCatalog,
+  discovery: OnboardingModelDiscovery,
+  sessions: ProviderModelSessions,
   home: string,
-): Promise<{ routingProvider?: string; routingModelId?: string }> {
+): Promise<{ routingProvider?: string; routingModelId?: string; credentialReady?: boolean }> {
   if (options.useMainForRouting === true) return {};
   const explicitlySeparate = Boolean(options.routingProvider?.trim() || options.routingModel?.trim());
   let separate = explicitlySeparate || Boolean(current?.routingProvider && current.routingModelId);
@@ -571,11 +802,17 @@ async function resolveRouting(
     current?.routingModelId ?? main.modelId,
     io,
     catalog,
+    discovery,
+    sessions,
     home,
     "Routing model",
     options.verifyCustomModel,
   );
-  return { routingProvider: selection.provider, routingModelId: selection.modelId };
+  return {
+    routingProvider: selection.provider,
+    routingModelId: selection.modelId,
+    credentialReady: selection.credentialReady,
+  };
 }
 
 async function maybeSetupSandbox(
@@ -660,6 +897,8 @@ export async function runRouterBootstrap(options: RouterBootstrapOptions): Promi
     if (stored?.workspaceRoot) environment.FRIDAY_WORKSPACE = stored.workspaceRoot;
     const workspaceRoot = await ensureFridayWorkspace(environment, home);
     const catalog = options.catalog ?? await defaultCatalog(home);
+    const discovery = options.modelDiscovery ?? (options.catalog ? DISABLED_MODEL_DISCOVERY : await defaultModelDiscovery());
+    const providerSessions: ProviderModelSessions = new Map();
     if (io.isInteractive) {
       if (io.intro) io.intro("FRIDAY · Mandatory bootstrap", "Configure the routing model and pair at least one trusted operator channel. The main reasoning model and all optional features can be configured later.");
       else io.write("\nFRIDAY · Mandatory bootstrap\nRouter + trusted operator channel are required. Optional setup can continue later.\n\n");
@@ -672,11 +911,13 @@ export async function runRouterBootstrap(options: RouterBootstrapOptions): Promi
       environment.FRIDAY_ROUTING_MODEL_ID ?? environment.FRIDAY_MODEL_ID,
       io,
       catalog,
+      discovery,
+      providerSessions,
       home,
       "Routing model",
       options.verifyCustomModel,
     );
-    if (!routing.provider.startsWith("custom:")) {
+    if (!routing.provider.startsWith("custom:") && !routing.credentialReady) {
       await maybeConfigureProviderCredential(routing.provider, routing.modelId, home, io, true);
     }
 
@@ -717,6 +958,8 @@ export async function runOnboarding(options: OnboardingOptions = {}): Promise<On
     if (stored?.workspaceRoot) environment.FRIDAY_WORKSPACE = stored.workspaceRoot;
     const workspaceRoot = await ensureFridayWorkspace(environment, home);
     const catalog = options.catalog ?? await defaultCatalog(home);
+    const discovery = options.modelDiscovery ?? (options.catalog ? DISABLED_MODEL_DISCOVERY : await defaultModelDiscovery());
+    const providerSessions: ProviderModelSessions = new Map();
     if (io.isInteractive) banner(io, stored !== undefined);
 
     const main = await resolveSelection(
@@ -726,15 +969,18 @@ export async function runOnboarding(options: OnboardingOptions = {}): Promise<On
       environment.FRIDAY_MODEL_ID,
       io,
       catalog,
+      discovery,
+      providerSessions,
       home,
       "Main model",
       options.verifyCustomModel,
     );
-    if (!main.provider.startsWith("custom:")) {
+    if (!main.provider.startsWith("custom:") && !main.credentialReady) {
       await maybeConfigureProviderCredential(main.provider, main.modelId, home, io, options.requireMainCredential === true);
     }
-    const routing = await resolveRouting(options, stored, main, io, catalog, home);
-    if (routing.routingProvider && routing.routingModelId && routing.routingProvider !== main.provider) {
+    const routingResult = await resolveRouting(options, stored, main, io, catalog, discovery, providerSessions, home);
+    const { credentialReady: routingCredentialReady, ...routing } = routingResult;
+    if (routing.routingProvider && routing.routingModelId && routing.routingProvider !== main.provider && !routingCredentialReady) {
       await maybeConfigureProviderCredential(routing.routingProvider, routing.routingModelId, home, io);
     }
     const permissionMode = await resolvePermission(
