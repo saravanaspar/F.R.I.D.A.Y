@@ -1128,7 +1128,13 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     const targetId = (result as { targetId: string }).targetId;
     targetByScreen.set(screenId, targetId);
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      if ((await browserTargets(signal)).some((target) => target.id === targetId)) return targetId;
+      if ((await browserTargets(signal)).some((target) => target.id === targetId)) {
+        // A virtual/headless Wayland output has no real "foreground window" concept,
+        // so background:false on createTarget is not reliably enough to give the new
+        // window input focus; explicitly activate it so synthetic input is accepted.
+        await cdp.browserCommand("Target.activateTarget", { targetId }, signal).catch(() => {});
+        return targetId;
+      }
       await delay(25, signal);
     }
     throw new Error("Chromium CDP target did not become ready");
@@ -1160,15 +1166,11 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     args: readonly unknown[],
     signal?: AbortSignal,
   ): Promise<T | undefined> {
-    const result = await cdp.targetCommand(targetId, "Runtime.callFunctionOn", {
-      functionDeclaration,
-      arguments: args.map((value) => ({ value })),
-      returnByValue: true,
-      awaitPromise: true,
-    }, signal);
-    const exception = cdpExceptionMessage(result);
-    if (exception) throw new Error(`browser page evaluation failed: ${sanitizeText(exception, 256)}`);
-    return cdpResultValue<T>(result);
+    // Runtime.callFunctionOn requires objectId/executionContextId/uniqueContextId, none of which
+    // this provider tracks per-target; route through Runtime.evaluate (like evaluateFunctionValue)
+    // which defaults to the target's main execution context instead.
+    const argsJson = args.map((value) => JSON.stringify(value)).join(",");
+    return evaluateValue<T>(targetId, `(${functionDeclaration})(${argsJson})`, signal);
   }
 
   async function pageUrl(targetId: string, signal?: AbortSignal): Promise<string> {
@@ -1415,7 +1417,10 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     const previous = observationStateByScreen.get(screenId);
     const observationId = `obs-${++observationSequence}`;
     const [rawSummary, rawUrl, targets, structured] = await Promise.all([
-      rawRequest === undefined ? evaluateValue<string>(targetId, DOM_SUMMARY_EXPRESSION, signal) : Promise.resolve(undefined),
+      // Always compute domSummary: this used to be skipped whenever beforeState.request was
+      // already defined, which is true for every action after the first one on a screen,
+      // silently dropping domSummary from every post-action observation.
+      evaluateValue<string>(targetId, DOM_SUMMARY_EXPRESSION, signal),
       pageUrl(targetId, signal),
       browserTargets(signal),
       structuredObservation(screenId, targetId, observationId, request, nearSelector, signal),
