@@ -320,6 +320,22 @@ export class TelegramChannelTransport implements ChannelTransport {
     const accepted = result?.classification === (match ? "approval-resolved" : "prompt-resolved");
     const acknowledgement = !accepted ? "This action is no longer valid." : match ? (match[2] === "approve" ? "Approved" : "Denied") : "Answer recorded";
     await this.#request("answerCallbackQuery", { callback_query_id: callback.id, text: acknowledgement }).catch((error: unknown) => { reportOperationalError({ component: "channels.telegram", operation: "acknowledge protected callback", error, severity: "warn" }); });
+    if (accepted && message) await this.#removeProtectedMessage(message);
+  }
+
+  async #removeProtectedMessage(message: TelegramMessage): Promise<void> {
+    const target = { chat_id: message.chat.id, message_id: message.message_id };
+    try {
+      await this.#request("deleteMessage", target);
+    } catch (error) {
+      // Some chats do not grant the bot permission to delete messages. Removing
+      // the keyboard still prevents a resolved approval from being pressed a
+      // second time and leaves a useful audit trail in the conversation.
+      reportOperationalError({ component: "channels.telegram", operation: "delete resolved protected message", error, severity: "warn" });
+      await this.#request("editMessageReplyMarkup", { ...target, reply_markup: { inline_keyboard: [] } }).catch((fallbackError: unknown) => {
+        reportOperationalError({ component: "channels.telegram", operation: "remove resolved protected message controls", error: fallbackError, severity: "warn" });
+      });
+    }
   }
 
   #isMentioned(text: string): boolean {

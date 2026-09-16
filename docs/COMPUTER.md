@@ -1,17 +1,54 @@
 # Shared Agent Computer
 
-Phase 4 defines the provider-neutral Computer Node authority. Phase 5 completes the built-in Linux/Sway provider behind that contract; Windows remains Phase 8 work. The core contract stays platform-neutral and usable by both.
+Phase 4 defines the provider-neutral Computer Node authority. Phase 5 supplies the built-in Linux **native X11** provider behind that contract; Windows remains Phase 8 work. The core contract stays platform-neutral.
 
 ## Ownership and reuse
 
-`plugins/computer` owns Computer Node runtime registration, resource admission, screen/control leases, Browser Supervisor coordination, human takeover state, and managed node lifecycle requests. It deliberately reuses the existing architecture instead of duplicating it:
+`plugins/computer` owns Computer Node runtime registration, resource admission, desktop/control leases, Browser Supervisor coordination, human takeover state, and managed node lifecycle requests. It reuses the existing architecture: Execution/Tools remain shell/edit/process authorities, Session Jobs remain durable work/restart owners, Permissions remains the authorization authority, and Events receives Computer lifecycle events.
 
-- Projects and `@friday/execution-targets` continue to decide which execution target a Project may use.
-- Execution/Tools remain the shell, edit, process, and IPython authorities.
-- Session Jobs remain the durable work queue and restart/resume owner.
-- Permissions remains the authorization authority for model/operator actions.
-- Events receives Computer lifecycle/lease/takeover events.
-- Platform providers implement `ComputerNodeAdapter`; Phase 5 supplies Linux/Sway and Phase 8 supplies Windows.
+## Native Agent desktops
+
+The supported Linux visible mode is now a **real host virtual desktop**, not a hidden Sway compositor mirrored through VNC. On KDE Plasma X11 the model is:
+
+```text
+KDE Plasma / X11
+  Desktop 1: Human
+    normal Human windows
+
+  Desktop 2: FRIDAY
+    real Brave/Chrome window controlled by FRIDAY
+```
+
+`wmctrl`/EWMH is used for virtual-desktop discovery/switching. FRIDAY creates the browser window while the target desktop is active and then restores the Human desktop. It deliberately does not inject temporary KWin JavaScript and does not use WayVNC/TigerVNC. The retired hidden-compositor/viewer provider and deployment files are no longer shipped. The setup helper still removes old installed `friday-computer-headless.service` / `friday-computer-share-*` artifacts during upgrades.
+
+A FRIDAY browser profile is persistent across every FRIDAY virtual desktop and restart. The user signs into that FRIDAY browser profile **once**, not once per desktop or task. New Agent desktops/windows reuse the same cookies, logins, cache, extensions, downloads, and browser storage in that profile. It is intentionally a dedicated profile rather than opening a second controlled process against the person's already-running Chrome/Brave user-data directory, because Chromium-family browsers lock active profiles and concurrent writers are unsafe. The setup helper prefers the OS default browser (Brave on a Brave-default system) and supports an explicit `FRIDAY_COMPUTER_BROWSER_BIN` override for Chrome/Brave/Chromium.
+
+Visible browser tasks retain one FRIDAY-owned target per leased Agent desktop and reuse it for ordinary navigation. Stale FRIDAY-owned targets are pruned without killing the shared browser process/profile. A task approval is bound to the stable admitted turn/job identity plus principal/node/desktop, so a durable retry of the same Telegram message does not ask for another `computer.task.control` approval. High-impact browser actions and protected credentials remain separately gated.
+
+Support is fail-closed; there is no hidden compositor fallback:
+
+| Host desktop/session | Native FRIDAY virtual desktop | Behavior |
+| --- | --- | --- |
+| KDE Plasma / KWin on X11 | **Full** | EWMH virtual desktops through `wmctrl`; real browser window, no KWin script/VNC. |
+| GNOME on Xorg/X11 | **Conditional** | Uses the same EWMH runtime checks; the WM must accept desktop-count/switch requests. |
+| Xfce, Cinnamon, MATE, LXQt, i3 and other EWMH X11 WMs | **Conditional** | Supported when `wmctrl -d`, `wmctrl -n`, and `wmctrl -s` are honored. |
+| KDE Plasma on Wayland | **Unsupported in this provider** | Requires a future compositor-native Wayland provider. FRIDAY does not silently start Sway/VNC. |
+| GNOME on Wayland | **Unsupported in this provider** | Requires a future GNOME-native workspace/control provider. |
+| Other Wayland compositors | **Unsupported unless a native provider is implemented** | No generic EWMH equivalent exists on Wayland. |
+| Windows/macOS | **Separate provider work** | Must use the platform's native virtual-desktop/window APIs. |
+
+Install the native Linux provider from the active X11 desktop session:
+
+```bash
+scripts/setup-linux-computer.sh native
+scripts/smoke-linux-computer.sh
+```
+
+On Ubuntu/Kubuntu the only additional workspace helper normally required is:
+
+```bash
+sudo apt install wmctrl curl
+```
 
 ## Computer Node provider contract
 
@@ -81,11 +118,14 @@ Turn Loop also supplies the active model's input capabilities to Computer. The p
 
 When Turn Loop has an active `ComputerExecutionBinding`, the Computer plugin contributes three model-facing tools through the existing Agent tool extension point rather than creating a parallel Agent runtime:
 
-- `computer_observe` authorizes a private read through Permissions and returns a model-compact projection: URL/tabs plus bounded semantic UI elements (`role`, `name`, state, actions, context and optional bounding box), an observation id, observation-scoped refs such as `obs-12:e7`, and a structural delta when the same filtered view is re-observed. Query/scope/near filters keep normal model context small; process telemetry and legacy DOM/accessibility summaries remain available to core/client diagnostics but are omitted from this model-facing projection.
-- `computer_browser` authorizes an external write through Permissions and accepts provider-neutral navigate/click/type/press/scroll actions. Semantic refs are revalidated immediately before acting. Stale refs fail closed. Low-confidence or high-impact semantic actions return `performed=false` plus a required visual probe instead of clicking.
+- `computer_observe` runs under the run/lease-scoped Computer task approval and returns a model-compact projection: URL/tabs plus bounded semantic UI elements (`role`, `name`, state, actions, context and optional bounding box), bounded media playback state, an observation id, observation-scoped refs such as `obs-12:e7`, and a structural delta when the same filtered view is re-observed. Query/scope/near filters keep normal model context small; process telemetry and legacy DOM/accessibility summaries remain available to core/client diagnostics but are omitted from this model-facing projection.
+- The first model-facing Computer operation for an Agent run requests one run/lease-scoped `computer.task.control` approval. That approval covers ordinary `computer_observe`, bounded `computer_visual_probe`, and browser navigate/click/type/press/scroll operations on the exact same leased screen, so a normal task does not prompt once per click or observation. The grant is keyed to the principal, Agent run, owner, lease, node, and screen and is not reused across another run or restart. High-impact purchase/payment/delete/send/transfer/checkout-like activations still require a separate `computer.browser.high-impact` approval after the provider has visually gated the exact semantic target. Protected credentials/OTP/CAPTCHA input still requires Human takeover.
+- `computer_browser` accepts provider-neutral navigate/click/type/press/scroll actions. The Linux native X11 provider keeps one FRIDAY-owned browser target per Agent desktop, reuses it for ordinary navigation, persists a bounded ownership marker across core restarts, and prunes stale unmapped FRIDAY pages without killing the shared Chromium process/profile. Semantic refs are revalidated immediately before acting. Stale refs fail closed. Low-confidence or high-impact semantic actions return `performed=false` plus a required visual probe instead of clicking.
 - `computer_visual_probe` authorizes a private read and requests the smallest bounded crop needed to resolve ambiguity. Text mode returns safe nearby text/target verification without pixels. Image mode returns a PNG crop as native model tool content; protected/challenge regions are refused and the provider must positively attest both omissions. A successful ref probe issues a short-lived one-use token that may authorize one retry of the exact gated semantic action. Image bytes are current-turn context only: Turn Loop strips image parts from durable tool-result history while retaining the text metadata.
 
 The active Computer prompt contribution is the strategy layer: prefer structured inspection, filter aggressively, use semantic refs, escalate vision `tiny -> small -> medium -> window -> full` only when needed, and verify structurally after actions. Hard invariants such as stale-ref rejection, crop limits, protected-region refusal, screen ownership, Permissions and takeover remain enforced in the plugin/service/provider rather than relying on prompt compliance.
+
+Read-only follow-up questions such as `is the song playing?`, `is YouTube still running?`, or `what page is open?` are routed to a deterministic Computer-status path. They refresh provider state and report the active FRIDAY page/media state without acquiring another screen, opening another viewer, or requesting another control approval. Media requests are not considered complete merely because a search or watch page is open; the active prompt requires observed playback (`media.playing=true`, preferably with non-zero/advancing `currentTime`) before claiming success.
 
 All three tools fail closed without an active Computer binding. Observation and browser execution are tracked as in-flight screen actions, so takeover, lease expiry, or release aborts them. If human takeover advances the generation while an Agent Computer action is in flight, the trusted adapter waits for Agent control to return instead of replaying that action. Successful hand-back supplies the fresh re-observation that caused the resume, marks the interrupted action as `staleActionReplayed: false`, and refreshes later tool calls to the new host-owned control generation. Sensitive browser typing is rejected before provider dispatch; passwords, OTPs, CAPTCHA solutions, and similar secrets require human takeover or a dedicated protected-credential flow. The active-screen prompt section also tells the Agent that screen-control generation and UI-observation generation are separate authorities: takeover changes the former, while every structured inspect changes the latter. An old semantic ref therefore cannot silently click a newly rendered control.
 
@@ -126,7 +166,7 @@ Hand-back increments the generation again and requires `observeScreen()` to succ
 
 ## Structure-first Linux browser implementation
 
-The built-in Linux/Sway provider implements the first hybrid slice directly on its existing Chromium CDP session; Playwright is not required for this path. It walks bounded interactive DOM controls into the canonical element shape, keeps selectors private to the provider, reuses local element ids only when selector continuity is known, and scopes each action ref to one observation generation. After an action it re-runs the same filtered observation and reports added/updated/removed/retained elements plus whether the URL changed.
+The built-in Linux/X11 provider implements the first hybrid slice directly on its persistent Chromium-family CDP session; Playwright is not required for this path. It walks bounded interactive DOM controls into the canonical element shape, keeps selectors private to the provider, reuses local element ids only when selector continuity is known, and scopes each action ref to one observation generation. After an action it re-runs the same filtered observation and reports added/updated/removed/retained elements plus whether the URL changed.
 
 For semantic actions the provider computes a conservative confidence from visibility, enabled/action state, name/context, geometry, and obscuration. High-impact activations (for example purchase/payment/delete/send/transfer/checkout clicks or activation keys) and low-confidence targets require a visual probe token before execution. Typing or scrolling near a high-impact label is not treated as the high-impact action itself. Probe tokens expire after 30 seconds, are bound to one screen and one exact semantic ref, and are consumed once. Raw selector actions remain available as a compatibility path for lower-level service callers but do not receive the new semantic gating guarantees. The model-facing `computer_browser` parser therefore requires observation-scoped semantic refs for element-targeted actions, preventing the LLM from bypassing those gates with a selector. Activation keys such as Enter/Space also require a semantic target.
 
@@ -140,4 +180,4 @@ Computer Node `restart`, `update`, and `resetManagedState` operations delegate t
 
 The first slice established the provider contract, admission, lease expiry/waiting, browser-action generation checks, takeover/hand-back behavior, status/doctor surfaces, and managed lifecycle guards. The second slice connected Project/Turn Loop execution to Computer targets and routed the existing bash/edit/process/IPython tool surfaces through the leased node while preserving Permissions and stale-generation checks. The third slice made Computer admission a durable Session Job state and reused the existing restart/resume path rather than introducing Computer-owned durable scheduling. The fourth slice added permission-gated Agent observe/browser tools plus authenticated Client Gateway status/observation/takeover APIs over the same Computer authority. The fifth slice completes the provider-neutral Browser Supervisor invariants and the human-takeover continuation path: a login-wall action may be interrupted, the user controls the same leased screen without secret capture, hand-back re-observes current state, and the same Session Job resumes without replaying the interrupted action. The final audit-hardening pass adds run-scoped lease renewal, provider process cleanup, browser-level durable readiness waits, mandatory observation safety attestation with core redaction, operational-error handling for asynchronous waiter drains, and a real Agent-executor/Project/Permissions/Computer/Session-Jobs login-wall acceptance path.
 
-Phase 4 provider-neutral implementation is complete in scope and the audit-hardening repository verification gate has passed. Phase 5 is complete for the built-in Linux/Sway provider described in [`operations/LINUX_COMPUTER.md`](operations/LINUX_COMPUTER.md): Sway output discovery, shared-profile Chromium CDP browser windows, Linux resource telemetry, provider-specific Doctor details, deployment units, provider-side observation redaction/protected-input refusal, real CDP mouse/key browser input, action settling, real-Chromium loopback conformance, existing-tool execution delegation, run-scoped process cleanup, and managed lifecycle operations are implemented. Playwright/AT-SPI and PipeWire/WebRTC remain optional host accelerators; Raspberry Pi validation is operational smoke testing. Windows remains Phase 8 work.
+Phase 4 provider-neutral implementation is complete in scope. Phase 5 now uses the built-in native Linux/X11 provider described in [`operations/LINUX_COMPUTER.md`](operations/LINUX_COMPUTER.md): real EWMH virtual-desktop discovery, persistent Brave/Chrome/Chromium CDP browser windows, Linux resource telemetry, provider-specific Doctor details, protected observation/action handling, run-scoped cleanup, and managed browser lifecycle are implemented. The older hidden-compositor/viewer presentation has been removed from the built-in provider source and deployment tree. KDE/GNOME Wayland require future compositor-native providers; Windows remains Phase 8 work.

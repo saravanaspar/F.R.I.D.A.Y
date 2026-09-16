@@ -16,6 +16,7 @@ import type { InboundTurn } from "../plugins/turn-loop/contract.js";
 
 const dirs: string[] = [];
 const originalHome = process.env.FRIDAY_HOME;
+const originalStateDir = process.env.FRIDAY_STATE_DIR;
 const originalProvider = process.env.FRIDAY_MODEL_PROVIDER;
 const originalModel = process.env.FRIDAY_MODEL_ID;
 
@@ -23,6 +24,7 @@ afterEach(() => {
   uninstallCapabilityRegistry();
   for (const directory of dirs.splice(0)) rmSync(directory, { recursive: true, force: true });
   if (originalHome === undefined) delete process.env.FRIDAY_HOME; else process.env.FRIDAY_HOME = originalHome;
+  if (originalStateDir === undefined) delete process.env.FRIDAY_STATE_DIR; else process.env.FRIDAY_STATE_DIR = originalStateDir;
   if (originalProvider === undefined) delete process.env.FRIDAY_MODEL_PROVIDER; else process.env.FRIDAY_MODEL_PROVIDER = originalProvider;
   if (originalModel === undefined) delete process.env.FRIDAY_MODEL_ID; else process.env.FRIDAY_MODEL_ID = originalModel;
 });
@@ -52,7 +54,12 @@ function channelTurn(senderId: string, replies: string[] = []): InboundTurn {
 }
 
 async function activateRoot() {
-  const home = mkdtempSync(join(tmpdir(), "friday-refinement-root-test-")); dirs.push(home); chmodSync(home, 0o700); process.env.FRIDAY_HOME = home;
+  const home = mkdtempSync(join(tmpdir(), "friday-refinement-root-test-")); dirs.push(home); chmodSync(home, 0o700);
+  // Tests must never inherit a real runtime state root (for example ~/.friday-dev).
+  // Refinement intentionally gives FRIDAY_STATE_DIR precedence over FRIDAY_HOME,
+  // so isolate both variables to the temporary test root.
+  process.env.FRIDAY_HOME = home;
+  process.env.FRIDAY_STATE_DIR = home;
   process.env.FRIDAY_MODEL_PROVIDER = "test";
   process.env.FRIDAY_MODEL_ID = "test-model";
   const authorizations: unknown[] = [];

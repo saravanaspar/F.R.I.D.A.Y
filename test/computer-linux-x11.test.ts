@@ -1,29 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { createComputerService } from "../plugins/computer/service.js";
 import {
-  createLinuxSwayComputerAdapter,
+  createLinuxX11ComputerAdapter,
   type LinuxCdpClient,
   type LinuxCdpTarget,
-} from "../plugins/computer/providers/linux-sway.js";
+} from "../plugins/computer/providers/linux-x11.js";
 
-const SWAY_OUTPUTS = JSON.stringify([
-  {
-    name: "DP-1",
-    make: "DisplayCo",
-    model: "Panel",
-    active: true,
-    scale: 1,
-    rect: { x: 0, y: 0, width: 1920, height: 1080 },
-  },
-  {
-    name: "HEADLESS-1",
-    make: "headless",
-    model: "FRIDAY Agent",
-    active: true,
-    scale: 1,
-    rect: { x: 1920, y: 0, width: 1280, height: 720 },
-  },
-]);
 
 function fakeCdp(options: {
   readonly activeProtected?: boolean;
@@ -35,21 +17,29 @@ function fakeCdp(options: {
   readonly validationName?: string;
   readonly validationContext?: string;
   readonly probeUnsafe?: boolean;
-} = {}): LinuxCdpClient & { readonly calls: Array<{ targetId?: string; method: string; params?: Readonly<Record<string, unknown>> }> } {
+  readonly initialTargets?: readonly LinuxCdpTarget[];
+  readonly mediaPlaying?: boolean;
+  readonly mediaCurrentTime?: number;
+} = {}): LinuxCdpClient & { readonly calls: Array<{ targetId?: string; method: string; params?: Readonly<Record<string, unknown>> }>; readonly titles: ReadonlyMap<string, string> } {
   const calls: Array<{ targetId?: string; method: string; params?: Readonly<Record<string, unknown>> }> = [];
-  const targets: LinuxCdpTarget[] = [{
-    id: "human-tab",
-    title: "Human browser",
-    url: "https://example.com/",
-    type: "page",
-    webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/human-tab",
-  }];
+  const targets: LinuxCdpTarget[] = (options.initialTargets ?? []).map((target) => ({ ...target }));
+  const windowNames = new Map<string, string>();
+  const titles = new Map<string, string>(targets.map((target) => [target.id, target.title]));
   let nextUrl = "https://example.com/dashboard?token=provider-secret#fragment";
   return {
     calls,
-    async targets() { return targets.map((target) => ({ ...target })); },
+    titles,
+    async targets() { return targets.map((target) => ({ ...target, title: titles.get(target.id) ?? target.title })); },
     async browserCommand(method, params) {
       calls.push(params === undefined ? { method } : { method, params });
+      if (method === "Target.closeTarget") {
+        const targetId = String(params?.targetId ?? "");
+        const index = targets.findIndex((target) => target.id === targetId);
+        if (index >= 0) targets.splice(index, 1);
+        windowNames.delete(targetId);
+        titles.delete(targetId);
+        return { success: index >= 0 };
+      }
       if (method !== "Target.createTarget") throw new Error(`unexpected browser command: ${method}`);
       targets.push({
         id: "agent-tab",
@@ -58,6 +48,7 @@ function fakeCdp(options: {
         type: "page",
         webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/agent-tab",
       });
+      titles.set("agent-tab", "OTP 123456 verification code");
       return { targetId: "agent-tab" };
     },
     async targetCommand(targetId, method, params) {
@@ -89,6 +80,34 @@ function fakeCdp(options: {
       }
       if (method !== "Runtime.evaluate") throw new Error(`unexpected target command: ${method}`);
       const expression = String(params?.expression ?? "");
+      if (expression === "document.title") return { result: { value: titles.get(targetId) ?? "" } };
+      if (expression.startsWith("document.title = ")) {
+        const assigned = JSON.parse(expression.slice("document.title = ".length)) as string;
+        titles.set(targetId, assigned);
+        return { result: { value: assigned } };
+      }
+      if (expression === "window.name") return { result: { value: windowNames.get(targetId) ?? "" } };
+      if (expression.startsWith("window.name = ")) {
+        const assigned = JSON.parse(expression.slice("window.name = ".length)) as string;
+        windowNames.set(targetId, assigned);
+        return { result: { value: assigned } };
+      }
+      if (expression.includes('document.querySelectorAll("audio,video")')) {
+        return {
+          result: {
+            value: {
+              elementCount: 1,
+              playing: options.mediaPlaying === true,
+              paused: options.mediaPlaying !== true,
+              ended: false,
+              currentTime: options.mediaCurrentTime ?? 0,
+              duration: 240,
+              muted: false,
+              volume: 1,
+            },
+          },
+        };
+      }
       if (expression === "location.href") return { result: { value: nextUrl } };
       if (expression === "({width: innerWidth, height: innerHeight})") return { result: { value: { width: 1280, height: 720 } } };
       if (expression.includes("readyState: document.readyState")) {
@@ -203,6 +222,9 @@ function adapterFixture(options: {
   readonly validationName?: string;
   readonly validationContext?: string;
   readonly probeUnsafe?: boolean;
+  readonly initialTargets?: readonly LinuxCdpTarget[];
+  readonly mediaPlaying?: boolean;
+  readonly mediaCurrentTime?: number;
 } = {}) {
   const cdp = fakeCdp({
     ...(options.activeProtected === undefined ? {} : { activeProtected: options.activeProtected }),
@@ -214,24 +236,50 @@ function adapterFixture(options: {
     ...(options.validationName === undefined ? {} : { validationName: options.validationName }),
     ...(options.validationContext === undefined ? {} : { validationContext: options.validationContext }),
     ...(options.probeUnsafe === undefined ? {} : { probeUnsafe: options.probeUnsafe }),
+    ...(options.initialTargets === undefined ? {} : { initialTargets: options.initialTargets }),
+    ...(options.mediaPlaying === undefined ? {} : { mediaPlaying: options.mediaPlaying }),
+    ...(options.mediaCurrentTime === undefined ? {} : { mediaCurrentTime: options.mediaCurrentTime }),
   });
-  const adapter = createLinuxSwayComputerAdapter({
+  let activeDesktop = 0;
+  const adapter = createLinuxX11ComputerAdapter({
     environment: {
       PATH: "/usr/bin:/bin",
       HOME: "/home/friday",
       FRIDAY_HOME: "/home/friday/.friday",
-      FRIDAY_COMPUTER_SWAYSOCK: "/run/user/1000/sway-ipc.test.sock",
+      DISPLAY: ":0",
+      XDG_SESSION_TYPE: "x11",
+      XDG_CURRENT_DESKTOP: "KDE",
+      FRIDAY_COMPUTER_PROVIDER: "linux-x11",
+      FRIDAY_COMPUTER_SESSION_MODE: "native-x11",
+      FRIDAY_COMPUTER_X11_AGENT_DESKTOPS: "1",
       FRIDAY_COMPUTER_CDP_URL: "http://127.0.0.1:9222/",
-      FRIDAY_COMPUTER_HUMAN_OUTPUT: "DP-1",
     },
     platform: "linux",
     uid: options.uid ?? 1000,
     cdp,
     executable: options.executable ?? (async () => true),
     async runCommand(command, args) {
-      if (command !== "swaymsg") return { ok: false, stdout: "", stderr: `unexpected command ${command}` };
-      expect(args).toContain("get_outputs");
-      return { ok: true, stdout: SWAY_OUTPUTS, stderr: "" };
+      if (command !== "wmctrl") return { ok: false, stdout: "", stderr: `unexpected command ${command}` };
+      if (args[0] === "-d") {
+        return {
+          ok: true,
+          stdout: `0 ${activeDesktop === 0 ? "*" : "-"} DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 Desktop 1\n1 ${activeDesktop === 1 ? "*" : "-"} DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 FRIDAY\n`,
+          stderr: "",
+        };
+      }
+      if (args[0] === "-s") {
+        activeDesktop = Number(args[1]);
+        return { ok: true, stdout: "", stderr: "" };
+      }
+      if (args[0] === "-l") {
+        const targets = await cdp.targets();
+        return {
+          ok: true,
+          stdout: targets.map((target, index) => `0x${(0x120001 + index).toString(16)} 1 host ${cdp.titles.get(target.id) ?? target.title} - Browser`).join("\n") + (targets.length > 0 ? "\n" : ""),
+          stderr: "",
+        };
+      }
+      return { ok: false, stdout: "", stderr: `unexpected wmctrl args ${args.join(" ")}` };
     },
     async listDirectory(path) {
       if (path === "/proc") return ["101", "202"];
@@ -239,8 +287,8 @@ function adapterFixture(options: {
     },
     async readText(path) {
       if (path === "/proc/stat") return "cpu  100 0 50 850 0 0 0 0 0 0\n";
-      if (path === "/proc/101/comm") return "chromium\n";
-      if (path === "/proc/101/cmdline") return "chromium\0--type=renderer\0";
+      if (path === "/proc/101/comm") return "brave\n";
+      if (path === "/proc/101/cmdline") return "brave\0--type=renderer\0";
       if (path === "/proc/202/comm") return "node\n";
       if (path === "/proc/202/cmdline") return "node\0friday\0";
       throw new Error(`unexpected read: ${path}`);
@@ -250,21 +298,21 @@ function adapterFixture(options: {
   return { adapter, cdp };
 }
 
-describe("Phase 5 Linux/Sway Computer provider", () => {
-  it("discovers Human/headless Agent outputs and reports the shared Chromium supervisor", async () => {
+describe("native Linux/X11 Computer provider", () => {
+  it("discovers Human/Agent virtual desktops and reports the persistent browser supervisor", async () => {
     const { adapter } = adapterFixture();
     const snapshot = await adapter.snapshot();
 
     expect(snapshot.availability).toBe("online");
     expect(snapshot.screens).toEqual([
-      expect.objectContaining({ id: "DP-1", kind: "human", width: 1920, height: 1080 }),
-      expect.objectContaining({ id: "HEADLESS-1", kind: "agent", width: 1280, height: 720 }),
+      expect.objectContaining({ id: "DESKTOP-1", kind: "human", width: 1920, height: 1080 }),
+      expect.objectContaining({ id: "DESKTOP-2", kind: "agent", width: 1920, height: 1080 }),
     ]);
     expect(snapshot.browser).toMatchObject({
       running: true,
       persistentProfile: true,
-      tabs: [expect.objectContaining({ id: "human-tab", url: "https://example.com/" })],
-      windows: [expect.objectContaining({ owner: "human", screenId: "DP-1" })],
+      tabs: [],
+      windows: [],
     });
     expect(snapshot.resources.browserRendererCount).toBe(1);
     await expect(adapter.doctor?.()).resolves.toEqual([]);
@@ -287,7 +335,7 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
     expect(result.mode).toBe("cdp");
     expect(cdp.calls).toContainEqual(expect.objectContaining({
       method: "Target.createTarget",
-      params: expect.objectContaining({ left: 1920, top: 0, width: 1280, height: 720, newWindow: true }),
+      params: expect.objectContaining({ left: 0, top: 0, width: 1920, height: 1080, newWindow: true }),
     }));
     expect(result.observation.safety).toEqual({
       protectedInputOmitted: true,
@@ -312,11 +360,49 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
     await service.close();
   });
 
+  it("adopts one FRIDAY page after a core restart, closes stale pages, and reports media state", async () => {
+    const staleTargets: LinuxCdpTarget[] = [
+      { id: "playing-tab", title: "Love Me Like You Do - YouTube", url: "https://www.youtube.com/watch?v=video", type: "page", webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/playing-tab" },
+      { id: "search-tab", title: "shakaboom - YouTube", url: "https://www.youtube.com/results?search_query=shakaboom", type: "page", webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/search-tab" },
+      { id: "blank-tab", title: "about:blank", url: "about:blank", type: "page", webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/blank-tab" },
+      { id: "omnibox", title: "Omnibox Popup", url: "chrome://omnibox-popup.top-chrome/", type: "page", webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/omnibox" },
+    ];
+    const { adapter, cdp } = adapterFixture({
+      initialTargets: staleTargets,
+      mediaPlaying: true,
+      mediaCurrentTime: 42,
+    });
+    const service = createComputerService({ pollIntervalMs: 60_000 });
+    await service.registerNode(adapter);
+    const grant = await service.requestScreen({ ownerId: "job-reuse", preferredNodeId: "linux-local", preferredScreenId: "DESKTOP-2", requireBrowser: true });
+    if (grant.state !== "acquired") throw new Error("expected Linux Computer screen grant");
+
+    const result = await service.runBrowserAction(
+      grant.screenLease.id,
+      "job-reuse",
+      grant.controlLease.generation,
+      { kind: "navigate", url: "https://www.youtube.com/watch?v=next" },
+    );
+
+    expect(cdp.calls.some((call) => call.method === "Target.createTarget")).toBe(false);
+    expect(cdp.calls.filter((call) => call.method === "Target.closeTarget").map((call) => call.params?.targetId)).toEqual(["search-tab", "blank-tab"]);
+    expect(cdp.calls).toContainEqual(expect.objectContaining({ targetId: "playing-tab", method: "Page.navigate" }));
+    expect(result.observation.tabs).toEqual([expect.objectContaining({
+      id: "playing-tab",
+      media: expect.objectContaining({ playing: true, paused: false, currentTime: 42 }),
+    })]);
+
+    const refreshed = await service.refreshNode("linux-local");
+    expect(refreshed.browser?.windows).toContainEqual(expect.objectContaining({ owner: "friday", screenId: "DESKTOP-2", tabIds: ["playing-tab"] }));
+    expect(refreshed.browser?.tabs.find((tab) => tab.id === "playing-tab")?.media).toMatchObject({ playing: true, currentTime: 42 });
+    await service.close();
+  });
+
   it("returns structured semantic refs, preserves local element ids across observations, and rejects stale refs", async () => {
     const { adapter } = adapterFixture();
     await adapter.snapshot();
 
-    const first = await adapter.observeScreen("HEADLESS-1", 1, undefined, {
+    const first = await adapter.observeScreen("DESKTOP-2", 1, undefined, {
       scope: "interactive",
       query: "Add",
       maxElements: 10,
@@ -333,7 +419,7 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
       source: "dom",
     });
 
-    const second = await adapter.observeScreen("HEADLESS-1", 1, undefined, {
+    const second = await adapter.observeScreen("DESKTOP-2", 1, undefined, {
       scope: "interactive",
       query: "Add",
       maxElements: 10,
@@ -343,7 +429,7 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
     expect(second.delta).toMatchObject({ baseObservationId: "obs-1", retained: 1, added: [], updated: [], removedIds: [] });
 
     await expect(adapter.runBrowserAction?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       action: { kind: "click", target: "obs-1:e1" },
       automationOrder: ["cdp"],
@@ -358,12 +444,12 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
       validationContext: "Delete account",
     });
     await adapter.snapshot();
-    const observation = await adapter.observeScreen("HEADLESS-1", 1, undefined, { scope: "interactive", maxElements: 10 });
+    const observation = await adapter.observeScreen("DESKTOP-2", 1, undefined, { scope: "interactive", maxElements: 10 });
     const ref = observation.elements?.[0]?.ref;
     if (!ref) throw new Error("expected semantic ref");
 
     await expect(adapter.runBrowserAction?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       action: { kind: "click", target: ref },
       automationOrder: ["cdp"],
@@ -374,12 +460,12 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
   it("gates high-impact semantic actions behind a bounded visual probe token and returns the crop as native image data", async () => {
     const { adapter, cdp } = adapterFixture({ structuredName: "Place Order", structuredContext: "₹529 total" });
     await adapter.snapshot();
-    const observation = await adapter.observeScreen("HEADLESS-1", 1, undefined, { scope: "interactive", maxElements: 10 });
+    const observation = await adapter.observeScreen("DESKTOP-2", 1, undefined, { scope: "interactive", maxElements: 10 });
     const ref = observation.elements?.[0]?.ref;
     if (!ref) throw new Error("expected semantic ref");
 
     const deferred = await adapter.runBrowserAction?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       action: { kind: "click", target: ref },
       automationOrder: ["cdp"],
@@ -391,7 +477,7 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
     expect(cdp.calls.some((call) => call.method === "Input.dispatchMouseEvent")).toBe(false);
 
     const probe = await adapter.visualProbe?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       ref,
       size: "tiny",
@@ -411,7 +497,7 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
     expect(cdp.calls.some((call) => call.method === "Page.captureScreenshot")).toBe(true);
 
     const performed = await adapter.runBrowserAction?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       action: { kind: "click", target: ref, visualProbeToken: probe.probeToken },
       automationOrder: ["cdp"],
@@ -423,12 +509,12 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
   it("also gates activation-key submission on a high-impact focused semantic target", async () => {
     const { adapter, cdp } = adapterFixture({ structuredName: "Place Order", structuredContext: "₹529 total", structuredFocused: true });
     await adapter.snapshot();
-    const observation = await adapter.observeScreen("HEADLESS-1", 1, undefined, { scope: "interactive", maxElements: 10 });
+    const observation = await adapter.observeScreen("DESKTOP-2", 1, undefined, { scope: "interactive", maxElements: 10 });
     const ref = observation.elements?.[0]?.ref;
     if (!ref) throw new Error("expected semantic ref");
 
     const deferred = await adapter.runBrowserAction?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       action: { kind: "press", key: "Enter", target: ref },
       automationOrder: ["cdp"],
@@ -440,7 +526,7 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
     expect(cdp.calls.some((call) => call.method === "Input.dispatchKeyEvent")).toBe(false);
 
     const probe = await adapter.visualProbe?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       ref,
       size: "small",
@@ -449,7 +535,7 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
     if (!probe?.probeToken) throw new Error("expected visual probe token");
 
     await expect(adapter.runBrowserAction?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       action: { kind: "press", key: "Enter", target: ref, visualProbeToken: probe.probeToken },
       automationOrder: ["cdp"],
@@ -460,12 +546,12 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
   it("requires micro vision for low-confidence semantic targets and refuses protected visual regions", async () => {
     const { adapter } = adapterFixture({ structuredObscured: true, probeUnsafe: true });
     await adapter.snapshot();
-    const observation = await adapter.observeScreen("HEADLESS-1", 1, undefined, { scope: "interactive", maxElements: 10 });
+    const observation = await adapter.observeScreen("DESKTOP-2", 1, undefined, { scope: "interactive", maxElements: 10 });
     const ref = observation.elements?.[0]?.ref;
     if (!ref) throw new Error("expected semantic ref");
 
     await expect(adapter.runBrowserAction?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       action: { kind: "click", target: ref },
       automationOrder: ["cdp"],
@@ -475,7 +561,7 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
     });
 
     await expect(adapter.visualProbe?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       ref,
       size: "tiny",
@@ -487,7 +573,7 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
     const { adapter } = adapterFixture();
     await adapter.snapshot();
     await expect(adapter.runBrowserAction?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       action: { kind: "type", target: "input[name=password]", text: "should-never-be-dispatched", sensitive: false },
       automationOrder: ["cdp"],
@@ -498,7 +584,7 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
     const { adapter, cdp } = adapterFixture({ activeProtected: true });
     await adapter.snapshot();
     await expect(adapter.runBrowserAction?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       action: { kind: "press", key: "a" },
       automationOrder: ["cdp"],
@@ -511,19 +597,19 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
     await adapter.snapshot();
 
     await adapter.runBrowserAction?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       action: { kind: "click", target: "#safe-button" },
       automationOrder: ["cdp"],
     });
     await adapter.runBrowserAction?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       action: { kind: "type", target: "#safe-input", text: "hello", sensitive: false },
       automationOrder: ["cdp"],
     });
     await adapter.runBrowserAction?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       action: { kind: "press", key: "Enter", target: "#safe-input" },
       automationOrder: ["cdp"],
@@ -552,7 +638,7 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
     await adapter.snapshot();
 
     await expect(adapter.runBrowserAction?.({
-      screenId: "HEADLESS-1",
+      screenId: "DESKTOP-2",
       controlGeneration: 1,
       action: { kind: "click", target: "#challenge-action" },
       automationOrder: ["cdp"],
@@ -563,7 +649,7 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
   it("surfaces provider-specific Linux Doctor failures through the Computer authority", async () => {
     const { adapter } = adapterFixture({
       uid: 0,
-      executable: async (command) => command !== "sway",
+      executable: async (command) => command !== "wmctrl",
     });
     const service = createComputerService({ pollIntervalMs: 60_000 });
     await service.registerNode(adapter);
@@ -573,16 +659,120 @@ describe("Phase 5 Linux/Sway Computer provider", () => {
     expect(report.nodes[0]?.issues).toEqual(expect.arrayContaining([
       "node is degraded",
       "Agent Computer must run as an unprivileged user, not root",
-      "sway is not installed or not executable",
+      "wmctrl is not installed or not executable",
     ]));
     await service.close();
   });
 
   it("rejects a remotely exposed CDP endpoint before the provider can start", () => {
-    expect(() => createLinuxSwayComputerAdapter({
+    expect(() => createLinuxX11ComputerAdapter({
       environment: { FRIDAY_COMPUTER_CDP_URL: "http://192.168.1.50:9222/" },
       platform: "linux",
       uid: 1000,
     })).toThrow(/loopback host/);
+  });
+});
+
+describe("native Linux/X11 desktop placement", () => {
+  it("uses a real EWMH virtual desktop directly without a viewer bridge or compositor script", async () => {
+    const calls: Array<{ command: string; args: readonly string[] }> = [];
+    const cdpCalls: Array<{ method: string; params?: Readonly<Record<string, unknown>> }> = [];
+    const targets: LinuxCdpTarget[] = [];
+    const names = new Map<string, string>();
+    const titles = new Map<string, string>();
+    let activeDesktop = 0;
+    let targetDesktop = -1;
+    let pageUrl = "about:blank";
+
+    const cdp: LinuxCdpClient = {
+      async targets() { return targets.map((target) => ({ ...target, title: titles.get(target.id) ?? target.title, url: pageUrl })); },
+      async browserCommand(method, params) {
+        cdpCalls.push(params === undefined ? { method } : { method, params });
+        if (method === "Target.closeTarget") {
+          const id = String(params?.targetId ?? "");
+          const index = targets.findIndex((target) => target.id === id);
+          if (index >= 0) targets.splice(index, 1);
+          return { success: true };
+        }
+        if (method !== "Target.createTarget") throw new Error(`unexpected browser command ${method}`);
+        expect(activeDesktop).toBe(1);
+        targetDesktop = activeDesktop;
+        targets.push({ id: "native-tab", title: "", url: "about:blank", type: "page", webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/native-tab" });
+        titles.set("native-tab", "");
+        return { targetId: "native-tab" };
+      },
+      async targetCommand(targetId, method, params) {
+        if (method === "Runtime.evaluate") {
+          const expression = String(params?.expression ?? "");
+          if (expression === "window.name") return { result: { value: names.get(targetId) ?? "" } };
+          if (expression.startsWith("window.name = ")) {
+            const value = JSON.parse(expression.slice("window.name = ".length)) as string;
+            names.set(targetId, value);
+            return { result: { value } };
+          }
+          if (expression === "document.title") return { result: { value: titles.get(targetId) ?? "" } };
+          if (expression.startsWith("document.title = ")) {
+            const value = JSON.parse(expression.slice("document.title = ".length)) as string;
+            titles.set(targetId, value);
+            return { result: { value } };
+          }
+          if (expression === "location.href") return { result: { value: pageUrl } };
+          if (expression.includes("readyState: document.readyState")) return { result: { value: { href: pageUrl, readyState: "complete" } } };
+          if (expression === "({width: innerWidth, height: innerHeight})") return { result: { value: { width: 1920, height: 1080 } } };
+          if (expression.includes('document.querySelectorAll("audio,video")')) return { result: { value: { elementCount: 0, playing: false, paused: true, ended: false, currentTime: 0, duration: 0, muted: false, volume: 1 } } };
+          if (expression.includes("const interactiveSelector = [")) return { result: { value: [] } };
+          return { result: { value: "" } };
+        }
+        if (method === "Page.navigate") { pageUrl = String(params?.url ?? pageUrl); return { frameId: "frame" }; }
+        throw new Error(`unexpected target command ${method}`);
+      },
+    };
+
+    const adapter = createLinuxX11ComputerAdapter({
+      environment: {
+        HOME: "/home/friday",
+        PATH: "/usr/bin:/bin",
+        DISPLAY: ":0",
+        XDG_SESSION_TYPE: "x11",
+        XDG_CURRENT_DESKTOP: "KDE",
+        FRIDAY_COMPUTER_PROVIDER: "linux-x11",
+        FRIDAY_COMPUTER_SESSION_MODE: "native-x11",
+        FRIDAY_COMPUTER_X11_AGENT_DESKTOPS: "1",
+        FRIDAY_COMPUTER_CDP_URL: "http://127.0.0.1:9222/",
+      },
+      platform: "linux",
+      uid: 1000,
+      cdp,
+      executable: async (command) => command === "wmctrl" || command === "brave-browser-stable",
+      async runCommand(command, args) {
+        calls.push({ command, args });
+        expect(command).toBe("wmctrl");
+        if (args[0] === "-d") {
+          return { ok: true, stdout: `0 ${activeDesktop === 0 ? "*" : "-"} DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 Desktop 1\n1 ${activeDesktop === 1 ? "*" : "-"} DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 FRIDAY\n`, stderr: "" };
+        }
+        if (args[0] === "-s") { activeDesktop = Number(args[1]); return { ok: true, stdout: "", stderr: "" }; }
+        if (args[0] === "-l") {
+          const title = titles.get("native-tab") ?? "";
+          return { ok: true, stdout: targets.length > 0 ? `0x01200001 ${targetDesktop} host ${title} - Brave\n` : "", stderr: "" };
+        }
+        return { ok: false, stdout: "", stderr: `unexpected wmctrl args ${args.join(" ")}` };
+      },
+      async listDirectory(path) { return path === "/proc" ? [] : []; },
+      async readText(path) { if (path === "/proc/stat") return "cpu 100 0 50 850 0 0 0 0 0 0\n"; throw new Error(`unexpected read ${path}`); },
+    });
+
+    const snapshot = await adapter.snapshot();
+    expect(snapshot.screens).toEqual([
+      expect.objectContaining({ id: "DESKTOP-1", kind: "human" }),
+      expect.objectContaining({ id: "DESKTOP-2", kind: "agent" }),
+    ]);
+    await expect(adapter.sharedScreenSupport?.()).resolves.toMatchObject({ level: "full", backend: "x11-ewmh", viewOnly: false });
+    const view = await adapter.openSharedScreen?.({ screenId: "DESKTOP-2", screenLeaseId: "lease", ownerId: "owner", ownerKind: "main-agent", runId: "run", name: "FRIDAY", switchTo: false });
+    expect(view).toMatchObject({ screenId: "DESKTOP-2", backend: "x11-ewmh", viewOnly: false, viewerId: "native-browser:native-tab" });
+    expect(activeDesktop).toBe(0);
+    expect(cdpCalls).toContainEqual(expect.objectContaining({ method: "Target.createTarget" }));
+    expect(new Set(calls.map((call) => call.command))).toEqual(new Set(["wmctrl"]));
+    expect(calls.filter((call) => call.args[0] === "-s").map((call) => call.args[1])).toEqual(["1", "0"]);
+    await expect(adapter.doctor?.()).resolves.toEqual([]);
   });
 });

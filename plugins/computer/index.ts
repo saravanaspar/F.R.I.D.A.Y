@@ -311,32 +311,110 @@ async function waitForAgentBrowserAdmission(
     : Object.freeze({ ...binding, generation: grant.controlLease.generation });
 }
 
-async function authorizeAgentComputer(
-  permissions: PermissionsService,
-  context: AgentToolExecutionContext,
-  binding: ComputerExecutionBinding,
-  kind: "observe" | "visual" | "browser",
-): Promise<void> {
-  await permissions.authorize({
-    mode: context.permissionMode ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
-    workspace: context.cwd,
-    access: kind === "browser" ? "write" : "read",
-    action: {
-      id: kind === "observe" ? "computer.observe" : kind === "visual" ? "computer.visual.probe" : "computer.browser.action",
-      effect: kind === "browser" ? "external-write" : "private-read",
-      resource: `computer:${binding.nodeId}:screen:${binding.screenId}`,
-      network: true,
-    },
-    reason: kind === "observe"
-      ? `observe leased Computer screen ${binding.nodeId}:${binding.screenId}`
-      : kind === "visual"
-        ? `inspect a bounded visual crop on leased Computer screen ${binding.nodeId}:${binding.screenId}`
-        : `control browser on leased Computer screen ${binding.nodeId}:${binding.screenId}`,
-    ...(context.jobId === undefined ? {} : { jobId: context.jobId }),
-  });
+const COMPUTER_TASK_APPROVAL_TTL_MS = 60 * 60 * 1_000;
+const MAX_COMPUTER_TASK_APPROVALS = 1_024;
+
+function computerApprovalPrincipal(context: AgentToolExecutionContext): string {
+  const principal = context.turn?.principal;
+  if (!principal) return "agent:unscoped";
+  return [principal.authority, principal.channel, principal.accountId, principal.senderId, principal.conversationId ?? "", principal.threadId ?? ""]
+    .join(":")
+    .slice(0, 512);
+}
+
+function computerTaskApprovalKey(context: AgentToolExecutionContext, binding: ComputerExecutionBinding): string {
+  // Durable channel delivery can retry one admitted message with a fresh Agent
+  // run/owner/screen lease. Bind the approval to the stable user request instead
+  // so retries do not spam the Human with duplicate Computer prompts.
+  const requestIdentity = context.jobId?.trim()
+    ? `job:${context.jobId.trim()}`
+    : context.turn?.id?.trim()
+      ? `turn:${context.turn.id.trim()}`
+      : `run:${binding.runId}`;
+  return [computerApprovalPrincipal(context), requestIdentity, binding.nodeId, binding.screenId].join("|");
 }
 
 function registerAgentComputerTools(ctx: PluginContext, service: ComputerService, permissions: PermissionsService): void {
+  const taskApprovals = new Map<string, number>();
+  const taskPresentations = new Map<string, number>();
+  const pendingHighImpactTargets = new Map<string, number>();
+
+  const pruneApprovalState = (): void => {
+    const now = Date.now();
+    for (const [key, expiresAt] of taskApprovals) if (expiresAt <= now) taskApprovals.delete(key);
+    for (const [key, expiresAt] of taskPresentations) if (expiresAt <= now) taskPresentations.delete(key);
+    for (const [key, expiresAt] of pendingHighImpactTargets) if (expiresAt <= now) pendingHighImpactTargets.delete(key);
+    while (taskApprovals.size > MAX_COMPUTER_TASK_APPROVALS) taskApprovals.delete(taskApprovals.keys().next().value!);
+    while (taskPresentations.size > MAX_COMPUTER_TASK_APPROVALS) taskPresentations.delete(taskPresentations.keys().next().value!);
+    while (pendingHighImpactTargets.size > MAX_COMPUTER_TASK_APPROVALS * 4) pendingHighImpactTargets.delete(pendingHighImpactTargets.keys().next().value!);
+  };
+
+  const taskKey = (context: AgentToolExecutionContext, binding: ComputerExecutionBinding): string =>
+    computerTaskApprovalKey(context, binding);
+
+  const highImpactKey = (context: AgentToolExecutionContext, binding: ComputerExecutionBinding, ref: string): string =>
+    `${taskKey(context, binding)}|high-impact|${ref}`;
+
+  const authorizeComputerTask = async (context: AgentToolExecutionContext, binding: ComputerExecutionBinding, signal?: AbortSignal): Promise<void> => {
+    pruneApprovalState();
+    const key = taskKey(context, binding);
+    if (!taskApprovals.has(key)) {
+      await permissions.authorize({
+        mode: context.permissionMode ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+        workspace: context.cwd,
+        access: "write",
+        action: {
+          id: "computer.task.control",
+          effect: "external-write",
+          resource: `computer:${binding.nodeId}:screen:${binding.screenId}`,
+          network: true,
+        },
+        reason: `control leased Computer screen ${binding.nodeId}:${binding.screenId} for this Agent task; this approval covers ordinary browser navigation/click/type/scroll plus observation and bounded visual probes on the same lease. High-impact actions and protected input remain separately gated`,
+        ...(context.jobId === undefined ? {} : { jobId: context.jobId }),
+      });
+      taskApprovals.set(key, Date.now() + COMPUTER_TASK_APPROVAL_TTL_MS);
+    }
+    if (binding.presentation === "shared" && !taskPresentations.has(key)) {
+      const sharedView = await service.openSharedScreen(binding, {
+        name: `FRIDAY ${binding.screenId}`,
+        switchTo: false,
+      }, signal);
+      taskPresentations.set(key, Date.now() + COMPUTER_TASK_APPROVAL_TTL_MS);
+      await context.reportProgress?.({
+        kind: "status",
+        message: sharedView.viewOnly
+          ? `Shared Agent Screen ${sharedView.workspaceName} is ready on ${sharedView.screenId}. Switch to that desktop/workspace to watch FRIDAY.`
+          : `FRIDAY native desktop ${sharedView.workspaceName} is ready on ${sharedView.screenId}. It is a real host virtual desktop; switch to it whenever you want to watch or interact.`,
+        jobStatus: "running",
+        notify: false,
+      });
+    }
+  };
+
+  const authorizeHighImpactBrowserAction = async (
+    context: AgentToolExecutionContext,
+    binding: ComputerExecutionBinding,
+    action: ComputerBrowserAction,
+  ): Promise<void> => {
+    if (!("target" in action) || !action.target || !action.visualProbeToken) return;
+    pruneApprovalState();
+    const key = highImpactKey(context, binding, action.target);
+    if (!pendingHighImpactTargets.has(key)) return;
+    await permissions.authorize({
+      mode: context.permissionMode ?? permissions.normalizeMode(process.env.FRIDAY_PERMISSION_MODE),
+      workspace: context.cwd,
+      access: "write",
+      action: {
+        id: "computer.browser.high-impact",
+        effect: "external-write",
+        resource: `computer:${binding.nodeId}:screen:${binding.screenId}`,
+        network: true,
+      },
+      reason: `confirm the high-impact browser action on ${binding.nodeId}:${binding.screenId}; the Computer provider classified target ${action.target} as purchase/send/delete/transfer/checkout-like`,
+      ...(context.jobId === undefined ? {} : { jobId: context.jobId }),
+    });
+    pendingHighImpactTargets.delete(key);
+  };
   ctx.contribute(AGENT_PROMPT_SECTION_CONTRIBUTION, {
     id: "computer-active-screen",
     render(context) {
@@ -354,6 +432,7 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
           "Use semantic refs (for example obs-12:e7) for click/type/scroll. Elements may advertise toggle/select/expand semantics; invoke those browser controls with click on the same ref, then re-observe state. If computer_browser returns performed=false with visualProbeRequired, call computer_visual_probe for that exact ref, starting with the recommended tiny/small crop, then retry the same action once with the returned probeToken.",
           `Vision image input available: ${vision ? "yes" : "no"}. ${vision ? "Use return=image only when structured data is insufficient." : "This model cannot consume pixels; use return=text only and do not request image probes."} Escalate crop size progressively: tiny -> small -> medium -> window -> full. Never jump to full-screen vision for a normal control.`,
           "After actions, use the returned structural delta and verification before requesting more vision. Re-observe when refs are stale. Use computer_browser only for non-secret input. Passwords, OTPs, CAPTCHAs, and other sensitive input require human takeover; never place those values in tool arguments.",
+          "For media playback requests, search results or a watch page are not completion. Do not claim that media is playing until the latest observation tab reports media.playing=true (prefer currentTime > 0 or an advancing time when available). If playback is not confirmed, continue the browser task or report that playback could not be verified.",
           "If a Computer tool reports resumedAfterHumanTakeover=true, the interrupted action was not replayed. Treat the attached fresh observation as the new source of truth and replan before acting again.",
         ].join("\n"),
       };
@@ -379,7 +458,7 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
     async execute(input, signal, executionContext) {
       const context = executionContext;
       const binding = currentComputerBinding(service, context);
-      await authorizeAgentComputer(permissions, context!, binding, "observe");
+      await authorizeComputerTask(context!, binding, signal);
       try {
         return {
           output: agentObservationOutput(await service.observeScreen(binding.screenLeaseId, binding.ownerId, binding.generation, signal, observationRequest(input))),
@@ -418,7 +497,8 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
       const context = executionContext;
       const initialBinding = currentComputerBinding(service, context);
       const action = browserAction(input);
-      await authorizeAgentComputer(permissions, context!, initialBinding, "browser");
+      await authorizeComputerTask(context!, initialBinding, signal);
+      await authorizeHighImpactBrowserAction(context!, initialBinding, action);
       const binding = await waitForAgentBrowserAdmission(service, context!, initialBinding, signal);
       if (binding.generation !== initialBinding.generation) {
         const resume = await service.waitForAgentControl(
@@ -431,6 +511,12 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
       }
       try {
         const result = await service.runBrowserAction(binding.screenLeaseId, binding.ownerId, binding.generation, action, signal);
+        if (result.visualProbeRequired?.reason === "high-impact-action") {
+          pendingHighImpactTargets.set(
+            highImpactKey(context!, initialBinding, result.visualProbeRequired.ref),
+            Date.now() + COMPUTER_TASK_APPROVAL_TTL_MS,
+          );
+        }
         return { output: agentBrowserActionOutput(result) };
       } catch (error) {
         const resume = await resumeAgentComputerAfterTakeover(service, initialBinding, error, signal);
@@ -476,7 +562,7 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
       if (request.return === "image" && context?.modelCapabilities?.imageInput !== true) {
         throw new Error("computer_visual_probe return=image requires an active model with image input; use return=text");
       }
-      await authorizeAgentComputer(permissions, context!, initialBinding, "visual");
+      await authorizeComputerTask(context!, initialBinding, signal);
       const binding = await waitForAgentBrowserAdmission(service, context!, initialBinding, signal);
       if (binding.generation !== initialBinding.generation) {
         const resume = await service.waitForAgentControl(
@@ -542,11 +628,12 @@ export function createComputerPlugin(options: ComputerPluginOptions = {}): Frida
         };
       },
       cleanupRunProcesses: async (request: import("./contract.js").ComputerRunProcessCleanupRequest): Promise<void> => {
-        for (const process of execution.processes.list().filter((entry) => entry.runId === request.runId && entry.state === "running")) {
-          await execution.processes.stop(process.id, "Computer run settled");
-        }
+        // closeRun is deliberately run-id scoped and does not require the
+        // AsyncLocalStorage Agent owner to still be active. list()/stop() do,
+        // which turned successful Computer turns into durable delivery retries.
+        await execution.processes.closeRun(request.runId);
       },
-    } satisfies Pick<import("./providers/linux-sway.js").LinuxSwayComputerAdapterOptions, "runTool" | "cleanupRunProcesses"> : {};
+    } satisfies Pick<import("./providers/linux-x11.js").LinuxX11ComputerAdapterOptions, "runTool" | "cleanupRunProcesses"> : {};
 
     for (const adapter of options.adapters ?? configuredComputerAdapters(process.env, process.platform, providerHooks)) await service.registerNode(adapter);
 
@@ -573,7 +660,50 @@ export function createComputerPlugin(options: ComputerPluginOptions = {}): Frida
           reportOperationalError({ component: "computer", operation: "refresh nodes for Computer status", error, severity: "warn" });
           return Object.freeze([]);
         });
-        return { ...service.status(), leases: service.leaseStatus() };
+        const sharedScreens = await Promise.all(service.nodes().map(async (node) => ({
+          nodeId: node.id,
+          support: await service.sharedScreenSupport(node.id).catch((error: unknown) => ({
+            level: "unsupported" as const,
+            backend: "unsupported" as const,
+            desktopEnvironment: "unknown",
+            sessionType: "unknown" as const,
+            canCreateWorkspace: false,
+            canPlaceViewer: false,
+            canSwitchWorkspace: false,
+            viewOnly: false as const,
+            missing: [],
+            reason: error instanceof Error ? error.message : String(error),
+          })),
+        })));
+        return { ...service.status(), leases: service.leaseStatus(), sharedScreens };
+      },
+    });
+
+    ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+      id: "computer.shared-screen-support",
+      label: "Shared Agent Screen support",
+      description: "Report whether each Computer Node can present an isolated Agent screen on a Human-switchable desktop/workspace, including the detected desktop environment, backend, and missing dependencies.",
+      parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+      permission: () => ({ id: "computer.shared-screen-support", effect: "private-read", resource: "computer:shared-screen", network: false }),
+      async execute() {
+        return {
+          nodes: await Promise.all(service.nodes().map(async (node) => ({
+            nodeId: node.id,
+            label: node.label,
+            support: await service.sharedScreenSupport(node.id),
+          }))),
+        };
+      },
+    });
+
+    ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
+      id: "computer.close-shared-screens",
+      label: "Close Shared Agent Screens",
+      description: "Close only FRIDAY-owned shared-screen viewer/server units. This does not stop core FRIDAY, plugins, the shared browser supervisor, or unrelated applications.",
+      parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+      permission: () => ({ id: "computer.close-shared-screens", effect: "system-write", resource: "computer:shared-screen", network: false }),
+      async execute() {
+        return { closedViews: await service.closeSharedScreens() };
       },
     });
 
@@ -696,4 +826,4 @@ export function createComputerPlugin(options: ComputerPluginOptions = {}): Frida
 export default createComputerPlugin();
 export * from "./contract.js";
 export { createComputerService } from "./service.js";
-export { configuredComputerAdapters, configuredComputerProviderId, inspectConfiguredComputerProvider, createLinuxSwayComputerAdapter } from "./providers/index.js";
+export { configuredComputerAdapters, configuredComputerProviderId, inspectConfiguredComputerProvider, createLinuxX11ComputerAdapter } from "./providers/index.js";

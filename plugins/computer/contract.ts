@@ -81,6 +81,17 @@ export interface ComputerBrowserTabSnapshot {
   readonly title: string;
   readonly url: string;
   readonly active: boolean;
+  /** Bounded current media state for FRIDAY-owned browser targets; no audio/video payload is captured. */
+  readonly media?: Readonly<{
+    readonly elementCount: number;
+    readonly playing: boolean;
+    readonly paused: boolean;
+    readonly ended: boolean;
+    readonly currentTime?: number | undefined;
+    readonly duration?: number | undefined;
+    readonly muted?: boolean | undefined;
+    readonly volume?: number | undefined;
+  }> | undefined;
 }
 
 export interface ComputerBrowserWindowSnapshot {
@@ -305,7 +316,49 @@ export interface ComputerExecutionBinding {
   readonly runId: string;
   /** Server-owned admission requirements retained so later Computer actions can re-check the same resource budget. */
   readonly admission?: ComputerExecutionAdmission | undefined;
+  /** Shared presentation is opened only after this task's Computer-control approval succeeds. */
+  readonly presentation?: "shared" | "background" | undefined;
   readonly generation: number;
+}
+
+type ComputerSharedScreenSupportLevel = "full" | "conditional" | "unsupported";
+type ComputerSharedScreenBackend = "x11-ewmh" | "unsupported";
+
+export interface ComputerSharedScreenSupport {
+  readonly level: ComputerSharedScreenSupportLevel;
+  readonly backend: ComputerSharedScreenBackend;
+  readonly desktopEnvironment: string;
+  readonly sessionType: "x11" | "wayland" | "unknown";
+  readonly canCreateWorkspace: boolean;
+  readonly canPlaceViewer: boolean;
+  readonly canSwitchWorkspace: boolean;
+  /** True only for mirrored/view-only presentation. Native desktop presentation is interactive. */
+  readonly viewOnly: boolean;
+  readonly missing: readonly string[];
+  readonly reason: string;
+}
+
+interface ComputerSharedScreenOpenRequest {
+  readonly screenId: string;
+  readonly screenLeaseId: string;
+  readonly ownerId: string;
+  readonly ownerKind: ComputerExecutionOwnerKind;
+  readonly runId: string;
+  readonly name?: string | undefined;
+  /** False by default so opening an Agent screen never steals the Human's current desktop. */
+  readonly switchTo?: boolean | undefined;
+  readonly signal?: AbortSignal | undefined;
+}
+
+interface ComputerSharedScreenView {
+  readonly nodeId: string;
+  readonly screenId: string;
+  readonly workspaceName: string;
+  readonly backend: Exclude<ComputerSharedScreenBackend, "unsupported">;
+  /** True only for mirrored/view-only presentation. Native desktop presentation is interactive. */
+  readonly viewOnly: boolean;
+  /** Stable FRIDAY-owned presentation identity. It is safe to stop without matching arbitrary processes. */
+  readonly viewerId: string;
 }
 
 export interface ComputerToolExecutionRequest {
@@ -358,6 +411,12 @@ export interface ComputerNodeAdapter {
   runTool?(request: ComputerNodeToolExecutionRequest): Promise<ComputerToolExecutionResult>;
   /** Idempotently terminate provider-owned background processes for one Agent run before that run settles. */
   cleanupRunProcesses?(request: ComputerRunProcessCleanupRequest): Promise<void>;
+  /** Report whether this host can present an Agent-owned real desktop on a Human-switchable workspace. */
+  sharedScreenSupport?(signal?: AbortSignal): Promise<ComputerSharedScreenSupport>;
+  /** Present one leased Agent screen as a Human-switchable real desktop. */
+  openSharedScreen?(request: ComputerSharedScreenOpenRequest): Promise<ComputerSharedScreenView>;
+  /** Close only FRIDAY-owned desktop/browser presentations; never broad-kill unrelated processes. */
+  closeSharedScreens?(signal?: AbortSignal): Promise<number>;
   runBrowserAction?(request: ComputerBrowserActionRequest): Promise<ComputerBrowserActionResult>;
   /** Explicit, bounded, on-demand visual crop. Providers must refuse protected/challenge regions. */
   visualProbe?(request: ComputerVisualProbeRequest): Promise<ComputerVisualProbeResult>;
@@ -573,6 +632,14 @@ export interface ComputerService {
   ): Promise<ComputerToolExecutionResult>;
   /** Idempotently clean provider-owned background processes scoped to this Computer Agent run. */
   cleanupRunProcesses(binding: ComputerExecutionBinding, signal?: AbortSignal): Promise<boolean>;
+  sharedScreenSupport(nodeId: string, signal?: AbortSignal): Promise<ComputerSharedScreenSupport>;
+  openSharedScreen(
+    binding: ComputerExecutionBinding,
+    options?: { readonly name?: string | undefined; readonly switchTo?: boolean | undefined },
+    signal?: AbortSignal,
+  ): Promise<ComputerSharedScreenView>;
+  /** Close only FRIDAY-owned shared-screen presentation units. Returns the number of stopped views. */
+  closeSharedScreens(nodeId?: string, signal?: AbortSignal): Promise<number>;
   runBrowserAction(
     screenLeaseId: string,
     ownerId: string,

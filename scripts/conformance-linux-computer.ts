@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { promisify } from "node:util";
 import type { ComputerBrowserAction, ComputerObservation } from "../plugins/computer/contract.js";
-import { createLinuxSwayComputerAdapter } from "../plugins/computer/providers/linux-sway.js";
+import { createLinuxX11ComputerAdapter } from "../plugins/computer/providers/linux-x11.js";
 
 const execFileAsync = promisify(execFile);
 const FIXTURE_TOKEN = "phase5-visible-token-9f31";
@@ -26,14 +26,16 @@ async function managerEnvironment(base: NodeJS.ProcessEnv): Promise<NodeJS.Proce
     return merged;
   }
   const allowed = new Set([
-    "FRIDAY_COMPUTER_SWAYSOCK",
+    "FRIDAY_COMPUTER_PROVIDER",
     "FRIDAY_COMPUTER_CDP_URL",
     "FRIDAY_COMPUTER_CDP_PORT",
     "FRIDAY_COMPUTER_SESSION_MODE",
-    "FRIDAY_COMPUTER_HUMAN_OUTPUT",
-    "FRIDAY_COMPUTER_AGENT_OUTPUTS",
-    "XDG_RUNTIME_DIR",
-    "SWAYSOCK",
+    "FRIDAY_COMPUTER_X11_AGENT_DESKTOPS",
+    "FRIDAY_COMPUTER_BROWSER_PROFILE_DIR",
+    "DISPLAY",
+    "XAUTHORITY",
+    "XDG_SESSION_TYPE",
+    "XDG_CURRENT_DESKTOP",
   ]);
   for (const line of stdout.split(/\r?\n/u)) {
     const equals = line.indexOf("=");
@@ -108,7 +110,7 @@ function serveFixture(request: IncomingMessage, response: ServerResponse): void 
 async function main(): Promise<void> {
   if (process.platform !== "linux") fail(`Linux Computer conformance requires Linux, got ${process.platform}`);
   const environment = await managerEnvironment(process.env);
-  const adapter = createLinuxSwayComputerAdapter({ environment });
+  const adapter = createLinuxX11ComputerAdapter({ environment });
   const snapshot = await adapter.snapshot();
   requireCondition(snapshot.availability === "online", `Linux Computer is not online: ${snapshot.availability}`);
   requireCondition(snapshot.browser?.running === true, "Chromium CDP browser supervisor is not running");

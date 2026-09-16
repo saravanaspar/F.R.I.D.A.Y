@@ -79,6 +79,117 @@ describe("routing batch classifier", () => {
     expect(routing.recentContext(inputs[0]!.principal).map((entry) => entry.id)).toEqual(["m1", "m2", "m3"]);
   });
 
+  it("routes live Computer/media status deterministically without taking a new control path", async () => {
+    const classify = vi.fn(async () => utilityDecision("unused"));
+    const routing = createRoutingService({
+      classify,
+      sessions: async () => Object.freeze([]),
+      memory: async () => Object.freeze([]),
+    });
+
+    const decision = await routing.route(message("status", "is the song playing?"));
+    const pageDecision = await routing.route(message("page-status", "what page is open?"));
+
+    expect(classify).not.toHaveBeenCalled();
+    expect(decision).toEqual({
+      messageId: "status",
+      destination: { kind: "transient", id: "transient:utility" },
+      execution: { profile: "utility", capabilityProfile: "computer" },
+      confidence: 1,
+    });
+    expect(pageDecision).toEqual({
+      messageId: "page-status",
+      destination: { kind: "transient", id: "transient:utility" },
+      execution: { profile: "utility", capabilityProfile: "computer" },
+      confidence: 1,
+    });
+  });
+
+  it("routes FRIDAY-owned Computer cleanup deterministically without spending a classifier request", async () => {
+    const classify = vi.fn(async () => utilityDecision("unused"));
+    const routing = createRoutingService({
+      classify,
+      sessions: async () => Object.freeze([]),
+      memory: async () => Object.freeze([]),
+    });
+
+    const decision = await routing.route(message("cleanup", "can u kill any active computer/headless uses"));
+
+    expect(classify).not.toHaveBeenCalled();
+    expect(decision).toEqual({
+      messageId: "cleanup",
+      destination: { kind: "transient", id: "transient:utility" },
+      execution: { profile: "utility", capabilityProfile: "none" },
+      confidence: 1,
+    });
+  });
+
+  it("extracts Computer cleanup items from a mixed routing batch", async () => {
+    const classify = vi.fn(async ({ userPrompt }: { userPrompt: string }) => {
+      const payload = JSON.parse(userPrompt) as { messages: Array<{ id: string }> };
+      expect(payload.messages.map((entry) => entry.id)).toEqual(["m2"]);
+      return { decisions: [utilityDecision("m2")] };
+    });
+    const routing = createRoutingService({
+      classify,
+      sessions: async () => Object.freeze([]),
+      memory: async () => Object.freeze([]),
+    });
+
+    const decisions = await routing.routeBatch([
+      message("m1", "stop all active computer headless work"),
+      message("m2", "hello"),
+    ]);
+
+    expect(classify).toHaveBeenCalledTimes(1);
+    expect(decisions[0]).toEqual({
+      messageId: "m1",
+      destination: { kind: "transient", id: "transient:utility" },
+      execution: { profile: "utility", capabilityProfile: "none" },
+      confidence: 1,
+    });
+    expect(decisions[1]?.messageId).toBe("m2");
+  });
+
+  it("does not mistake informational Computer cleanup questions for cleanup commands", async () => {
+    const classify = vi.fn(async () => utilityDecision("question"));
+    const routing = createRoutingService({
+      classify,
+      sessions: async () => Object.freeze([]),
+      memory: async () => Object.freeze([]),
+    });
+
+    await routing.route(message("question", "why did you kill the browser?"));
+    expect(classify).toHaveBeenCalledTimes(1);
+  });
+
+  it("extracts live Computer status questions from a mixed routing batch", async () => {
+    const classify = vi.fn(async ({ userPrompt }: { userPrompt: string }) => {
+      const payload = JSON.parse(userPrompt) as { messages: Array<{ id: string }> };
+      expect(payload.messages.map((entry) => entry.id)).toEqual(["m2"]);
+      return { decisions: [utilityDecision("m2")] };
+    });
+    const routing = createRoutingService({
+      classify,
+      sessions: async () => Object.freeze([]),
+      memory: async () => Object.freeze([]),
+    });
+
+    const decisions = await routing.routeBatch([
+      message("m1", "is youtube still playing?"),
+      message("m2", "hello"),
+    ]);
+
+    expect(classify).toHaveBeenCalledTimes(1);
+    expect(decisions[0]).toEqual({
+      messageId: "m1",
+      destination: { kind: "transient", id: "transient:utility" },
+      execution: { profile: "utility", capabilityProfile: "computer" },
+      confidence: 1,
+    });
+    expect(decisions[1]?.messageId).toBe("m2");
+  });
+
   it("keeps deterministic scheduler items host-owned and excludes them from the classifier batch", async () => {
     const classify = vi.fn(async ({ userPrompt }: { userPrompt: string }) => {
       const payload = JSON.parse(userPrompt) as { messages: Array<{ id: string }> };

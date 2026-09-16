@@ -1,4 +1,4 @@
-import { closeSync, constants as fsConstants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { reportOperationalError } from "@friday/operational-errors";
 import { homedir } from "node:os";
@@ -6,7 +6,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AgentService } from "../agent/contract.js";
 import type { AgentProfilesService } from "../agent-profiles/contract.js";
 import type { ModelCredentialService } from "../auth/contract.js";
-import type { ComputerExecutionBinding, ComputerService, ScreenLease } from "../computer/contract.js";
+import type { ComputerBrowserTabSnapshot, ComputerExecutionBinding, ComputerService, ScreenLease } from "../computer/contract.js";
 import type { MemoryRelationResult, MemorySearchResult, MemoryService } from "../memory/contract.js";
 import type { ModelService } from "../model/contract.js";
 import type { ObservabilityService } from "../observability/contract.js";
@@ -14,7 +14,7 @@ import { conversationScope, ownerScopeAllows, ownerStateRoot, principalScope, ty
 import type { PromptsService } from "../prompts/contract.js";
 import type { ProjectsService } from "../projects/contract.js";
 import type { RlmService } from "../rlm/contract.js";
-import type { RoutingCapabilityProfile } from "../routing/contract.js";
+import { isComputerCleanupCommand, isComputerStatusQuery, type RoutingCapabilityProfile } from "../routing/contract.js";
 import type { SandboxService } from "../sandbox/contract.js";
 import type { SessionResourcesService } from "../session-resources/contract.js";
 import type { SessionsService } from "../sessions/contract.js";
@@ -60,6 +60,8 @@ declare module "@friday/agent" {
 const DEFAULT_CACHE_SIZE = 24;
 const DEFAULT_MAX_SUBAGENT_DEPTH = 2;
 const DEFAULT_MAX_CONCURRENT_SUBAGENTS = 4;
+const DEFAULT_MAX_TOOL_TURNS = 96;
+const DEFAULT_MAX_COMPUTER_TOOL_TURNS = 32;
 const MAX_CONTRIBUTED_TOOL_OUTPUT_CHARS = 64_000;
 const MAX_CONTRIBUTED_TOOL_IMAGE_CHARS = 16 * 1024 * 1024;
 const MAX_PERSISTED_INPUT_CONTEXT_CHARS = 24_000;
@@ -68,6 +70,8 @@ const PERSISTED_AGENT_INPUT_PREFIX = "friday.agent-input:";
 const DEFAULT_PROJECT_SKILLS_DIR = ".friday/skills";
 const PROJECT_CONTEXT_FILE = "AGENTS.md";
 const MAX_PROJECT_CONTEXT_BYTES = 64 * 1024;
+const RECENT_COMPUTER_STATUS_TTL_MS = 6 * 60 * 60 * 1_000;
+const MAX_RECENT_COMPUTER_STATUS_BINDINGS = 256;
 const SHARED_WORKSPACE_SERIAL_TOOLS = new Set([
   "bash",
   "edit",
@@ -108,6 +112,22 @@ interface CachedRuntime {
   busy: number;
 }
 
+interface ComputerTurnMarker {
+  readonly version: 1;
+  readonly runtimeEpoch: string;
+  readonly status: "active" | "interrupted";
+  readonly startedAt: string;
+  readonly updatedAt: string;
+  readonly binding?: ComputerExecutionBinding | undefined;
+}
+
+interface RecentComputerStatusBinding {
+  readonly nodeId: string;
+  readonly screenId: string;
+  readonly expiresAt: number;
+}
+
+
 export interface AgentTurnExecutorOptionalDependencies {
   credentials(): ModelCredentialService | undefined;
   memory(): MemoryService | undefined;
@@ -144,12 +164,81 @@ export interface AgentTurnExecutorOptions {
   readonly maxCachedSessions?: number | undefined;
   readonly maxSubagentDepth?: number | undefined;
   readonly maxConcurrentSubagents?: number | undefined;
+  /** Maximum number of assistant tool-call turns before a run is stopped safely. */
+  readonly maxToolTurns?: number | undefined;
+  /** Tighter loop guard for shared Computer work, where a stuck run blocks ingress. */
+  readonly maxComputerToolTurns?: number | undefined;
 }
 
 function stateRoot(input?: string): string {
   const configured = input?.trim() || process.env.FRIDAY_STATE_DIR?.trim() || process.env.FRIDAY_HOME?.trim();
   if (!configured) return join(homedir(), ".friday");
   return isAbsolute(configured) ? configured : resolve(configured);
+}
+
+function explicitHeadlessComputerIntent(text: string): boolean {
+  const normalized = text.toLowerCase();
+  if (/\b(?:not|never|do not|don't)\s+(?:use\s+|run\s+|open\s+)?(?:a\s+)?headless\b/.test(normalized)
+    || /\b(?:not|never|do not|don't)\s+(?:run\s+|work\s+)?(?:in\s+)?(?:the\s+)?background\b/.test(normalized)) {
+    return false;
+  }
+  return /\b(?:use|open|run|do|work|browse|play)\b.{0,48}\bheadless\b/.test(normalized)
+    || /\bheadless\b.{0,32}\b(?:screen|browser|mode)\b/.test(normalized)
+    || /\b(?:in|into) (?:the )?background\b/.test(normalized)
+    || /\bwithout (?:showing|opening) (?:it|anything|a window)\b/.test(normalized);
+}
+
+async function computerStatusReply(
+  service: ComputerService,
+  scope: Readonly<{ nodeId: string; screenId: string }>,
+  signal?: AbortSignal,
+): Promise<string> {
+  try {
+    await service.refreshAll(signal);
+  } catch (error) {
+    reportOperationalError({ component: "turn-loop", operation: "refresh Computer status for status-only query", error, severity: "warn" });
+  }
+  const candidates: Array<{
+    readonly nodeId: string;
+    readonly screenId?: string | undefined;
+    readonly title: string;
+    readonly url: string;
+    readonly media?: ComputerBrowserTabSnapshot["media"] | undefined;
+  }> = [];
+  for (const node of service.nodes()) {
+    if (node.id !== scope.nodeId) continue;
+    const browser = node.browser;
+    if (!browser?.running) continue;
+    const tabsById = new Map(browser.tabs.map((tab) => [tab.id, tab] as const));
+    const fridayWindows = browser.windows.filter((window) => window.owner === "friday" && window.screenId === scope.screenId);
+    for (const window of fridayWindows) {
+      for (const tabId of window.tabIds) {
+        const tab = tabsById.get(tabId);
+        if (!tab) continue;
+        candidates.push({ nodeId: node.id, screenId: window.screenId, title: tab.title, url: tab.url, ...(tab.media === undefined ? {} : { media: tab.media }) });
+      }
+    }
+    if (fridayWindows.length === 0 && node.screens.some((screen) => screen.id === scope.screenId && screen.kind === "agent")
+      && node.screens.every((screen) => screen.kind === "agent")) {
+      for (const tab of browser.tabs.filter((entry) => !/^chrome:\/\//i.test(entry.url))) {
+        candidates.push({ nodeId: node.id, screenId: scope.screenId, title: tab.title, url: tab.url, ...(tab.media === undefined ? {} : { media: tab.media }) });
+      }
+    }
+  }
+  const selected = candidates.find((candidate) => candidate.media?.playing === true)
+    ?? candidates.find((candidate) => (candidate.media?.elementCount ?? 0) > 0)
+    ?? candidates.find((candidate) => candidate.url !== "about:blank")
+    ?? candidates[0];
+  if (!selected) return "Computer status: no FRIDAY-owned browser page is currently active.";
+  const location = selected.screenId ? `${selected.nodeId}:${selected.screenId}` : selected.nodeId;
+  if (selected.media?.playing === true) {
+    const seconds = selected.media.currentTime === undefined ? "" : ` at ${Math.floor(selected.media.currentTime)}s`;
+    return `Computer status: media is playing${seconds} on ${location}. Current page: ${selected.title} (${selected.url}).`;
+  }
+  if ((selected.media?.elementCount ?? 0) > 0) {
+    return `Computer status: media is not currently playing on ${location}. Current page: ${selected.title} (${selected.url}).`;
+  }
+  return `Computer status: no active media playback is detected on ${location}. Current page: ${selected.title} (${selected.url}).`;
 }
 
 function positiveInteger(value: number | undefined, fallback: number, label: string): number {
@@ -666,9 +755,168 @@ export function createAgentTurnExecutor(
     DEFAULT_MAX_CONCURRENT_SUBAGENTS,
     "maxConcurrentSubagents",
   );
+  const maxToolTurns = positiveInteger(options.maxToolTurns, DEFAULT_MAX_TOOL_TURNS, "maxToolTurns");
+  const maxComputerToolTurns = positiveInteger(options.maxComputerToolTurns, DEFAULT_MAX_COMPUTER_TOOL_TURNS, "maxComputerToolTurns");
   const cache = new Map<string, CachedRuntime>();
+  const recentComputerStatusBindings = new Map<string, RecentComputerStatusBinding>();
   const workspaceMutations = new WorkspaceMutationCoordinator();
+  const runtimeEpoch = randomUUID();
+  const computerTurnStateDir = join(root, "computer-turns");
   let disposed = false;
+
+  const computerTurnMarkerPath = (turn: TurnExecutionContext["turn"]): string => {
+    const principal = turn.principal;
+    const key = createHash("sha256").update(JSON.stringify([
+      principal.channel,
+      principal.accountId,
+      principal.conversationId,
+      principal.senderId,
+      turn.id,
+    ])).digest("hex");
+    return join(computerTurnStateDir, `${key}.json`);
+  };
+
+  const readComputerTurnMarker = (path: string): ComputerTurnMarker | undefined => {
+    if (!existsSync(path)) return undefined;
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<ComputerTurnMarker>;
+      if (parsed.version !== 1 || typeof parsed.runtimeEpoch !== "string" || (parsed.status !== "active" && parsed.status !== "interrupted")
+        || typeof parsed.startedAt !== "string" || typeof parsed.updatedAt !== "string") {
+        throw new Error("Computer turn marker has an invalid shape");
+      }
+      return Object.freeze({
+        version: 1,
+        runtimeEpoch: parsed.runtimeEpoch,
+        status: parsed.status,
+        startedAt: parsed.startedAt,
+        updatedAt: parsed.updatedAt,
+        ...(parsed.binding === undefined ? {} : { binding: parsed.binding }),
+      });
+    } catch (error) {
+      reportOperationalError({ component: "turn-loop", operation: "read Computer restart marker", error, severity: "warn" });
+      const at = new Date().toISOString();
+      return Object.freeze({ version: 1, runtimeEpoch: "invalid", status: "interrupted", startedAt: at, updatedAt: at });
+    }
+  };
+
+  const writeComputerTurnMarker = (path: string, marker: ComputerTurnMarker): void => {
+    mkdirSync(computerTurnStateDir, { recursive: true, mode: 0o700 });
+    const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      writeFileSync(temporary, `${JSON.stringify(marker)}\n`, { encoding: "utf8", mode: 0o600 });
+      renameSync(temporary, path);
+    } finally {
+      if (existsSync(temporary)) {
+        try { unlinkSync(temporary); } catch (error) {
+          reportOperationalError({ component: "turn-loop", operation: "clean temporary Computer restart marker", error, severity: "warn" });
+        }
+      }
+    }
+  };
+
+  const clearComputerTurnMarker = (path: string): void => {
+    if (!existsSync(path)) return;
+    try { unlinkSync(path); } catch (error) {
+      reportOperationalError({ component: "turn-loop", operation: "clear completed Computer restart marker", error, severity: "warn" });
+    }
+  };
+
+  const cleanupComputerBinding = async (service: ComputerService, binding: ComputerExecutionBinding): Promise<{ processCleanup: boolean; leaseReleased: boolean }> => {
+    let processCleanup = false;
+    let leaseReleased = false;
+    try {
+      await service.cleanupRunProcesses(binding);
+      processCleanup = true;
+    } catch (error) {
+      reportOperationalError({ component: "turn-loop", operation: "clean recorded FRIDAY-owned Computer processes", error, severity: "warn" });
+    }
+    try {
+      const control = service.controlLease(binding.screenLeaseId);
+      if (control?.holder !== "human") leaseReleased = await service.releaseScreen(binding.screenLeaseId, binding.ownerId);
+    } catch (error) {
+      reportOperationalError({ component: "turn-loop", operation: "release recorded FRIDAY-owned Computer screen", error, severity: "warn" });
+    }
+    return { processCleanup, leaseReleased };
+  };
+
+  const interruptRecordedComputerTurn = async (path: string, marker: ComputerTurnMarker, service?: ComputerService): Promise<boolean> => {
+    let cleaned = marker.binding === undefined;
+    if (marker.binding !== undefined && service !== undefined) {
+      const result = await cleanupComputerBinding(service, marker.binding);
+      cleaned = result.processCleanup;
+    }
+    const updated: ComputerTurnMarker = Object.freeze({
+      ...marker,
+      status: "interrupted",
+      updatedAt: new Date().toISOString(),
+    });
+    writeComputerTurnMarker(path, updated);
+    return cleaned;
+  };
+
+  const cleanupRecordedComputerTurns = async (service: ComputerService): Promise<{ runs: number; processes: number; leases: number; sharedViews: number }> => {
+    let runs = 0;
+    let processes = 0;
+    let leases = 0;
+    if (existsSync(computerTurnStateDir)) {
+      for (const name of readdirSync(computerTurnStateDir).filter((entry) => entry.endsWith(".json")).slice(0, 1_000)) {
+        const path = join(computerTurnStateDir, name);
+        const marker = readComputerTurnMarker(path);
+        if (!marker || marker.status !== "active") continue;
+        runs += 1;
+        if (marker.binding) {
+          const result = await cleanupComputerBinding(service, marker.binding);
+          if (result.processCleanup) processes += 1;
+          if (result.leaseReleased) leases += 1;
+        }
+        writeComputerTurnMarker(path, Object.freeze({ ...marker, status: "interrupted", updatedAt: new Date().toISOString() }));
+      }
+    }
+    let sharedViews = 0;
+    try {
+      sharedViews = await service.closeSharedScreens();
+    } catch (error) {
+      reportOperationalError({ component: "turn-loop", operation: "close FRIDAY-owned Shared Agent Screen viewers", error, severity: "warn" });
+    }
+    return { runs, processes, leases, sharedViews };
+  };
+
+
+  const rememberComputerStatusBinding = (turn: TurnExecutionContext["turn"], binding: ComputerExecutionBinding): void => {
+    const now = Date.now();
+    for (const [key, candidate] of recentComputerStatusBindings) {
+      if (candidate.expiresAt <= now || (candidate.nodeId === binding.nodeId && candidate.screenId === binding.screenId)) {
+        recentComputerStatusBindings.delete(key);
+      }
+    }
+    recentComputerStatusBindings.set(principalScope(turn.principal), Object.freeze({
+      nodeId: binding.nodeId,
+      screenId: binding.screenId,
+      expiresAt: now + RECENT_COMPUTER_STATUS_TTL_MS,
+    }));
+    while (recentComputerStatusBindings.size > MAX_RECENT_COMPUTER_STATUS_BINDINGS) {
+      recentComputerStatusBindings.delete(recentComputerStatusBindings.keys().next().value!);
+    }
+  };
+
+  const recentComputerStatusBinding = (turn: TurnExecutionContext["turn"]): RecentComputerStatusBinding | undefined => {
+    const key = principalScope(turn.principal);
+    const candidate = recentComputerStatusBindings.get(key);
+    if (!candidate) return undefined;
+    if (candidate.expiresAt <= Date.now()) {
+      recentComputerStatusBindings.delete(key);
+      return undefined;
+    }
+    return candidate;
+  };
+
+  const updateComputerTurnBinding = (turn: TurnExecutionContext["turn"], binding: ComputerExecutionBinding): void => {
+    rememberComputerStatusBinding(turn, binding);
+    const path = computerTurnMarkerPath(turn);
+    const marker = readComputerTurnMarker(path);
+    if (!marker || marker.status !== "active" || marker.runtimeEpoch !== runtimeEpoch) return;
+    writeComputerTurnMarker(path, Object.freeze({ ...marker, binding, updatedAt: new Date().toISOString() }));
+  };
 
   const cleanupSession = (sessionId: string): void => {
     try {
@@ -1011,6 +1259,13 @@ export function createAgentTurnExecutor(
       }
       let ephemeralInputContext: string | undefined;
       let ephemeralImages: Array<{ type: "image"; data: string; mimeType: string }> = [];
+      // A provider can keep returning tool calls forever (for example, repeatedly
+      // observing a Computer screen without making progress). Keep this state on
+      // the runtime so the guard applies to every model turn, including cached
+      // sessions, and let the current run choose the appropriate limit.
+      let activeRunToolTurns = 0;
+      let activeRunToolTurnLimit = maxToolTurns;
+      let activeRunToolTurnLimitReached = false;
       const agent = new dependencies.agent.Agent({
         initialState,
         sessionId: session.getSessionId(),
@@ -1058,6 +1313,13 @@ export function createAgentTurnExecutor(
           } finally {
             conditionalHookPhaseByCall.delete(toolCall.id);
           }
+        },
+        shouldStopAfterTurn: ({ message }) => {
+          if (!message.content.some((item) => item.type === "toolCall")) return false;
+          activeRunToolTurns += 1;
+          if (activeRunToolTurns < activeRunToolTurnLimit) return false;
+          activeRunToolTurnLimitReached = true;
+          return true;
         },
         transformContext: async (messages) => {
           const policyContext = activeExtensionContext;
@@ -1227,6 +1489,9 @@ export function createAgentTurnExecutor(
             throw new Error(`Capability profile ${capabilityProfile} is only valid for utility Agent execution`);
           }
           const computerCapabilityRequested = capabilityProfile === "computer";
+          activeRunToolTurns = 0;
+          activeRunToolTurnLimitReached = false;
+          activeRunToolTurnLimit = computerCapabilityRequested ? maxComputerToolTurns : maxToolTurns;
           if (computerCapabilityRequested
             && (profile?.enabledPlugins.length ?? 0) > 0
             && profile?.enabledPlugins.includes("computer") !== true) {
@@ -1278,24 +1543,32 @@ export function createAgentTurnExecutor(
               throw new Error(`Computer node is not registered: ${projectComputerNodeId}`);
             }
             let waitedForComputer = false;
+            const sharedScreenRequired = computerCapabilityRequested
+              && !explicitHeadlessComputerIntent(turnContext?.turn.text ?? "");
+            const configuredScreen = profile?.defaultComputerScreen;
+            const preferredNodeId = projectComputerNodeId;
+            const preferredScreenId = configuredScreen;
+            const preferredScreenMode = preferredScreenId === undefined
+              ? undefined
+              : (runtimeOptions.depth ?? 0) > 0
+                ? "soft" as const
+                : "required" as const;
             const grant = await computerService.waitForScreen({
               ownerId: computerOwnerId,
-              ...(projectComputerNodeId === undefined ? {} : { preferredNodeId: projectComputerNodeId }),
-              ...(profile?.defaultComputerScreen === undefined ? {} : {
-                preferredScreenId: profile.defaultComputerScreen,
-                preferredScreenMode: (runtimeOptions.depth ?? 0) > 0 ? "soft" as const : "required" as const,
-              }),
+              ...(preferredNodeId === undefined ? {} : { preferredNodeId }),
+              ...(preferredScreenId === undefined ? {} : { preferredScreenId }),
+              ...(preferredScreenMode === undefined ? {} : { preferredScreenMode }),
               ...(computerAdmission?.requireBrowser === undefined ? {} : { requireBrowser: computerAdmission.requireBrowser }),
               ...(hasComputerDemand ? { demand: computerDemand } : {}),
             }, signal, async (waiting) => {
               waitedForComputer = true;
               await progress?.({
                 kind: "status",
-                message: `Waiting for ${projectComputerNodeId === undefined ? "Computer screen" : `Computer ${projectComputerNodeId}`}: ${waiting.reasons.join(", ")}`,
+                message: `Waiting for ${preferredNodeId === undefined ? "Computer screen" : `Computer ${preferredNodeId}`}: ${waiting.reasons.join(", ")}`,
                 jobStatus: "waiting-for-computer",
                 computerWait: {
                   code: waiting.code,
-                  ...(projectComputerNodeId === undefined ? {} : { nodeId: projectComputerNodeId }),
+                  ...(preferredNodeId === undefined ? {} : { nodeId: preferredNodeId }),
                   reasons: waiting.reasons,
                 },
               });
@@ -1321,8 +1594,10 @@ export function createAgentTurnExecutor(
                   ...(hasComputerDemand ? { demand: Object.freeze({ ...computerDemand }) } : {}),
                 }),
               }),
+              presentation: sharedScreenRequired ? "shared" : "background",
               generation: grant.controlLease.generation,
             });
+            if (computerCapabilityRequested && turnContext) updateComputerTurnBinding(turnContext.turn, computerExecution);
             try {
               computerLeaseKeeper = startComputerLeaseKeeper(
                 computerService,
@@ -1521,6 +1796,11 @@ export function createAgentTurnExecutor(
               if (preparedPersistedInputs.length > 0) {
                 agent.state.messages = [...agent.state.messages, ...preparedPersistedInputs];
               }
+              // The bounded-loop guard intentionally stops on a tool-call message,
+              // which has no assistant text. Let the caller turn that condition into
+              // a normal, durable user-facing failure response instead of treating it
+              // as an unhandled silent run.
+              if (activeRunToolTurnLimitReached) return "";
               const finalAssistant = lastAssistant(agent.state.messages);
               if (finalAssistant && (finalAssistant as { stopReason?: string }).stopReason === "error") {
                 throw new Error((finalAssistant as { errorMessage?: string }).errorMessage || agent.state.errorMessage || "Agent model request failed");
@@ -1530,13 +1810,27 @@ export function createAgentTurnExecutor(
               return output;
             };
             const withManagedProcessRun = dependencies.tools.withManagedProcessRun;
-            const textResult = typeof withManagedProcessRun !== "function"
-              ? await executePrompt()
-              : await withManagedProcessRun({
+              const textResult = typeof withManagedProcessRun !== "function"
+                ? await executePrompt()
+                : await withManagedProcessRun({
                   sessionId: session.getSessionId(),
                   runId: agentRunId,
                   ownerKind: (runtimeOptions.depth ?? 0) > 0 ? "subagent" : "main-agent",
-                }, executePrompt);
+                  }, executePrompt);
+            if (activeRunToolTurnLimitReached) {
+              const limitError = new Error(`Agent stopped after ${activeRunToolTurnLimit} tool turns without producing a final response`);
+              const cleanup = combinedAfterFailure(afterFailureCallbacks);
+              if (cleanup) {
+                await cleanup(limitError).catch((error: unknown) => {
+                  reportOperationalError({ component: "turn-loop", operation: "clean up bounded Agent run", error });
+                });
+              }
+              return {
+                text: computerCapabilityRequested
+                  ? "FRIDAY stopped this Computer task because it kept retrying without reaching a final result. The Computer lease was released; please send the request again with a narrower instruction."
+                  : "FRIDAY stopped this task because it kept retrying without reaching a final result. Please send the request again with a narrower instruction.",
+              };
+            }
             let finalText = textResult;
             if (projectWorkspace?.isolated && projects) {
               try {
@@ -1741,10 +2035,62 @@ export function createAgentTurnExecutor(
     async execute(context: TurnExecutionContext): Promise<TurnExecutionResult> {
       if (disposed) throw new Error("Agent turn executor is disposed");
       context.signal?.throwIfAborted();
+
+      const computerServiceForControl = dependencies.optional?.computer?.();
+      if (isComputerCleanupCommand(context.turn.text)) {
+        if (!computerServiceForControl) {
+          return Object.freeze({ text: "Computer capability is unavailable, so there are no FRIDAY-owned Computer runs I can clean up from this runtime." });
+        }
+        const cleanup = await cleanupRecordedComputerTurns(computerServiceForControl);
+        return Object.freeze({
+          text: cleanup.runs === 0 && cleanup.sharedViews === 0
+            ? "No recorded FRIDAY-owned active Computer runs or Shared Agent Screen viewers were found. Core FRIDAY/plugin processes and unrelated applications were not touched."
+            : `Stopped ${cleanup.runs} recorded FRIDAY-owned Computer run(s); cleaned ${cleanup.processes} run-scoped process set(s), released ${cleanup.leases} screen lease(s), and closed ${cleanup.sharedViews} FRIDAY-owned Shared Agent Screen viewer(s). Core FRIDAY/plugin processes, the shared browser supervisor, and unrelated applications were not touched.`,
+        });
+      }
+
+      if (context.decision.execution.capabilityProfile === "computer" && isComputerStatusQuery(context.turn.text)) {
+        if (!computerServiceForControl) return Object.freeze({ text: "Computer status is unavailable because the Computer capability is not active." });
+        const recent = recentComputerStatusBinding(context.turn);
+        if (!recent) {
+          return Object.freeze({ text: "Computer status: no recent FRIDAY Computer task is associated with this principal in the current runtime." });
+        }
+        return Object.freeze({ text: await computerStatusReply(computerServiceForControl, recent, context.signal) });
+      }
+
+      const trackedComputerTurn = context.decision.execution.capabilityProfile === "computer";
+      const markerPath = trackedComputerTurn ? computerTurnMarkerPath(context.turn) : undefined;
+      if (markerPath) {
+        const previous = readComputerTurnMarker(markerPath);
+        if (previous && (previous.status === "interrupted" || previous.runtimeEpoch !== runtimeEpoch)) {
+          const cleaned = await interruptRecordedComputerTurn(markerPath, previous, computerServiceForControl);
+          return Object.freeze({
+            text: `The previous Computer task was interrupted by a FRIDAY restart and was not resumed.${cleaned ? " Its recorded FRIDAY-owned Computer resources were cleaned up." : " FRIDAY could not confirm cleanup of every recorded Computer resource; use the Computer cleanup command before starting another Computer task."} Send a new request if you want to run it again.`,
+          });
+        }
+      }
+
       const mainModel = configuredModel();
       if (!mainModel && (context.decision.destination.kind === "transient" || context.decision.destination.id === "session:new")) {
         return routerOnlyResult();
       }
+
+      if (markerPath) {
+        const now = new Date().toISOString();
+        const previous = readComputerTurnMarker(markerPath);
+        writeComputerTurnMarker(markerPath, Object.freeze({
+          version: 1,
+          runtimeEpoch,
+          status: "active",
+          startedAt: previous?.runtimeEpoch === runtimeEpoch && previous.status === "active" ? previous.startedAt : now,
+          updatedAt: now,
+          ...(previous?.runtimeEpoch === runtimeEpoch && previous.status === "active" && previous.binding ? { binding: previous.binding } : {}),
+        }));
+      }
+      const completeComputerTurn = <T extends TurnExecutionResult>(result: T): T => {
+        if (markerPath) clearComputerTurnMarker(markerPath);
+        return result;
+      };
       if (context.decision.destination.kind === "transient") {
         const session = dependencies.sessions.SessionManager.inMemory(defaultCwd, "", {
           ownerScope: principalScope(context.turn.principal),
@@ -1752,12 +2098,12 @@ export function createAgentTurnExecutor(
         const runtime = await buildRuntime(session, { persistent: false });
         try {
           const result = await runtime.run(context.turn.text, context.turn.timestamp, context.signal, context.progress, context.jobId, context);
-          return Object.freeze({
+          return completeComputerTurn(Object.freeze({
             text: result.text,
             ...(result.afterReply === undefined ? {} : { afterReply: result.afterReply }),
             ...(result.afterReplyFinalizers === undefined ? {} : { afterReplyFinalizers: result.afterReplyFinalizers }),
             ...(result.afterFailure === undefined ? {} : { afterFailure: result.afterFailure }),
-          });
+          }));
         } finally {
           await runtime.dispose();
         }
@@ -1782,7 +2128,7 @@ export function createAgentTurnExecutor(
         );
       } catch (error) {
         if (!mainModel && error instanceof Error && error.message.includes("Agent model selection is required")) {
-          return routerOnlyResult();
+          return completeComputerTurn(routerOnlyResult());
         }
         throw error;
       }
@@ -1792,13 +2138,13 @@ export function createAgentTurnExecutor(
       await evictIfNeeded();
       try {
         const result = await cached.runtime.run(context.turn.text, context.turn.timestamp, context.signal, context.progress, context.jobId, context);
-        return Object.freeze({
+        return completeComputerTurn(Object.freeze({
           text: result.text,
           sessionId: cached.runtime.sessionId,
           ...(result.afterReply === undefined ? {} : { afterReply: result.afterReply }),
           ...(result.afterReplyFinalizers === undefined ? {} : { afterReplyFinalizers: result.afterReplyFinalizers }),
           ...(result.afterFailure === undefined ? {} : { afterFailure: result.afterFailure }),
-        });
+        }));
       } finally {
         cached.busy -= 1;
         cached.lastUsedAt = Date.now();

@@ -494,7 +494,7 @@ async function computerCheck(environment: NodeJS.ProcessEnv, sources: DoctorSour
     const snapshot = await sources.computer(environment);
     if (!snapshot.configured) {
       return check("computer-linux", "Tooling", "info", "Agent Computer", "not configured", {
-        detail: "Set FRIDAY_COMPUTER_PROVIDER=linux-sway to enable the Phase 5 Linux provider.",
+        detail: "Run scripts/setup-linux-computer.sh native to enable the native X11 Linux provider (FRIDAY_COMPUTER_PROVIDER=linux-x11).",
       });
     }
     const detail = [

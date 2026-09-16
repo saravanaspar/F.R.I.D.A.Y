@@ -74,7 +74,7 @@ sibling Agents to fall back to other free Agent screens. Browser profile/cache,
 login state, downloads, home directory, and Project filesystem remain shared by
 the Computer Node as designed.
 
-Linux is first-class through a managed Sway/wlroots session, Chromium/Playwright/CDP, and headless agent outputs. Windows keeps F.R.I.D.A.Y Core in WSL2 and adds a native Computer Node helper for browser/CDP, UI Automation, virtual displays, and serialized raw input. The Android app is a thin Kotlin/Compose client; the desktop app is Electron/React. Neither owns durable work.
+Linux is first-class through native X11/EWMH virtual desktops plus a persistent Brave/Chrome/Chromium CDP browser supervisor; Agent desktops are real host desktops rather than a second compositor. Windows keeps F.R.I.D.A.Y Core in WSL2 and adds a native Computer Node helper for browser/CDP, UI Automation, virtual displays, and serialized raw input. The Android app is a thin Kotlin/Compose client; the desktop app is Electron/React. Neither owns durable work.
 
 See the [roadmap](ROADMAP.md), [plugin development guide](PLUGIN_DEVELOPMENT.md), and [plugin cookbook](plugins/cookbook.md) before proposing a new owner.
 

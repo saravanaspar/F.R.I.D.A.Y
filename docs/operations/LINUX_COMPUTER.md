@@ -1,185 +1,130 @@
-# Linux / Raspberry Pi Computer provider (Phase 5)
+# Linux native desktop Computer provider
 
-Phase 5 extends the existing `computer` authority; it does not add another Agent, tool executor, scheduler, or durable state owner. The built-in `linux-sway` adapter under `plugins/computer/providers` discovers Sway outputs, treats the physical output as the Human screen and `HEADLESS-*` outputs as Agent screens, reports host resource pressure, owns one loopback-CDP Chromium profile, creates a separate Chromium window/target per Agent screen, and executes browser actions through the Phase 4 generation/lease checks.
+The built-in Linux visible Computer mode uses the user's **real X11 virtual desktops**. It does not require a second compositor, `HEADLESS-*` outputs, WayVNC, TigerVNC, or temporary KWin scripts.
 
-The provider is capability-honest: CDP is the required browser baseline, while Playwright/AT-SPI and PipeWire/WebRTC integrations may be supplied by a host adapter when available. Host shell/edit/process/IPython operations delegate through the existing FRIDAY tool/execution authorities, and managed lifecycle actions are restricted to FRIDAY-owned services and browser state. No fallback silently pretends an unavailable accelerator exists.
-
-## Security boundary
-
-Run FRIDAY, Sway, and Chromium as the ordinary user, never root. CDP is restricted to loopback HTTP; the provider rejects a non-loopback `FRIDAY_COMPUTER_CDP_URL`. Chromium uses a dedicated shared FRIDAY profile, so Human and Agent windows share the FRIDAY browser login state without locking the person's unrelated Chrome/Chromium profile.
-
-Normal provider observations are screenshot-free and do not record human keystrokes. DOM inspection removes input values and protected/CAPTCHA-shaped nodes before returning bounded semantic elements. Each structured observation carries an observation id plus scoped refs such as `obs-12:e7`; element-targeted model actions use those refs, and the provider revalidates the live element immediately before acting so stale refs, semantic drift, hidden/obscured targets, and unsafe protected regions fail closed. A second provider-side redaction pass removes password/OTP/token/PIN/CAPTCHA assignments and sensitive URL parameters/titles before the provider sets the mandatory observation-safety attestation. Typing into password/OTP/CAPTCHA/token-shaped targets is rejected, protected click targets are rejected, and key presses are blocked while a protected field owns focus; those interactions must use Phase 4 human takeover.
-
-When structure is insufficient, the provider can expose a bounded action-time visual probe instead of a full-screen image. The requested region is clamped to the Chromium viewport and protected/challenge regions are refused. Text mode returns safe local target/context verification for a non-vision model; image mode returns only the bounded PNG crop as native current-turn tool content. Successful ref probes issue a short-lived one-use token bound to that exact screen/ref so a gated action can be retried once. Turn Loop removes image parts before durable Session persistence while keeping safe text metadata.
-
-CDP actions use browser input primitives rather than page-script `element.click()` shortcuts: click and focus are driven with `Input.dispatchMouseEvent`, text uses `Input.insertText`, named keys carry their CDP key/code/virtual-key metadata, and navigation waits for a live document state before the provider re-observes the page. Post-action observations include a bounded structural delta for verification rather than forcing a full UI resend. `FRIDAY_COMPUTER_BROWSER_ACTION_TIMEOUT_MS` can raise the default five-second settle timeout up to 60 seconds for unusually slow local/browser environments.
-
-## Host packages
-
-On Debian-family Linux or Raspberry Pi OS, install Sway and Chromium before enabling the provider. Package names vary by distribution.
-
-Ubuntu/Kubuntu 26.04 uses the `chromium-browser` transitional package, which launches the Chromium Snap:
-
-```bash
-sudo apt update
-sudo apt install sway chromium-browser pipewire wireplumber
+```text
+KDE/GNOME/Xfce/etc. X11 session
+  Desktop 1: Human
+  Desktop 2: FRIDAY
+    Brave/Chrome window directly on that desktop
 ```
 
-On Debian/Raspberry Pi OS, the browser package is commonly `chromium`:
+The provider reuses the existing hardened Computer/CDP engine for semantic browser inspection, stable observation refs, bounded visual probes, protected-input refusal, media status, and browser target reuse. Only the desktop discovery/presentation layer is native X11.
+
+## Supported desktop sessions
+
+| Host session | Status | Notes |
+| --- | --- | --- |
+| KDE Plasma X11 | **Full** | Tested architecture: EWMH virtual desktops with `wmctrl`; no KWin scripting. |
+| GNOME Xorg/X11 | **Conditional** | Works only when the current WM accepts EWMH desktop-count/switch operations. |
+| Xfce, Cinnamon, MATE, LXQt, i3 and other EWMH X11 WMs | **Conditional** | Runtime-smoked through `wmctrl`. |
+| KDE Plasma Wayland | **Unsupported** | Needs a future KDE/Wayland-native provider. |
+| GNOME Wayland | **Unsupported** | Needs a future GNOME-native provider. |
+| Other Wayland compositors | **Unsupported by this provider** | FRIDAY does not silently fall back to Sway/VNC. |
+
+If the session is unsupported, setup fails clearly instead of pretending that a hidden screen is a visible desktop.
+
+## Browser state
+
+FRIDAY launches the user's chosen Chromium-family browser (Brave, Chrome, or Chromium) with one **dedicated persistent FRIDAY browser profile**. The profile is shared by every FRIDAY virtual desktop and survives FRIDAY/browser restarts.
+
+You sign into this FRIDAY browser profile **once**. You do not sign in again when an Agent opens another desktop or starts another task.
+
+The profile is deliberately separate from an already-running Human Chrome/Brave user-data directory. Chromium-family browsers lock an active profile and opening the same live profile from a second CDP-controlled process risks corruption. The setup helper prefers the OS default browser; set `FRIDAY_COMPUTER_BROWSER_BIN` to override it, for example:
 
 ```bash
-sudo apt update
-sudo apt install sway chromium pipewire wireplumber
+FRIDAY_COMPUTER_BROWSER_BIN=google-chrome-stable scripts/setup-linux-computer.sh native
 ```
 
-The setup helper auto-detects `chromium`, `chromium-browser`, `google-chrome-stable`, or `google-chrome`. When Ubuntu's Chromium Snap is detected, the default FRIDAY browser profile is placed under `~/snap/chromium/common/friday-computer-profile`, because strict Snap confinement does not grant arbitrary access to hidden directories such as `~/.friday`.
-
-That browser profile is intentionally shared across Agent screens. Separate Agents receive separate Sway outputs/CDP targets and therefore independent visible screens/actions, but they reuse the same provider-owned Chromium profile/context for cache, cookies, authenticated sessions, downloads, and normal browser state. Do not create one Chromium profile per Agent unless a future privacy/isolation policy explicitly requires it; the Phase 5 design is shared account/browser state with independent screen leases.
-
-## Kubuntu/KDE compatibility mode
-
-Kubuntu normally keeps Plasma/KWin as the Human desktop and runs a separate headless Sway compositor for Agent screens. From the FRIDAY repository run:
+or:
 
 ```bash
-scripts/setup-linux-computer.sh compatibility
+FRIDAY_COMPUTER_BROWSER_BIN=brave-browser-stable scripts/setup-linux-computer.sh native
 ```
 
-The helper is user-scoped and does not invoke `sudo`. It:
+The default profile directory is:
 
-- installs the checked-in systemd/Sway files beneath `~/.config`;
-- writes `~/.config/environment.d/60-friday-computer.conf`;
-- publishes the same environment to the current systemd user manager;
-- chooses a Chromium launcher/profile compatible with Ubuntu Snap packaging;
-- enables and starts `friday-computer-headless.service`.
-
-If it reports a missing host package, install that package manually and rerun the helper.
-
-The compatibility compositor intentionally has no Human output inside Sway; the person's normal KDE desktop remains separate. Human takeover of the same physical managed Sway screen therefore remains a managed-session feature.
-
-## Managed Sway session
-
-Managed mode is the target for exact Human + Agent shared-screen behavior. Install the deployment files without replacing the current desktop automatically:
-
-```bash
-scripts/setup-linux-computer.sh managed
+```text
+${FRIDAY_HOME:-$HOME/.friday}/computer/browser-profile
 ```
 
-Then start Sway as the person's desktop compositor:
+## Install
+
+Run setup from the real Human X11 desktop session:
 
 ```bash
-sway -c ~/.config/friday/sway.conf
-```
-
-The config keeps the physical output as Human, creates two headless outputs by default, imports `SWAYSOCK`/`WAYLAND_DISPLAY` into the user manager, and restarts the shared Chromium supervisor. Set `FRIDAY_COMPUTER_AGENT_SCREENS` before running setup to change the count. `FRIDAY_COMPUTER_HUMAN_OUTPUT` can pin a physical output name; `FRIDAY_COMPUTER_AGENT_OUTPUTS` can explicitly classify additional Sway output names as Agent outputs.
-
-Turn Loop gives each concurrently active Agent a distinct Computer owner id. A root Agent profile may pin its configured default screen, while Subagents treat the same profile default as a soft preference and fall back to another free Agent output. This prevents sibling Agents from serializing behind one preferred display while preserving the shared Chromium profile/cache/account state above.
-
-## Manual deployment
-
-If you do not want to use the helper, copy the files yourself:
-
-```bash
-mkdir -p ~/.config/systemd/user ~/.config/friday ~/.config/environment.d
-cp deploy/systemd/friday-computer-browser.service ~/.config/systemd/user/
-cp deploy/systemd/friday-computer-headless.service ~/.config/systemd/user/
-cp deploy/sway/friday.conf ~/.config/friday/sway.conf
-cp deploy/sway/friday-headless.conf ~/.config/friday/sway-headless.conf
-systemctl --user daemon-reload
-```
-
-At minimum the systemd user manager must receive `FRIDAY_COMPUTER_PROVIDER=linux-sway`, `FRIDAY_COMPUTER_SESSION_MODE=compatibility` (for KDE/GNOME/XFCE compatibility mode), and the loopback CDP URL before FRIDAY starts. `scripts/setup-linux-computer.sh` is preferred because it makes those values persistent and handles Chromium launcher/profile differences.
-
-## Real-host smoke check
-
-Run the focused smoke check after setup:
-
-```bash
+sudo apt install wmctrl curl
+scripts/setup-linux-computer.sh native
 scripts/smoke-linux-computer.sh
 ```
 
-A healthy result is:
+The helper:
 
-```text
-PASS: Sway Agent output and loopback Chromium CDP are healthy.
-```
+- requires `XDG_SESSION_TYPE=x11` and a live `DISPLAY`;
+- creates/reuses the configured number of real host virtual desktops;
+- writes `FRIDAY_COMPUTER_PROVIDER=linux-x11` and the Agent desktop indexes;
+- prefers the default Brave/Chrome/Chromium launcher and creates one persistent FRIDAY profile;
+- installs/restarts only `friday-computer-browser.service`;
+- disables/removes the old `friday-computer-headless.service` deployment;
+- stops old `friday-computer-share-*` VNC viewer units;
+- removes previously installed FRIDAY hidden-compositor configuration files from older releases.
 
-The script deliberately does **not** rely on `SWAYSOCK` being present in the interactive shell. In compatibility mode, the headless Sway process publishes its socket to the systemd user manager; the smoke helper reads it there and falls back to discovering the newest live Sway IPC socket under `XDG_RUNTIME_DIR`. Startup is readiness-based rather than process-state-based: after a compositor/browser restart it retries the Sway output probe and Chromium `json/version` endpoint for up to 60 quarter-second attempts by default, so a newly `active` systemd service is not mistaken for a ready browser. Set `FRIDAY_COMPUTER_SMOKE_ATTEMPTS` (1-600) only when a slower host needs a larger or smaller bounded window.
+The setup never broad-kills the user's normal browser, KDE, or unrelated applications.
 
-For manual inspection use:
+Set the number of FRIDAY desktops before setup if more than one concurrent Agent desktop is desired:
 
 ```bash
-systemctl --user status friday-computer-headless.service
+FRIDAY_COMPUTER_AGENT_SCREENS=2 scripts/setup-linux-computer.sh native
+```
+
+All of those desktops still share the same persistent FRIDAY browser profile.
+
+## Approval/retry behavior
+
+A routine visible Computer task requests one `computer.task.control` approval. That grant is scoped to the principal, the stable admitted turn or durable Session Job, the Computer node, and the target desktop. If Telegram durable delivery retries the **same** admitted message, a new Agent run/screen lease does not generate another routine control approval.
+
+High-impact browser actions and protected credentials remain separately gated.
+
+Managed process cleanup uses Execution's run-scoped `closeRun(runId)` API, which remains valid after the Agent's async-local execution context has unwound. A successful browser action must not be converted into a failed channel delivery merely because post-run process cleanup happens after the Agent context closes.
+
+## Browser target lifecycle
+
+Normal navigation reuses one FRIDAY-owned browser target per Agent desktop. A new tab/window is created only when explicitly requested or when no healthy FRIDAY target exists. Stale FRIDAY-owned pages are pruned without killing the shared browser supervisor/profile.
+
+Media observations preserve bounded audio/video state such as `playing`, `paused`, `currentTime`, `muted`, and `volume`, so a status question can distinguish a YouTube search page from actual playback.
+
+## Security boundary
+
+Run FRIDAY and the browser as the ordinary user, never root. CDP remains loopback-only. Provider observations redact secrets, passwords, OTPs, tokens, PINs, CAPTCHA/challenge content, sensitive URL parameters, and protected input values before model exposure. Protected input continues to require Human takeover.
+
+The native provider does not inject KWin JavaScript. On X11 it uses standard EWMH operations (`wmctrl`) to discover/create/switch virtual desktops. To reduce KWin instability, FRIDAY creates a new browser window while the Agent desktop is active rather than moving an already-created window across Plasma desktops; it then restores the Human's previous desktop.
+
+## Smoke and diagnostics
+
+A healthy smoke result is:
+
+```text
+PASS: native X11 virtual desktops and loopback browser CDP are healthy.
+AGENT_DESKTOPS=1
+PRESENTATION=native-x11
+```
+
+Useful checks:
+
+```bash
+wmctrl -d
 systemctl --user status friday-computer-browser.service
-systemctl --user show-environment | grep -E '^(SWAYSOCK|WAYLAND_DISPLAY|FRIDAY_COMPUTER_)='
+systemctl --user show-environment | grep -E '^(FRIDAY_COMPUTER_|DISPLAY|XAUTHORITY|XDG_SESSION_TYPE)='
 curl --fail --silent http://127.0.0.1:9222/json/version
 ```
 
-A bare `swaymsg -t get_outputs -r` from an existing KDE terminal can fail with `Unable to retrieve socket path` even when compatibility-mode Sway is healthy, because environment changes made inside the headless compositor cannot be injected back into an already-running shell. Use `scripts/smoke-linux-computer.sh` or pass the socket explicitly with `swaymsg -s /path/to/sway-ipc.sock ...`.
-
-## Real Chromium action conformance
-
-After the host smoke passes, run the provider against the real shared Chromium instance:
+Retired compatibility services from older releases should be absent/inactive after setup:
 
 ```bash
-npx tsx scripts/conformance-linux-computer.ts
+systemctl --user status friday-computer-headless.service || true
+systemctl --user list-units 'friday-computer-share-*' --all --no-pager
 ```
 
-The conformance runner imports only the Computer-related variables published by the systemd user manager, starts a loopback-only synthetic page, and drives the real provider through navigation, CDP mouse click, non-secret text input, an Enter key press, click navigation, provider observation redaction, and DOM-discovered password-field refusal. It never submits a real credential or reaches an external website.
+## Browser login bootstrap
 
-A healthy result ends with:
-
-```text
-PASS: real Chromium CDP navigate/click/type/press and provider safety conformance are healthy.
-```
-
-If this fails while `scripts/smoke-linux-computer.sh` passes, inspect the error as a browser-action/provider problem rather than a deployment/socket problem.
-
-The canonical Doctor surface remains useful after the host smoke passes:
-
-```bash
-FRIDAY_COMPUTER_PROVIDER=linux-sway npm run friday -- doctor
-```
-
-When running Doctor manually from a shell that predates setup, remember that the shell may not contain the new `FRIDAY_COMPUTER_*` variables yet. A new login session will receive `~/.config/environment.d/60-friday-computer.conf`; the long-running `friday` user service receives the variables directly from the user manager without requiring a logout.
-
-## Troubleshooting
-
-If the smoke check fails, inspect the user journal before changing provider code:
-
-```bash
-journalctl --user -u friday-computer-headless.service -n 100 --no-pager
-journalctl --user -u friday-computer-browser.service -n 100 --no-pager
-```
-
-`Chromium CDP browser supervisor is unavailable on loopback` means the browser process is not listening on the configured loopback port. On Ubuntu/Kubuntu, first verify `command -v chromium-browser` and `snap list chromium`. The checked-in browser unit no longer hard-codes a `chromium` executable; it auto-detects supported launchers and uses a Snap-writable profile when necessary.
-
-`Sway session is unavailable: ... Unable to retrieve socket path` means either the headless service is not running or the caller did not know its socket. `scripts/smoke-linux-computer.sh` distinguishes those cases by checking the user-manager environment and runtime sockets directly.
-
-If compatibility-mode journals show an Xwayland `/tmp/.X11-unix/X0` collision with KDE or `swaybg` warnings for `HEADLESS-*`, rerun `scripts/setup-linux-computer.sh compatibility` so the current checked-in headless config disables Xwayland and applies an explicit synthetic-output background. The browser unit also avoids shell parameter-expansion syntax that systemd can misinterpret as an environment-variable name.
-
-## Raspberry Pi 4
-
-Use Raspberry Pi OS 64-bit or another Debian-family 64-bit image, run all components directly on the host, and do not create a VM/container per Agent. A USB SSD is recommended for the browser profile and model workspace. The adapter is architecture-neutral TypeScript/Node code; tune Pi-specific resource thresholds and optional media accelerators to the hardware during deployment validation.
-
-## Current Phase 5 boundary
-
-Implemented so far:
-
-- built-in opt-in `linux-sway` Computer adapter;
-- Sway physical/headless output discovery and per-screen Chromium CDP target allocation;
-- shared persistent FRIDAY Chromium profile;
-- per-Agent screen leases/targets with soft Subagent fallback from a shared profile's preferred screen;
-- CPU/RAM/renderer admission telemetry;
-- bounded semantic DOM observations with observation-scoped refs, confidence, geometry, and structural deltas;
-- stale-ref/semantic-drift revalidation plus obscured/high-impact action gating;
-- bounded CDP micro-vision probes with protected-region refusal and one-use confirmation tokens;
-- model-capability-aware visual probing: text-only models are kept on structured/text verification and image crops are rejected unless the active model accepts image input;
-- provider-side observation redaction and protected-input refusal;
-- real CDP mouse/key browser input with action settle/readiness checks;
-- provider-specific Computer Doctor details plus canonical `friday doctor` integration;
-- managed-session and KDE/GNOME/XFCE compatibility deployment;
-- idempotent user-scoped setup plus a real-host smoke command that discovers compatibility-mode Sway sockets;
-- Ubuntu/Kubuntu Chromium Snap-aware launcher/profile handling.
-- real-host Chromium action/safety conformance against a loopback-only synthetic page.
-
-Phase 5 implementation is complete in the repository. Remaining work is host validation rather than a new core authority: run the smoke and real-Chromium conformance commands on the target Raspberry Pi 4, and enable optional Playwright/AT-SPI/PipeWire/WebRTC adapters when those host packages are installed. The mandatory CDP, structured observation/ref safety, bounded visual-probe policy, redaction, lease/generation, execution delegation, run-scoped cleanup, deployment, and lifecycle paths are covered by checked-in tests; the real-host conformance runner continues to validate the baseline CDP action/redaction path against loopback Chromium.
+On the first native FRIDAY browser task, switch to the FRIDAY virtual desktop and sign into the sites you want the Agent to use. That login persists in the FRIDAY profile for later tasks and for every FRIDAY virtual desktop. This is a one-time profile setup, not a per-desktop login requirement.

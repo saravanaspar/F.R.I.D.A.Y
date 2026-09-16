@@ -424,8 +424,7 @@ describe("Turn Loop detached session jobs", () => {
       expect(observationCount).toBe(2);
       expect(faux.state.callCount).toBe(3);
       expect(authorization.map((request) => ({ id: request.action.id, jobId: request.jobId }))).toEqual([
-        { id: "computer.observe", jobId: "job-login-takeover" },
-        { id: "computer.browser.action", jobId: "job-login-takeover" },
+        { id: "computer.task.control", jobId: "job-login-takeover" },
       ]);
       expect(JSON.stringify(jobs.get("job-login-takeover"))).not.toContain(secretEnteredByHuman);
       expect(replies.join("\n")).not.toContain(secretEnteredByHuman);

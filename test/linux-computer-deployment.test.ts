@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -25,23 +24,25 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-describe("Phase 5 Linux Computer deployment", () => {
-  it("installs compatibility-mode user units with Ubuntu Chromium Snap-safe defaults", async () => {
-    const root = await temp("friday-linux-computer-setup-");
+describe("native Linux Computer deployment", () => {
+  it("installs real X11 virtual-desktop control, selects the default Brave browser, and purges the retired hidden-compositor deployment", async () => {
+    const root = await temp("friday-linux-x11-setup-");
     const home = join(root, "home");
     const bin = join(root, "bin");
     const systemctlLog = join(root, "systemctl.log");
+    const desktopCount = join(root, "desktop-count");
     await mkdir(home, { recursive: true });
     await mkdir(bin, { recursive: true });
+    await writeFile(desktopCount, "1\n");
 
     await stub(bin, "systemctl", 'printf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n');
-    await stub(bin, "sway");
-    await stub(bin, "swaymsg");
     await stub(bin, "curl");
-    await stub(bin, "chromium-browser");
-    await stub(bin, "snap", 'if [ "$1" = "list" ] && [ "$2" = "chromium" ]; then exit 0; fi\nexit 1\n');
+    await stub(bin, "xdg-settings", 'printf "com.brave.Browser.desktop\\n"\n');
+    await stub(bin, "brave-browser-stable");
+    await stub(bin, "sleep");
+    await stub(bin, "wmctrl", `if [ "$1" = "-n" ]; then printf "%s\\n" "$2" > "$DESKTOP_COUNT"; exit 0; fi\nif [ "$1" = "-d" ]; then count=$(cat "$DESKTOP_COUNT"); i=0; while [ "$i" -lt "$count" ]; do mark=-; [ "$i" -eq 0 ] && mark='*'; printf "%s %s DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 Desktop %s\\n" "$i" "$mark" "$((i + 1))"; i=$((i + 1)); done; exit 0; fi\nexit 1\n`);
 
-    const result = await execFileAsync("sh", ["scripts/setup-linux-computer.sh", "compatibility"], {
+    const result = await execFileAsync("sh", ["scripts/setup-linux-computer.sh", "native"], {
       cwd: process.cwd(),
       env: {
         ...process.env,
@@ -49,157 +50,103 @@ describe("Phase 5 Linux Computer deployment", () => {
         FRIDAY_HOME: join(home, ".friday"),
         PATH: `${bin}:/usr/bin:/bin`,
         SYSTEMCTL_LOG: systemctlLog,
-        FRIDAY_CHROMIUM_BIN: "chromium-browser",
-        // Do not inherit a real host profile path. This test verifies the
-        // Snap-aware default derived from the temporary HOME above.
+        DESKTOP_COUNT: desktopCount,
+        XDG_SESSION_TYPE: "x11",
+        XDG_CURRENT_DESKTOP: "KDE",
+        DISPLAY: ":0",
+        XAUTHORITY: join(home, ".Xauthority"),
         FRIDAY_COMPUTER_BROWSER_PROFILE_DIR: "",
+        FRIDAY_COMPUTER_BROWSER_BIN: "",
+        FRIDAY_CHROMIUM_BIN: "",
       },
     });
 
-    expect(result.stdout).toContain("compatibility mode is installed and started");
+    expect(result.stdout).toContain("Native X11 Computer is installed and started.");
+    expect(result.stdout).toContain("Retired hidden-compositor/viewer services and configs were removed");
+    expect(result.stdout).toContain("Sign into the FRIDAY browser profile once");
     const environment = await readFile(join(home, ".config", "environment.d", "60-friday-computer.conf"), "utf8");
-    expect(environment).toContain("FRIDAY_COMPUTER_SESSION_MODE=compatibility");
-    expect(environment).toContain("FRIDAY_CHROMIUM_BIN=chromium-browser");
-    expect(environment).toContain(`FRIDAY_COMPUTER_BROWSER_PROFILE_DIR=${join(home, "snap", "chromium", "common", "friday-computer-profile")}`);
-    expect(await readFile(join(home, ".config", "systemd", "user", "friday-computer-headless.service"), "utf8")).toContain("WLR_BACKENDS=headless");
+    expect(environment).toContain("FRIDAY_COMPUTER_PROVIDER=linux-x11");
+    expect(environment).toContain("FRIDAY_COMPUTER_SESSION_MODE=native-x11");
+    expect(environment).toContain("FRIDAY_COMPUTER_X11_AGENT_DESKTOPS=1");
+    expect(environment).toContain("FRIDAY_COMPUTER_BROWSER_BIN=brave-browser-stable");
+    expect(environment).toContain(`FRIDAY_COMPUTER_BROWSER_PROFILE_DIR=${join(home, ".friday", "computer", "browser-profile")}`);
 
     const calls = await readFile(systemctlLog, "utf8");
-    expect(calls).toContain("--user daemon-reload");
-    expect(calls).toContain("--user set-environment");
-    expect(calls).toContain("--user enable --now friday-computer-headless.service");
+    expect(calls).toContain("--user disable --now friday-computer-headless.service");
+    expect(calls).toContain("--user enable --now friday-computer-browser.service");
+    await expect(readFile(join(home, ".config", "systemd", "user", "friday-computer-headless.service"), "utf8")).rejects.toThrow();
   });
 
-  it("smokes the compatibility compositor through the systemd-published Sway socket and waits for CDP readiness", async () => {
-    const root = await temp("friday-linux-computer-smoke-");
+  it("smokes native X11 desktop discovery and waits for loopback CDP readiness", async () => {
+    const root = await temp("friday-linux-x11-smoke-");
     const bin = join(root, "bin");
-    const socketPath = join(root, "sway-ipc.test.sock");
     const curlCountFile = join(root, "curl-count");
     await mkdir(bin, { recursive: true });
+    await stub(bin, "systemctl", 'if [ "$1" = "--user" ] && [ "$2" = "show-environment" ]; then printf "FRIDAY_COMPUTER_PROVIDER=linux-x11\\nFRIDAY_COMPUTER_X11_AGENT_DESKTOPS=1\\nFRIDAY_COMPUTER_CDP_URL=http://127.0.0.1:9222/\\nXDG_SESSION_TYPE=x11\\n"; fi\n');
+    await stub(bin, "wmctrl", 'if [ "$1" = "-d" ]; then printf "0 * DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 Desktop 1\\n1 - DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 FRIDAY\\n"; exit 0; fi\nexit 1\n');
+    await stub(bin, "sleep");
+    await stub(bin, "curl", 'count=0\n[ -f "$CURL_COUNT_FILE" ] && count=$(cat "$CURL_COUNT_FILE")\ncount=$((count + 1))\nprintf "%s\\n" "$count" > "$CURL_COUNT_FILE"\n[ "$count" -lt 3 ] && exit 7\nprintf "{\\"Browser\\":\\"Brave\\"}\\n"\n');
 
-    const server = createServer();
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(socketPath, resolve);
+    const result = await execFileAsync("sh", ["scripts/smoke-linux-computer.sh"], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PATH: `${bin}:/usr/bin:/bin`,
+        CURL_COUNT_FILE: curlCountFile,
+        FRIDAY_COMPUTER_PROVIDER: "",
+        FRIDAY_COMPUTER_X11_AGENT_DESKTOPS: "",
+        FRIDAY_COMPUTER_CDP_URL: "",
+        XDG_SESSION_TYPE: "",
+        FRIDAY_COMPUTER_SMOKE_ATTEMPTS: "4",
+      },
     });
 
-    try {
-      await stub(bin, "systemctl", 'if [ "$1" = "--user" ] && [ "$2" = "show-environment" ]; then printf "SWAYSOCK=%s\\nFRIDAY_COMPUTER_CDP_URL=http://127.0.0.1:9222/\\n" "$SOCKET_PATH"; exit 0; fi\nexit 0\n');
-      await stub(bin, "swaymsg", 'printf "[{\\"name\\":\\"HEADLESS-1\\",\\"active\\":true}]\\n"\n');
-      await stub(bin, "sleep");
-      await stub(bin, "curl", 'count=0\nif [ -f "$CURL_COUNT_FILE" ]; then count=$(cat "$CURL_COUNT_FILE"); fi\ncount=$((count + 1))\nprintf "%s\\n" "$count" > "$CURL_COUNT_FILE"\nif [ "$count" -lt 3 ]; then exit 7; fi\nprintf "{\\"Browser\\":\\"Chromium\\"}\\n"\n');
-
-      const result = await execFileAsync("sh", ["scripts/smoke-linux-computer.sh"], {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          PATH: `${bin}:/usr/bin:/bin`,
-          SOCKET_PATH: socketPath,
-          CURL_COUNT_FILE: curlCountFile,
-          SWAYSOCK: "",
-          FRIDAY_COMPUTER_SWAYSOCK: "",
-          FRIDAY_COMPUTER_CDP_URL: "",
-          FRIDAY_COMPUTER_SMOKE_ATTEMPTS: "4",
-        },
-      });
-
-      expect(result.stdout).toContain("PASS: Sway Agent output and loopback Chromium CDP are healthy.");
-      expect((await readFile(curlCountFile, "utf8")).trim()).toBe("3");
-      expect(result.stdout).toContain(`SWAYSOCK=${socketPath}`);
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
+    expect(result.stdout).toContain("PASS: native X11 virtual desktops and loopback browser CDP are healthy.");
+    expect(result.stdout).toContain("AGENT_DESKTOPS=1");
+    expect(result.stdout).toContain("PRESENTATION=native-x11");
+    expect((await readFile(curlCountFile, "utf8")).trim()).toBe("3");
   });
 
-  it("recovers from a stale systemd-published Sway socket after a compositor restart", async () => {
-    const root = await temp("friday-linux-computer-stale-socket-");
+  it("fails closed on Wayland instead of installing a hidden compositor fallback", async () => {
+    const root = await temp("friday-linux-wayland-setup-");
+    const home = join(root, "home");
     const bin = join(root, "bin");
-    const runtime = join(root, "runtime");
-    const liveSocket = join(runtime, "sway-ipc.1000.2.sock");
-    const staleSocket = join(runtime, "sway-ipc.1000.1.sock");
+    await mkdir(home, { recursive: true });
     await mkdir(bin, { recursive: true });
-    await mkdir(runtime, { recursive: true });
+    for (const command of ["systemctl", "wmctrl", "curl", "xdg-settings"]) await stub(bin, command);
 
-    const server = createServer();
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(liveSocket, resolve);
-    });
-
-    try {
-      await stub(bin, "systemctl", `if [ "$1" = "--user" ] && [ "$2" = "show-environment" ]; then printf "SWAYSOCK=${staleSocket}\\nFRIDAY_COMPUTER_CDP_URL=http://127.0.0.1:9222/\\n"; exit 0; fi\nexit 0\n`);
-      await stub(bin, "swaymsg", 'printf "[{\\"name\\":\\"HEADLESS-1\\",\\"active\\":true}]\\n"\n');
-      await stub(bin, "curl", "exit 0\n");
-      await stub(bin, "sleep");
-
-      const result = await execFileAsync("sh", ["scripts/smoke-linux-computer.sh"], {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          PATH: `${bin}:/usr/bin:/bin`,
-          XDG_RUNTIME_DIR: runtime,
-          SWAYSOCK: "",
-          FRIDAY_COMPUTER_SWAYSOCK: "",
-          FRIDAY_COMPUTER_CDP_URL: "",
-          FRIDAY_COMPUTER_SMOKE_ATTEMPTS: "2",
-        },
-      });
-
-      expect(result.stdout).toContain(`SWAYSOCK=${liveSocket}`);
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
+    await expect(execFileAsync("sh", ["scripts/setup-linux-computer.sh", "native"], {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: home, PATH: `${bin}:/usr/bin:/bin`, XDG_SESSION_TYPE: "wayland", DISPLAY: ":0" },
+    })).rejects.toMatchObject({ stderr: expect.stringContaining("No hidden-compositor/viewer fallback will be installed") });
   });
 
-  it("fails closed when Chromium never reaches CDP readiness", async () => {
-    const root = await temp("friday-linux-computer-cdp-timeout-");
-    const bin = join(root, "bin");
-    const socketPath = join(root, "sway-ipc.test.sock");
-    await mkdir(bin, { recursive: true });
+  it("does not ship retired hidden-compositor/viewer runtime artifacts", async () => {
+    const retired = [
+      "deploy/systemd/friday-computer-headless.service",
+      "deploy/sway/friday-headless.conf",
+      "deploy/sway/friday.conf",
+      "plugins/computer/providers/linux-shared-screen.ts",
+      "plugins/computer/providers/linux-sway.ts",
+      "test/computer-linux-shared-screen.test.ts",
+      "test/computer-linux-sway.test.ts",
+    ];
+    for (const path of retired) await expect(readFile(path, "utf8")).rejects.toThrow();
 
-    const server = createServer();
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(socketPath, resolve);
-    });
-
-    try {
-      await stub(bin, "systemctl", 'if [ "$1" = "--user" ] && [ "$2" = "show-environment" ]; then printf "SWAYSOCK=%s\\nFRIDAY_COMPUTER_CDP_URL=http://127.0.0.1:9222/\\n" "$SOCKET_PATH"; exit 0; fi\nexit 0\n');
-      await stub(bin, "swaymsg", 'printf "[{\\"name\\":\\"HEADLESS-1\\",\\"active\\":true}]\\n"\n');
-      await stub(bin, "curl", "exit 7\n");
-      await stub(bin, "sleep");
-
-      await expect(execFileAsync("sh", ["scripts/smoke-linux-computer.sh"], {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          PATH: `${bin}:/usr/bin:/bin`,
-          SOCKET_PATH: socketPath,
-          SWAYSOCK: "",
-          FRIDAY_COMPUTER_SWAYSOCK: "",
-          FRIDAY_COMPUTER_CDP_URL: "",
-          FRIDAY_COMPUTER_SMOKE_ATTEMPTS: "3",
-        },
-      })).rejects.toMatchObject({
-        stderr: expect.stringContaining("Chromium CDP did not become reachable"),
-      });
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
+    const providerIndex = await readFile("plugins/computer/providers/index.ts", "utf8");
+    expect(providerIndex).not.toContain("linux-sway");
+    expect(providerIndex).not.toContain("linux-shared-screen");
   });
 
-  it("keeps the browser user unit launcher-agnostic and Snap-aware", async () => {
+  it("launches the persistent browser directly on X11 without a startup viewer window", async () => {
     const unit = await readFile("deploy/systemd/friday-computer-browser.service", "utf8");
-    expect(unit).not.toContain("Environment=FRIDAY_CHROMIUM_BIN=chromium");
-    expect(unit).toContain("chromium-browser");
-    expect(unit).toContain("/snap/bin");
-    expect(unit).toContain("snap list chromium");
+    expect(unit).toContain("FRIDAY_COMPUTER_BROWSER_BIN");
+    expect(unit).toContain("brave-browser-stable");
+    expect(unit).toContain("google-chrome-stable");
+    expect(unit).toContain("--ozone-platform=x11");
+    expect(unit).toContain("--no-startup-window");
     expect(unit).toContain("--remote-debugging-address=127.0.0.1");
-    expect(unit).not.toContain("${path#/snap/bin/}");
-  });
-
-  it("keeps compatibility Sway isolated from the Human desktop Xwayland socket", async () => {
-    const config = await readFile("deploy/sway/friday-headless.conf", "utf8");
-    expect(config).toContain("xwayland disable");
-    expect(config).toContain("output * bg #000000 solid_color");
+    expect(unit).not.toContain("--ozone-platform=wayland");
+    expect(unit).not.toContain("about:blank'");
   });
 });

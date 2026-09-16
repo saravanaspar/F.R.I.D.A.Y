@@ -1,8 +1,8 @@
 import type { ComputerNodeAdapter } from "../contract.js";
-import { createLinuxSwayComputerAdapter, type LinuxSwayComputerAdapterOptions } from "./linux-sway.js";
+import { createLinuxX11ComputerAdapter, type LinuxX11ComputerAdapterOptions } from "./linux-x11.js";
 
 export const COMPUTER_PROVIDER_NONE = "none";
-export const COMPUTER_PROVIDER_LINUX_SWAY = "linux-sway";
+export const COMPUTER_PROVIDER_LINUX_X11 = "linux-x11";
 
 export interface ConfiguredComputerProviderHealth {
   readonly configured: boolean;
@@ -22,14 +22,14 @@ export function configuredComputerProviderId(environment: NodeJS.ProcessEnv = pr
 export function configuredComputerAdapters(
   environment: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
-  options: Pick<LinuxSwayComputerAdapterOptions, "runTool" | "cleanupRunProcesses"> = {},
+  options: Pick<LinuxX11ComputerAdapterOptions, "runTool" | "cleanupRunProcesses"> = {},
 ): readonly ComputerNodeAdapter[] {
   const provider = configuredComputerProviderId(environment);
   if (!provider) return Object.freeze([]);
-  if (provider === COMPUTER_PROVIDER_LINUX_SWAY) {
-    return Object.freeze([createLinuxSwayComputerAdapter({ environment, platform, ...options })]);
+  if (provider === COMPUTER_PROVIDER_LINUX_X11) {
+    return Object.freeze([createLinuxX11ComputerAdapter({ environment, platform, ...options })]);
   }
-  throw new Error(`Computer provider '${provider}' is not registered. Registered providers: ${COMPUTER_PROVIDER_LINUX_SWAY}`);
+  throw new Error(`Computer provider '${provider}' is not registered. Registered providers: ${COMPUTER_PROVIDER_LINUX_X11}`);
 }
 
 export async function inspectConfiguredComputerProvider(
@@ -68,5 +68,5 @@ export async function inspectConfiguredComputerProvider(
   return Object.freeze({ configured: true, provider, status, nodes: adapters.length, issues: Object.freeze(issues.slice(0, 32)) });
 }
 
-export { createHttpCdpClient, createLinuxSwayComputerAdapter } from "./linux-sway.js";
-export type { LinuxCdpClient, LinuxCdpTarget, LinuxSwayComputerAdapterOptions } from "./linux-sway.js";
+export { createHttpCdpClient, createLinuxX11ComputerAdapter } from "./linux-x11.js";
+export type { LinuxCdpClient, LinuxCdpTarget, LinuxX11ComputerAdapterOptions } from "./linux-x11.js";

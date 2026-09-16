@@ -1080,6 +1080,10 @@ describe("native protected-action payloads", () => {
         expect(JSON.parse(String(init?.body))).toMatchObject({ callback_query_id: "callback-1", text: "Approved" });
         return new Response(JSON.stringify({ ok: true, result: true }), { status: 200, headers: { "content-type": "application/json" } });
       }
+      if (method === "deleteMessage") {
+        expect(JSON.parse(String(init?.body))).toMatchObject({ chat_id: 42, message_id: 10 });
+        return new Response(JSON.stringify({ ok: true, result: true }), { status: 200, headers: { "content-type": "application/json" } });
+      }
       throw new Error(`unexpected Telegram method ${method}`);
     });
     vi.stubGlobal("fetch", telegramFetch);
@@ -1094,6 +1098,7 @@ describe("native protected-action payloads", () => {
     while (!delivered && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
     expect(delivered).toBe(true);
     expect(telegramFetch.mock.calls.some(([input]) => String(input).endsWith("/answerCallbackQuery"))).toBe(true);
+    expect(telegramFetch.mock.calls.some(([input]) => String(input).endsWith("/deleteMessage"))).toBe(true);
     await transport.stop();
   });
 });

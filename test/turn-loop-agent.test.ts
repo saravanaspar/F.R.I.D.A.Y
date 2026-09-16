@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -205,6 +205,53 @@ describe("Turn Loop agent executor", () => {
     } finally {
       await executor.dispose();
       faux.unregister();
+    }
+  });
+
+  it("stops a runaway tool loop with a durable user-facing response", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "faux";
+    process.env.FRIDAY_MODEL_ID = "faux-1";
+    const stateDir = tempRoot();
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(sessionsPlugin);
+    await friday.activatePlugin(promptsPlugin);
+    await friday.activatePlugin(modelPlugin);
+    await friday.activatePlugin(agentPlugin);
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
+    let toolCalls = 0;
+    const loopingTool: AgentToolContribution = {
+      id: "test-loop-tool",
+      name: "test_loop_tool",
+      label: "Loop tool",
+      description: "A test tool that always succeeds.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      async execute() { toolCalls += 1; return { output: { ok: true } }; },
+    };
+    const executor = createAgentTurnExecutor({
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: withTestModel(requireCapability(MODEL_CAPABILITY), faux),
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions: requireCapability(SESSIONS_CAPABILITY),
+      tools: { createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService,
+      toolContributions: () => [loopingTool],
+    }, { stateDir, maxToolTurns: 2 });
+    try {
+      faux.setResponses([
+        modelRuntime.fauxAssistantMessage(modelRuntime.fauxToolCall("test_loop_tool", {}), { stopReason: "toolUse" }),
+        modelRuntime.fauxAssistantMessage(modelRuntime.fauxToolCall("test_loop_tool", {}), { stopReason: "toolUse" }),
+        modelRuntime.fauxAssistantMessage("should not be requested"),
+      ]);
+      const result = await executor.execute({ turn: turn("loop-guard", "keep working"), decision: decision("session:new") });
+      expect(result.text).toContain("stopped this task");
+      expect(toolCalls).toBe(2);
+      expect(faux.state.callCount).toBe(2);
+    } finally {
+      await executor.dispose();
+      faux.unregister();
+      await friday.dispose();
     }
   });
 
@@ -1042,19 +1089,49 @@ describe("Turn Loop agent executor", () => {
         render: () => ({ content: "UTILITY PERSONA CONFIG SHOULD REMAIN", authority: "user-config", cache: "stable" }),
       },
     ];
-    const screenRequests: Array<{ ownerId: string; preferredNodeId?: string }> = [];
+    const screenRequests: Array<{ ownerId: string; preferredNodeId?: string; preferredScreenId?: string; preferredScreenMode?: "required" | "soft" }> = [];
     const releases: Array<{ screenLeaseId: string; ownerId: string }> = [];
     const cleanups: string[] = [];
+    const sharedScreens: string[] = [];
+    let statusRefreshes = 0;
+    const computerNodes = () => [{
+      id: "local-linux",
+      label: "Linux Computer",
+      platform: "linux" as const,
+      capabilities: {},
+      admission: {},
+      availability: "online" as const,
+      resources: {},
+      screens: [{ id: "DESKTOP-2", label: "Agent 1", kind: "agent" as const }],
+      browser: {
+        running: true,
+        profileId: "friday-profile",
+        persistentProfile: true,
+        windows: [{ id: "window:video", owner: "friday" as const, screenId: "DESKTOP-2", tabIds: ["video"] }],
+        tabs: [{
+          id: "video",
+          title: "Love Me Like You Do - YouTube",
+          url: "https://www.youtube.com/watch?v=test",
+          active: true,
+          media: { elementCount: 1, playing: true, paused: false, ended: false, currentTime: 42 },
+        }],
+      },
+      registeredAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }];
     const computer = {
-      async waitForScreen(request: { ownerId: string; preferredNodeId?: string }) {
+      async refreshAll() { statusRefreshes += 1; return computerNodes(); },
+      nodes() { return computerNodes(); },
+      async waitForScreen(request: { ownerId: string; preferredNodeId?: string; preferredScreenId?: string; preferredScreenMode?: "required" | "soft" }) {
         screenRequests.push({ ...request });
         const acquiredAt = Date.now();
+        const screenId = request.preferredScreenId ?? "DESKTOP-2";
         return {
           state: "acquired" as const,
           screenLease: {
             id: "utility-screen-lease",
             nodeId: "local-linux",
-            screenId: "agent-screen-2",
+            screenId,
             ownerId: request.ownerId,
             acquiredAt: new Date(acquiredAt).toISOString(),
             expiresAt: new Date(acquiredAt + 60_000).toISOString(),
@@ -1063,7 +1140,7 @@ describe("Turn Loop agent executor", () => {
             id: "utility-control",
             screenLeaseId: "utility-screen-lease",
             nodeId: "local-linux",
-            screenId: "agent-screen-2",
+            screenId,
             holder: "agent" as const,
             holderId: request.ownerId,
             agentOwnerId: request.ownerId,
@@ -1084,13 +1161,17 @@ describe("Turn Loop agent executor", () => {
         return {
           id: screenLeaseId,
           nodeId: "local-linux",
-          screenId: "agent-screen-2",
+          screenId: screenRequests.at(-1)?.preferredScreenId ?? "DESKTOP-2",
           ownerId,
           acquiredAt: new Date(renewedAt).toISOString(),
           expiresAt: new Date(renewedAt + (ttlMs ?? 60_000)).toISOString(),
         };
       },
       controlLease() { return { holder: "agent" } as never; },
+      async openSharedScreen(binding: ComputerExecutionBinding) {
+        sharedScreens.push(binding.screenId);
+        return { nodeId: binding.nodeId, screenId: binding.screenId, workspaceName: `FRIDAY ${binding.screenId}`, backend: "x11-ewmh" as const, viewOnly: false as const, viewerId: `viewer-${binding.screenId}` };
+      },
       async cleanupRunProcesses(binding: ComputerExecutionBinding) { cleanups.push(binding.screenLeaseId); return true; },
       async releaseScreen(screenLeaseId: string, ownerId: string) { releases.push({ screenLeaseId, ownerId }); return true; },
     } as unknown as ComputerService;
@@ -1107,6 +1188,20 @@ describe("Turn Loop agent executor", () => {
     }, { stateDir });
 
     try {
+      const status = await executor.execute({
+        turn: channelTurn("computer-status-u0", "is the song playing?", "spar"),
+        decision: {
+          messageId: "computer-status-u0",
+          destination: { kind: "transient", id: "transient:utility" },
+          execution: { profile: "utility", capabilityProfile: "computer" },
+          confidence: 1,
+        },
+      });
+      expect(status.text).toMatch(/no recent FRIDAY Computer task.*current runtime/i);
+      expect(statusRefreshes).toBe(0);
+      expect(screenRequests).toHaveLength(0);
+      expect(sharedScreens).toEqual([]);
+
       let requestTools: string[] = [];
       let systemPrompt = "";
       faux.setResponses([(context) => {
@@ -1116,7 +1211,7 @@ describe("Turn Loop agent executor", () => {
         return modelRuntime.fauxAssistantMessage("playing Shakaboom");
       }]);
       const result = await executor.execute({
-        turn: turn("computer-u1", "open a new screen and open youtube play shakaboom"),
+        turn: channelTurn("computer-u1", "open a new screen and open youtube play shakaboom", "spar"),
         decision: {
           messageId: "computer-u1",
           destination: { kind: "transient", id: "transient:utility" },
@@ -1127,15 +1222,232 @@ describe("Turn Loop agent executor", () => {
 
       expect(result).toEqual({ text: "playing Shakaboom" });
       expect(requestTools).toEqual(["computer_browser"]);
-      expect(systemPrompt).toContain("COMPUTER SCREEN local-linux:agent-screen-2");
+      expect(systemPrompt).toContain("COMPUTER SCREEN local-linux:DESKTOP-2");
       expect(systemPrompt).toContain("UTILITY PERSONA CONFIG SHOULD REMAIN");
       expect(systemPrompt).not.toContain("UNRELATED HEAVY POLICY");
       expect(systemPrompt).not.toContain("heavy_unrelated_tool");
       expect(screenRequests).toHaveLength(1);
       expect(screenRequests[0]?.preferredNodeId).toBeUndefined();
+      expect(screenRequests[0]?.preferredScreenId).toBeUndefined();
+      expect(screenRequests[0]?.preferredScreenMode).toBeUndefined();
+      expect(sharedScreens).toEqual([]);
       expect(cleanups).toEqual(["utility-screen-lease"]);
       expect(releases).toEqual([{ screenLeaseId: "utility-screen-lease", ownerId: screenRequests[0]!.ownerId }]);
+
+      const afterTaskStatus = await executor.execute({
+        turn: channelTurn("computer-status-u1", "is the song playing?", "spar"),
+        decision: {
+          messageId: "computer-status-u1",
+          destination: { kind: "transient", id: "transient:utility" },
+          execution: { profile: "utility", capabilityProfile: "computer" },
+          confidence: 1,
+        },
+      });
+      expect(afterTaskStatus.text).toMatch(/media is playing.*DESKTOP-2.*Love Me Like You Do/i);
+      expect(statusRefreshes).toBe(1);
+      expect(screenRequests).toHaveLength(1);
+      expect(sharedScreens).toEqual([]);
+
+      const otherPrincipalStatus = await executor.execute({
+        turn: channelTurn("computer-status-other", "is the song playing?", "other-user"),
+        decision: {
+          messageId: "computer-status-other",
+          destination: { kind: "transient", id: "transient:utility" },
+          execution: { profile: "utility", capabilityProfile: "computer" },
+          confidence: 1,
+        },
+      });
+      expect(otherPrincipalStatus.text).toMatch(/no recent FRIDAY Computer task.*current runtime/i);
+      expect(statusRefreshes).toBe(1);
+
+      faux.setResponses([() => modelRuntime.fauxAssistantMessage("background task")]);
+      const background = await executor.execute({
+        turn: channelTurn("computer-u2", "run this headless in the background", "spar"),
+        decision: {
+          messageId: "computer-u2",
+          destination: { kind: "transient", id: "transient:utility" },
+          execution: { profile: "utility", capabilityProfile: "computer" },
+          confidence: 1,
+        },
+      });
+      expect(background).toEqual({ text: "background task" });
+      expect(screenRequests).toHaveLength(2);
+      expect(screenRequests[1]?.preferredScreenId).toBeUndefined();
+      expect(sharedScreens).toEqual([]);
+      expect(readdirSync(join(stateDir, "computer-turns")).filter((name) => name.endsWith(".json"))).toEqual([]);
     } finally {
+      await executor.dispose();
+      faux.unregister();
+      await friday.dispose();
+    }
+  });
+
+  it("does not resume stale Computer turns after restart and cleans only recorded FRIDAY-owned Computer runs", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "faux";
+    process.env.FRIDAY_MODEL_ID = "faux-1";
+    const stateDir = tempRoot();
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(sessionsPlugin);
+    await friday.activatePlugin(promptsPlugin);
+    await friday.activatePlugin(modelPlugin);
+    await friday.activatePlugin(agentPlugin);
+
+    const models = requireCapability(MODEL_CAPABILITY);
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
+    const testModels = withTestModel(models, faux);
+    const tools = {
+      createTool() { throw new Error("not used"); },
+      createAllTools() { return {}; },
+    } as unknown as ToolsService;
+    const toolContribution: AgentToolContribution = {
+      id: "computer-restart-test",
+      sourcePluginId: "computer",
+      name: "computer_browser",
+      label: "Computer browser",
+      description: "Computer-only browser control",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      async execute() { return { output: { ok: true } }; },
+    };
+    const screenRequests: string[] = [];
+    const processCleanups: ComputerExecutionBinding[] = [];
+    const releases: Array<{ screenLeaseId: string; ownerId: string }> = [];
+    let failRunCleanup = true;
+    let closedSharedScreens = 0;
+    const computer = {
+      async waitForScreen(request: { ownerId: string; preferredScreenId?: string }) {
+        screenRequests.push(request.preferredScreenId ?? "");
+        const acquiredAt = Date.now();
+        return {
+          state: "acquired" as const,
+          screenLease: {
+            id: `lease-${screenRequests.length}`,
+            nodeId: "local-linux",
+            screenId: request.preferredScreenId ?? "DESKTOP-2",
+            ownerId: request.ownerId,
+            acquiredAt: new Date(acquiredAt).toISOString(),
+            expiresAt: new Date(acquiredAt + 60_000).toISOString(),
+          },
+          controlLease: {
+            id: `control-${screenRequests.length}`,
+            screenLeaseId: `lease-${screenRequests.length}`,
+            nodeId: "local-linux",
+            screenId: request.preferredScreenId ?? "DESKTOP-2",
+            holder: "agent" as const,
+            holderId: request.ownerId,
+            agentOwnerId: request.ownerId,
+            generation: screenRequests.length,
+            acquiredAt: new Date(acquiredAt).toISOString(),
+            lastActivityAt: new Date(acquiredAt).toISOString(),
+            handBackAfterMs: null,
+            transcriptPolicy: {
+              captureKeystrokes: false as const,
+              captureSecrets: false as const,
+              captureSensitiveScreenshots: false as const,
+            },
+          },
+        };
+      },
+      async renewScreenLease(screenLeaseId: string, ownerId: string, ttlMs?: number) {
+        const renewedAt = Date.now();
+        return {
+          id: screenLeaseId,
+          nodeId: "local-linux",
+          screenId: "DESKTOP-2",
+          ownerId,
+          acquiredAt: new Date(renewedAt).toISOString(),
+          expiresAt: new Date(renewedAt + (ttlMs ?? 60_000)).toISOString(),
+        };
+      },
+      controlLease() { return { holder: "agent" } as never; },
+      async openSharedScreen(binding: ComputerExecutionBinding) {
+        return { nodeId: binding.nodeId, screenId: binding.screenId, workspaceName: `FRIDAY ${binding.screenId}`, backend: "x11-ewmh" as const, viewOnly: false as const, viewerId: `viewer-${binding.screenId}` };
+      },
+      async closeSharedScreens() { closedSharedScreens += 1; return 1; },
+      async cleanupRunProcesses(binding: ComputerExecutionBinding) {
+        processCleanups.push(binding);
+        if (failRunCleanup) throw new Error("simulated Computer cleanup interruption");
+        return true;
+      },
+      async releaseScreen(screenLeaseId: string, ownerId: string) {
+        releases.push({ screenLeaseId, ownerId });
+        return true;
+      },
+    } as unknown as ComputerService;
+    const dependencies = {
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: testModels,
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions: requireCapability(SESSIONS_CAPABILITY),
+      tools,
+      toolContributions: () => [toolContribution],
+      optional: { computer: () => computer },
+    };
+    const computerTurn = turn("computer-restart", "open a visible screen and play youtube");
+    const computerDecision: RoutingDecision = {
+      messageId: "computer-restart",
+      destination: { kind: "transient", id: "transient:utility" },
+      execution: { profile: "utility", capabilityProfile: "computer" },
+      confidence: 1,
+    };
+    let executor = createAgentTurnExecutor(dependencies, { stateDir });
+
+    try {
+      faux.setResponses([modelRuntime.fauxAssistantMessage("started")]);
+      await expect(executor.execute({ turn: computerTurn, decision: computerDecision }))
+        .rejects.toThrow(/simulated Computer cleanup interruption/);
+      expect(screenRequests).toEqual([""]);
+      const markerDir = join(stateDir, "computer-turns");
+      const markers = readdirSync(markerDir).filter((name) => name.endsWith(".json"));
+      expect(markers).toHaveLength(1);
+      expect(JSON.parse(readFileSync(join(markerDir, markers[0]!), "utf8"))).toEqual(expect.objectContaining({
+        status: "active",
+        binding: expect.objectContaining({ screenId: "DESKTOP-2", screenLeaseId: "lease-1" }),
+      }));
+
+      await executor.dispose();
+      failRunCleanup = false;
+      executor = createAgentTurnExecutor(dependencies, { stateDir });
+      let resumedModelCalls = 0;
+      faux.setResponses([() => {
+        resumedModelCalls += 1;
+        return modelRuntime.fauxAssistantMessage("MUST NOT RESUME");
+      }]);
+      const restarted = await executor.execute({ turn: computerTurn, decision: computerDecision });
+      expect(restarted.text).toContain("interrupted by a FRIDAY restart and was not resumed");
+      expect(resumedModelCalls).toBe(0);
+      expect(screenRequests).toEqual([""]);
+      expect(processCleanups.at(-1)).toEqual(expect.objectContaining({ screenLeaseId: "lease-1", screenId: "DESKTOP-2" }));
+
+      failRunCleanup = true;
+      faux.setResponses([modelRuntime.fauxAssistantMessage("started another run")]);
+      const secondTurn = turn("computer-cleanup", "open a visible computer screen");
+      await expect(executor.execute({
+        turn: secondTurn,
+        decision: { ...computerDecision, messageId: "computer-cleanup" },
+      })).rejects.toThrow(/simulated Computer cleanup interruption/);
+      failRunCleanup = false;
+      const modelCallsBeforeCleanup = resumedModelCalls;
+      const cleanupResult = await executor.execute({
+        turn: turn("cleanup-command", "kill any active computer headless uses"),
+        decision: {
+          messageId: "cleanup-command",
+          destination: { kind: "transient", id: "transient:utility" },
+          execution: { profile: "utility", capabilityProfile: "none" },
+          confidence: 1,
+        },
+      });
+      expect(cleanupResult.text).toContain("Stopped 1 recorded FRIDAY-owned Computer run");
+      expect(cleanupResult.text).toContain("Core FRIDAY/plugin processes, the shared browser supervisor, and unrelated applications were not touched");
+      expect(cleanupResult.text).toContain("closed 1 FRIDAY-owned Shared Agent Screen viewer");
+      expect(closedSharedScreens).toBe(1);
+      expect(resumedModelCalls).toBe(modelCallsBeforeCleanup);
+      expect(processCleanups.at(-1)).toEqual(expect.objectContaining({ screenLeaseId: "lease-2", screenId: "DESKTOP-2" }));
+      expect(releases.at(-1)).toEqual(expect.objectContaining({ screenLeaseId: "lease-2" }));
+    } finally {
+      failRunCleanup = false;
       await executor.dispose();
       faux.unregister();
       await friday.dispose();
