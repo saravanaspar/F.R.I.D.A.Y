@@ -280,7 +280,6 @@ const PROBE_REGION_FUNCTION = String.raw`function (input) {
     const rectArea = rect.width * rect.height;
     const directControl = ['input', 'textarea', 'select', 'button', 'a', 'label', 'iframe', 'img', 'canvas'].includes(tag)
       || el.hasAttribute('role') || el.hasAttribute('contenteditable') || el.hasAttribute('aria-label') || el.hasAttribute('title');
-    // Ignore giant layout ancestors so an unrelated password label elsewhere on the page cannot poison a tiny crop.
     if (!directControl && el.children.length > 0 && rectArea > regionArea * 4) continue;
     const signature = [tag, el.getAttribute('type'), el.getAttribute('name'), el.getAttribute('id'), el.getAttribute('class'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder'), el.getAttribute('role'), el.getAttribute('src'), el.getAttribute('title')].filter(Boolean).join(' ');
     const value = String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 512);
@@ -320,7 +319,6 @@ interface OutputGeometry {
   readonly width: number;
   readonly height: number;
   readonly kind: "human" | "agent";
-  /** Zero-based EWMH virtual desktop index for X11 presentation. */
   readonly desktopIndex?: number | undefined;
 }
 
@@ -454,7 +452,6 @@ export interface LinuxX11ComputerAdapterOptions {
   readonly readText?: ((path: string) => Promise<string>) | undefined;
   readonly listDirectory?: ((path: string) => Promise<readonly string[]>) | undefined;
   readonly executable?: ((command: string) => Promise<boolean>) | undefined;
-  /** Optional override used by hosts/tests that provide their own tool facade. */
   readonly runTool?: ((request: import("../contract.js").ComputerNodeToolExecutionRequest) => Promise<import("../contract.js").ComputerToolExecutionResult>) | undefined;
   readonly cleanupRunProcesses?: ((request: import("../contract.js").ComputerRunProcessCleanupRequest) => Promise<void>) | undefined;
   readonly lifecycleCommand?: ((command: string, args: readonly string[], signal?: AbortSignal) => Promise<LinuxCommandResult>) | undefined;
@@ -715,11 +712,6 @@ function parseWmctrlDesktops(
   const seen = new Set<number>();
   for (const line of raw.split(/\r?\n/u)) {
     if (!line.trim()) continue;
-    // wmctrl reports EWMH work-area metadata as either numeric geometry or
-    // `N/A` (notably on current KDE/Plasma sessions). The work area is not
-    // required for FRIDAY's virtual-desktop identity/placement; DG is enough
-    // to describe the screen. Accept both forms instead of treating a valid
-    // Plasma desktop as absent.
     const match = line.match(/^\s*(\d+)\s+([*-])\s+DG:\s*(\d+)x(\d+)\s+VP:\s*(-?\d+),(-?\d+)\s+WA:\s*(?:(-?\d+),(-?\d+)\s+(\d+)x(\d+)|N\/A)\s*(.*)$/u);
     if (!match) continue;
     const desktopIndex = Number(match[1]);
@@ -1084,8 +1076,6 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
       await closeSharedScreens(signal);
       return;
     }
-    // Only remove the FRIDAY-owned browser profile. Never touch the user's OS,
-    // home directory, or unrelated browser profiles.
     const home = resolve(environment.HOME?.trim() || homedir());
     if (browserProfileDirectory === "/" || browserProfileDirectory === home || browserProfileDirectory.length < 8) {
       throw new Error("Refusing to reset an unsafe Linux Computer browser profile path");
@@ -1102,8 +1092,6 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
     if (!result.ok) throw new Error(sanitizeText(result.stderr || "wmctrl could not query virtual desktops", 512));
     return parseWmctrlDesktops(result.stdout, environment);
   }
-
-
 
   async function activeX11Desktop(signal?: AbortSignal): Promise<number> {
     const result = await runCommand("wmctrl", ["-d"], signal);
@@ -1167,7 +1155,6 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
       const existing = targetByScreen.get(screenId);
       if (!existing) targetByScreen.set(screenId, window.id);
       else if (existing !== window.id) {
-        // Close only duplicate windows carrying FRIDAY's explicit ownership marker.
         await runCommand("xdotool", ["windowclose", window.id], signal).catch(() => Object.freeze({ ok: false, stdout: "", stderr: "" }));
       }
     }
@@ -1200,9 +1187,6 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
     const desiredDesktop = x11DesktopIndex(screenId, outputGeometry);
     if (previousDesktop !== desiredDesktop) await switchX11Desktop(desiredDesktop, signal);
     const before = new Set(windows.map((window) => window.id));
-    // Give the new window a unique, local-only title so a Human window opened at
-    // the same moment can never be mistaken for FRIDAY's window. The first real
-    // navigation replaces this harmless data page.
     const launchToken = `FRIDAY-${randomUUID()}`;
     const launchPage = `data:text/html,<title>${launchToken}</title>`;
     try {
@@ -1570,9 +1554,6 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
         await closeUnmappedLegacyTargets(targets, signal);
         return existing;
       }
-      // Do not move an already-mapped X11 window between Plasma desktops.
-      // KWin 6.6.x can crash in the desktop reassignment path; recreate the
-      // FRIDAY-owned target while the desired desktop is active instead.
       await closeOwnedTarget(existing, signal);
       targets = await browserTargets(signal);
     }
@@ -1586,9 +1567,6 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
     const geometry = outputGeometry.get(screenId);
     if (!geometry || geometry.kind !== "agent") throw new Error(`Linux Computer Agent output is unavailable: ${screenId}`);
 
-    // The dedicated FRIDAY browser supervisor owns its page targets. Adopt one
-    // reusable page after a core restart and prune stale FRIDAY-owned pages
-    // instead of accumulating windows across retries/restarts.
     {
       const mapped = new Set(targetByScreen.values());
       const legacy = targets.filter((target) => !mapped.has(target.id) && reusableLegacyTarget(target));
@@ -1697,15 +1675,8 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
     args: readonly unknown[],
     signal?: AbortSignal,
   ): Promise<T | undefined> {
-    const result = await cdp.targetCommand(targetId, "Runtime.callFunctionOn", {
-      functionDeclaration,
-      arguments: args.map((value) => ({ value })),
-      returnByValue: true,
-      awaitPromise: true,
-    }, signal);
-    const exception = cdpExceptionMessage(result);
-    if (exception) throw new Error(`browser page evaluation failed: ${sanitizeText(exception, 256)}`);
-    return cdpResultValue<T>(result);
+    const argsJson = args.map((value) => JSON.stringify(value)).join(",");
+    return evaluateValue<T>(targetId, `(${functionDeclaration})(${argsJson})`, signal);
   }
 
   async function pageUrl(targetId: string, signal?: AbortSignal): Promise<string> {
@@ -2095,7 +2066,7 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
     const previous = observationStateByScreen.get(screenId);
     const observationId = `obs-${++observationSequence}`;
     const [rawSummary, rawUrl, targets, structured] = await Promise.all([
-      rawRequest === undefined ? evaluateValue<string>(targetId, DOM_SUMMARY_EXPRESSION, signal) : Promise.resolve(undefined),
+      evaluateValue<string>(targetId, DOM_SUMMARY_EXPRESSION, signal),
       pageUrl(targetId, signal),
       browserTargets(signal),
       structuredObservation(screenId, targetId, observationId, request, nearSelector, signal),
