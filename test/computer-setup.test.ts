@@ -32,7 +32,7 @@ function desktopOutput(count: number, active = 0): string {
 }
 
 describe("binary-owned Computer setup", () => {
-  it("detects direct Brave and persists shared-profile window mode without a managed profile", async () => {
+  it("defaults new Computer setup to silent managed CDP mode", async () => {
     const { home, fridayHome } = await computerHome("friday-computer-setup-");
     let desktopCount = 1;
     const calls: string[] = [];
@@ -57,20 +57,22 @@ describe("binary-owned Computer setup", () => {
     expect(result).toMatchObject({
       provider: "linux-x11",
       sessionMode: "native-x11",
-      browserMode: "shared",
+      browserMode: "managed-cdp",
       browserBin: "brave-browser-stable",
       agentScreens: 1,
       x11AgentDesktops: [1],
+      cdpUrl: "http://127.0.0.1:9222/",
+      cdpPort: 9222,
+      browserProfileDir: join(fridayHome, "computer", "browser-profile"),
     });
-    expect(result.browserProfileDir).toBeUndefined();
-    expect(result.cdpUrl).toBeUndefined();
     await expect(readRuntimeSettings(fridayHome)).resolves.toMatchObject({ computer: result });
     const persisted = await readFile(join(fridayHome, "runtime.env"), "utf8");
-    expect(persisted).toContain('FRIDAY_COMPUTER_BROWSER_MODE="shared"');
-    expect(persisted).not.toContain("FRIDAY_COMPUTER_BROWSER_PROFILE_DIR");
+    expect(persisted).toContain('FRIDAY_COMPUTER_BROWSER_MODE="managed-cdp"');
+    expect(persisted).toContain('FRIDAY_COMPUTER_BROWSER_PROFILE_DIR=');
     expect(calls).toContain("systemctl --user import-environment DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP");
-    expect(calls).toContain("systemctl --user disable --now friday-computer-browser.service");
-    expect(calls).not.toContain("systemctl --user enable --now friday-computer-browser.service");
+    expect(calls).toContain("systemctl --user enable friday-computer-browser.service");
+    expect(calls).toContain("systemctl --user restart friday-computer-browser.service");
+    expect(calls).not.toContain("systemctl --user disable --now friday-computer-browser.service");
   });
 
   it("migrates legacy desktop ownership while ignoring stale old browser/profile environment", async () => {
@@ -110,7 +112,7 @@ describe("binary-owned Computer setup", () => {
       accessibilityAvailable: () => true,
     });
 
-    expect(result).toMatchObject({ browserMode: "shared", browserBin: "brave-browser-stable", agentScreens: 2, x11AgentDesktops: [1, 2] });
+    expect(result).toMatchObject({ browserMode: "managed-cdp", browserBin: "brave-browser-stable", agentScreens: 2, x11AgentDesktops: [1, 2] });
     expect(result.browserArgs).toBeUndefined();
     expect(calls.some((call) => call.startsWith("wmctrl -n "))).toBe(false);
     expect(calls.some((call) => call.startsWith("systemctl --user unset-environment "))).toBe(true);

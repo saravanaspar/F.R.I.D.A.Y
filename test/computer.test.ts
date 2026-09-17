@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { collectContributions, definePlugin, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import { createComputerPlugin, createComputerService } from "../plugins/computer/index.js";
@@ -72,6 +75,7 @@ function fakeAdapter(overrides: Partial<ComputerNodeAdapter> = {}): ComputerNode
   cleanupRequests: ComputerRunProcessCleanupRequest[];
   observations: number;
   armHighImpactBrowserGate(): void;
+  armLowConfidenceBrowserGate(): void;
   lifecycle: { restarts: number; updates: number; resets: number };
 } {
   let snapshotValue = healthySnapshot();
@@ -79,7 +83,7 @@ function fakeAdapter(overrides: Partial<ComputerNodeAdapter> = {}): ComputerNode
   const toolRequests: ComputerNodeToolExecutionRequest[] = [];
   const cleanupRequests: ComputerRunProcessCleanupRequest[] = [];
   let observations = 0;
-  let highImpactBrowserGate = false;
+  let browserGateReason: "high-impact-action" | "low-confidence" | undefined;
   const lifecycle = { restarts: 0, updates: 0, resets: 0 };
   const adapter: ComputerNodeAdapter & {
     setSnapshot(value: ComputerNodeRuntimeSnapshot): void;
@@ -88,6 +92,7 @@ function fakeAdapter(overrides: Partial<ComputerNodeAdapter> = {}): ComputerNode
     cleanupRequests: ComputerRunProcessCleanupRequest[];
     observations: number;
     armHighImpactBrowserGate(): void;
+    armLowConfidenceBrowserGate(): void;
     lifecycle: { restarts: number; updates: number; resets: number };
   } = {
     descriptor: Object.freeze({
@@ -123,16 +128,20 @@ function fakeAdapter(overrides: Partial<ComputerNodeAdapter> = {}): ComputerNode
     async cleanupRunProcesses(request) { cleanupRequests.push(request); },
     async runBrowserAction(request) {
       browserRequests.push(request);
-      if (highImpactBrowserGate && request.action.kind === "click" && !request.action.visualProbeToken) {
+      if (browserGateReason && request.action.kind === "click" && !request.action.visualProbeToken) {
         return {
           mode: "cdp" as const,
           performed: false,
-          confidence: 0.95,
-          visualProbeRequired: { ref: request.action.target, reason: "high-impact-action" as const, recommendedSize: "small" as const },
+          confidence: browserGateReason === "low-confidence" ? 0.8 : 0.95,
+          visualProbeRequired: {
+            ref: request.action.target,
+            reason: browserGateReason,
+            recommendedSize: browserGateReason === "low-confidence" ? "tiny" as const : "small" as const,
+          },
           observation: observation(request.screenId),
         };
       }
-      if (highImpactBrowserGate && request.action.kind === "click" && request.action.visualProbeToken) highImpactBrowserGate = false;
+      if (browserGateReason && request.action.kind === "click" && request.action.visualProbeToken) browserGateReason = undefined;
       return { mode: request.automationOrder[0]!, observation: observation(request.screenId) };
     },
     async visualProbe(request) {
@@ -158,7 +167,8 @@ function fakeAdapter(overrides: Partial<ComputerNodeAdapter> = {}): ComputerNode
     toolRequests,
     cleanupRequests,
     get observations() { return observations; },
-    armHighImpactBrowserGate() { highImpactBrowserGate = true; },
+    armHighImpactBrowserGate() { browserGateReason = "high-impact-action"; },
+    armLowConfidenceBrowserGate() { browserGateReason = "low-confidence"; },
     lifecycle,
     ...overrides,
   };
@@ -170,8 +180,22 @@ function sequentialIds(): () => string {
   return () => `computer-test-${++value}`;
 }
 
-afterEach(() => {
+let testStateDir: string | undefined;
+let previousStateDir: string | undefined;
+
+beforeEach(async () => {
+  previousStateDir = process.env.FRIDAY_STATE_DIR;
+  testStateDir = await mkdtemp(join(tmpdir(), "friday-computer-test-state-"));
+  process.env.FRIDAY_STATE_DIR = testStateDir;
+});
+
+afterEach(async () => {
   uninstallCapabilityRegistry();
+  if (previousStateDir === undefined) delete process.env.FRIDAY_STATE_DIR;
+  else process.env.FRIDAY_STATE_DIR = previousStateDir;
+  if (testStateDir) await rm(testStateDir, { recursive: true, force: true });
+  testStateDir = undefined;
+  previousStateDir = undefined;
 });
 
 describe("Phase 4 Shared Agent Computer", () => {
@@ -202,6 +226,59 @@ describe("Phase 4 Shared Agent Computer", () => {
       { kind: "type", target: "password", text: "never-log-this", sensitive: true },
     )).rejects.toThrow(/human takeover|protected-credential/);
 
+    await service.close();
+  });
+
+  it("persists concrete Computer admission reasons when a request has to wait", async () => {
+    const published: Array<{ type: string; data: Record<string, string | number | boolean | null> | undefined }> = [];
+    const adapter = fakeAdapter();
+    adapter.setSnapshot(Object.freeze({
+      ...healthySnapshot(),
+      resources: Object.freeze({ ...healthySnapshot().resources, browserRendererCount: 12 }),
+    }));
+    const service = createComputerService({
+      idFactory: sequentialIds(),
+      pollIntervalMs: 60_000,
+      publishEvent(type, _subject, data) { published.push({ type, data }); },
+    });
+    await service.registerNode(adapter);
+
+    const controller = new AbortController();
+    const waiting = service.waitForScreen({ ownerId: "job-waiting-reasons", demand: { browserRenderers: 1 } }, controller.signal);
+    for (let attempt = 0; !published.some((event) => event.type === "computer.admission.waiting") && attempt < 50; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(published.find((event) => event.type === "computer.admission.waiting")?.data).toMatchObject({
+      ownerId: "job-waiting-reasons",
+      code: "WAITING_FOR_COMPUTER",
+      reasons: "browser-renderer-pressure",
+    });
+    controller.abort(new Error("test complete"));
+    await expect(waiting).rejects.toThrow(/test complete/);
+    await service.close();
+  });
+
+  it("publishes the semantic target ref and resulting observation id for browser actions", async () => {
+    const published: Array<{ type: string; data: Record<string, string | number | boolean | null> | undefined }> = [];
+    const service = createComputerService({
+      idFactory: sequentialIds(),
+      publishEvent(type, _subject, data) { published.push({ type, data }); },
+    });
+    await service.registerNode(fakeAdapter());
+    const grant = await service.requestScreen({ ownerId: "job-browser-telemetry" });
+    if (grant.state !== "acquired") throw new Error("expected Computer screen grant");
+
+    await service.runBrowserAction(
+      grant.screenLease.id,
+      grant.screenLease.ownerId,
+      grant.controlLease.generation,
+      { kind: "click", target: "obs-1:e1" },
+    );
+    expect(published.find((event) => event.type === "computer.browser.action-completed")?.data).toMatchObject({
+      action: "click",
+      targetRef: "obs-1:e1",
+      observationId: "obs-1",
+    });
     await service.close();
   });
 
@@ -903,6 +980,26 @@ describe("Phase 4 Shared Agent Computer", () => {
       "computer.browser.high-impact",
     ]);
     expect(adapter.browserRequests.at(-1)?.controlGeneration).toBe(handBack.controlLease.generation);
+
+    const lowConfidenceContext: AgentToolExecutionContext = {
+      ...executionContext,
+      jobId: "job-agent-tools-low-confidence",
+      computerExecution: { ...binding, runId: "run-agent-tools-low-confidence" },
+    };
+    adapter.armLowConfidenceBrowserGate();
+    await expect(browser.execute({ action: "click", target: "obs-1:e1" }, undefined, lowConfidenceContext)).resolves.toMatchObject({
+      output: { performed: false, visualProbeRequired: { reason: "low-confidence", ref: "obs-1:e1" } },
+    });
+    const requestsAfterDeferredClick = adapter.browserRequests.length;
+    await expect(browser.execute({ action: "click", target: "obs-1:e1" }, undefined, lowConfidenceContext))
+      .rejects.toThrow(/VISUAL_PROBE_REQUIRED.*computer_visual_probe|computer_observe/i);
+    expect(adapter.browserRequests).toHaveLength(requestsAfterDeferredClick);
+    await expect(visual.execute({ ref: "obs-1:e1", size: "tiny", return: "text" }, undefined, lowConfidenceContext)).resolves.toMatchObject({
+      output: { probeToken: "probe-test" },
+    });
+    await expect(browser.execute({ action: "click", target: "obs-1:e1", probeToken: "probe-test" }, undefined, lowConfidenceContext)).resolves.toMatchObject({
+      output: { observation: { screenId: "agent-1" } },
+    });
 
     const browserRequestsBeforeSecondTakeover = adapter.browserRequests.length;
     await service.takeOver(grant.screenLease.id, "human:operator", null);

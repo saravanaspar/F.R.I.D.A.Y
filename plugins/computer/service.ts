@@ -1380,7 +1380,7 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         });
         waiters.set(waiterId, waiter);
         signal?.addEventListener("abort", abortListener!, { once: true });
-        publish("computer.admission.waiting", `computer-wait:${waiterId}`, { ownerId: request.ownerId, code: "WAITING_FOR_COMPUTER" });
+        publish("computer.admission.waiting", `computer-wait:${waiterId}`, { ownerId: request.ownerId, code: "WAITING_FOR_COMPUTER", reasons: immediate.reasons.join(",") });
         ensureTimer();
         scheduleDrainWaiters("refresh waiting Computer admission");
       });
@@ -1887,6 +1887,9 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
           performed: normalizedResult.performed ?? true,
           confidence: normalizedResult.confidence ?? null,
           visualProbeRequired: normalizedResult.visualProbeRequired?.reason ?? null,
+          targetRef: "target" in action ? action.target ?? null : null,
+          observationId: normalizedResult.observation.observationId ?? null,
+          probeRef: normalizedResult.visualProbeRequired?.ref ?? null,
           structuralChange: normalizedResult.verification?.structuralChange ?? null,
           urlChanged: normalizedResult.verification?.urlChanged ?? null,
         });

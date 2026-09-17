@@ -177,6 +177,125 @@ function stateRoot(input?: string): string {
   return isAbsolute(configured) ? configured : resolve(configured);
 }
 
+function canonicalComputerUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    url.searchParams.sort();
+    return url.toString();
+  } catch {
+    return value.trim();
+  }
+}
+
+function stableComputerValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableComputerValue);
+  if (!value || typeof value !== "object") return value;
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries(Object.keys(record).sort().map((key) => [key, stableComputerValue(record[key])]));
+}
+
+function computerActionFingerprint(args: unknown): string | undefined {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+  const input = args as Record<string, unknown>;
+  if (typeof input.action !== "string") return undefined;
+  const normalized: Record<string, unknown> = { action: input.action.trim().toLowerCase() };
+  for (const key of ["url", "target", "text", "key", "sensitive", "deltaX", "deltaY"] as const) {
+    const value = input[key];
+    if (value === undefined) continue;
+    if (key === "url" && typeof value === "string") normalized[key] = canonicalComputerUrl(value);
+    else if (key === "target" && typeof value === "string") normalized[key] = value.includes(":") ? value.slice(value.lastIndexOf(":") + 1) : value;
+    else if (key === "key" && typeof value === "string") normalized[key] = value.trim().toLowerCase();
+    else normalized[key] = value;
+  }
+  return createHash("sha256").update(JSON.stringify(stableComputerValue(normalized))).digest("hex");
+}
+
+function toolResultJson(result: Readonly<{ content?: readonly unknown[] }>): Record<string, unknown> | undefined {
+  for (const item of result.content ?? []) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const candidate = item as { type?: unknown; text?: unknown };
+    if (candidate.type !== "text" || typeof candidate.text !== "string") continue;
+    try {
+      const parsed = JSON.parse(candidate.text) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    } catch {
+      // friday-expected-control-flow: non-JSON tool text is not a Computer state payload.
+    }
+  }
+  return undefined;
+}
+
+function computerObservationRecord(payload: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!payload) return undefined;
+  const nested = payload.observation;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) return nested as Record<string, unknown>;
+  if (typeof payload.url === "string" || Array.isArray(payload.tabs) || Array.isArray(payload.elements)) return payload;
+  return undefined;
+}
+
+function computerObservationFingerprint(payload: Record<string, unknown> | undefined): string | undefined {
+  const observation = computerObservationRecord(payload);
+  if (!observation) return undefined;
+  const stable: Record<string, unknown> = {};
+  if (typeof observation.url === "string") stable.url = canonicalComputerUrl(observation.url);
+  if (Array.isArray(observation.tabs)) {
+    stable.tabs = observation.tabs.map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+      const tab = item as Record<string, unknown>;
+      const media = tab.media && typeof tab.media === "object" && !Array.isArray(tab.media)
+        ? tab.media as Record<string, unknown>
+        : undefined;
+      return {
+        ...(typeof tab.url === "string" ? { url: canonicalComputerUrl(tab.url) } : {}),
+        ...(media === undefined ? {} : {
+          media: {
+            ...(typeof media.playing === "boolean" ? { playing: media.playing } : {}),
+            ...(typeof media.paused === "boolean" ? { paused: media.paused } : {}),
+            ...(typeof media.ended === "boolean" ? { ended: media.ended } : {}),
+          },
+        }),
+      };
+    }).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  }
+  if (Array.isArray(observation.elements)) {
+    stable.elements = observation.elements.slice(0, 256).map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+      const element = item as Record<string, unknown>;
+      return {
+        ...(typeof element.role === "string" ? { role: element.role } : {}),
+        ...(typeof element.name === "string" ? { name: element.name } : {}),
+        ...(typeof element.visible === "boolean" ? { visible: element.visible } : {}),
+        ...(typeof element.enabled === "boolean" ? { enabled: element.enabled } : {}),
+        ...(typeof element.selected === "boolean" ? { selected: element.selected } : {}),
+        ...(typeof element.checked === "boolean" ? { checked: element.checked } : {}),
+        ...(typeof element.expanded === "boolean" ? { expanded: element.expanded } : {}),
+        ...(Array.isArray(element.actions) ? { actions: [...element.actions].map(String).sort() } : {}),
+      };
+    }).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  }
+  if (Object.keys(stable).length === 0) return undefined;
+  return createHash("sha256").update(JSON.stringify(stableComputerValue(stable))).digest("hex");
+}
+
+function computerObservationUrl(payload: Record<string, unknown> | undefined): string | undefined {
+  const observation = computerObservationRecord(payload);
+  if (!observation) return undefined;
+  const url = observation.url;
+  return typeof url === "string" ? canonicalComputerUrl(url) : undefined;
+}
+
+function computerActionStateKey(stateFingerprint: string, actionFingerprint: string): string {
+  return createHash("sha256").update(`${stateFingerprint}:${actionFingerprint}`).digest("hex");
+}
+
+function computerBrowserActionPerformed(payload: Record<string, unknown> | undefined): boolean {
+  if (!payload) return false;
+  if (payload.performed === false || payload.resumedAfterHumanTakeover === true) return false;
+  if (payload.visualProbeRequired && typeof payload.visualProbeRequired === "object") return false;
+  return true;
+}
+
 function explicitHeadlessComputerIntent(text: string): boolean {
   const normalized = text.toLowerCase();
   if (/\b(?:not|never|do not|don't)\s+(?:use\s+|run\s+|open\s+)?(?:a\s+)?headless\b/.test(normalized)
@@ -1010,6 +1129,11 @@ export function createAgentTurnExecutor(
       let activeJobId: string | undefined;
       let activeTurnContext: TurnExecutionContext | undefined;
       let activeExtensionContext: AgentToolExecutionContext | undefined;
+      let activeComputerStateFingerprint: string | undefined;
+      let activeComputerCurrentUrl: string | undefined;
+      const activeComputerSeenActionStates = new Set<string>();
+      const activeComputerCompletedNavigations = new Set<string>();
+      let activeComputerNoProgressLoopDetected = false;
 
       const createChildRuntime = async (childOptions: {
         id: string;
@@ -1276,6 +1400,29 @@ export function createAgentTurnExecutor(
             activeToolBatchHadAction = false;
             activeToolBatchMessage = assistantMessage;
           }
+          if (toolCall.name === "computer_browser") {
+            const actionFingerprint = computerActionFingerprint(args);
+            const input = args && typeof args === "object" && !Array.isArray(args) ? args as Record<string, unknown> : undefined;
+            const stateFingerprint = activeComputerStateFingerprint;
+            const requestedUrl = input?.action === "navigate" && typeof input.url === "string" ? canonicalComputerUrl(input.url) : undefined;
+            const repeatedNavigation = actionFingerprint !== undefined
+              && input?.action === "navigate"
+              && activeComputerCompletedNavigations.has(actionFingerprint);
+            const redundantNavigation = requestedUrl !== undefined
+              && activeComputerCurrentUrl !== undefined
+              && requestedUrl === activeComputerCurrentUrl;
+            const repeatedStateAction = actionFingerprint !== undefined
+              && stateFingerprint !== undefined
+              && activeComputerSeenActionStates.has(computerActionStateKey(stateFingerprint, actionFingerprint));
+            if (repeatedNavigation || redundantNavigation || repeatedStateAction) {
+              activeComputerNoProgressLoopDetected = true;
+              return {
+                block: true,
+                reason: "COMPUTER_LOOP_DETECTED: this browser action was already executed from an equivalent observable state or repeats the current navigation. Stop this run instead of repeating work and spending more model tokens.",
+              };
+            }
+          }
+
           if (toolCall.name !== "conditional_hook_invoke") {
             if (handoverPhaseSealed) {
               return { block: true, reason: "A before-handover conditional hook has already been invoked; no further actions are allowed before handing control back" };
@@ -1301,7 +1448,7 @@ export function createAgentTurnExecutor(
           conditionalHookPhaseByCall.set(toolCall.id, requestedPhase);
           return undefined;
         },
-        afterToolCall: async ({ toolCall, isError }) => {
+        afterToolCall: async ({ toolCall, args, result, isError }) => {
           try {
             if (toolCall.name !== "conditional_hook_invoke" && !isError) {
               activeToolBatchHadAction = true;
@@ -1310,12 +1457,35 @@ export function createAgentTurnExecutor(
               && conditionalHookPhaseByCall.get(toolCall.id) === "before-handover") {
               handoverPhaseSealed = true;
             }
+
+            if (!isError && (toolCall.name === "computer_observe" || toolCall.name === "computer_browser")) {
+              const payload = toolResultJson(result);
+              const afterState = computerObservationFingerprint(payload);
+              const observedUrl = computerObservationUrl(payload);
+              if (toolCall.name === "computer_observe") {
+                if (afterState !== undefined) activeComputerStateFingerprint = afterState;
+                if (observedUrl !== undefined) activeComputerCurrentUrl = observedUrl;
+              } else {
+                const actionFingerprint = computerActionFingerprint(args);
+                const input = args && typeof args === "object" && !Array.isArray(args)
+                  ? args as Record<string, unknown>
+                  : undefined;
+                const beforeState = activeComputerStateFingerprint;
+                if (computerBrowserActionPerformed(payload) && actionFingerprint !== undefined) {
+                  if (beforeState !== undefined) activeComputerSeenActionStates.add(computerActionStateKey(beforeState, actionFingerprint));
+                  if (input?.action === "navigate") activeComputerCompletedNavigations.add(actionFingerprint);
+                }
+                if (afterState !== undefined) activeComputerStateFingerprint = afterState;
+                if (observedUrl !== undefined) activeComputerCurrentUrl = observedUrl;
+              }
+            }
             return undefined;
           } finally {
             conditionalHookPhaseByCall.delete(toolCall.id);
           }
         },
         shouldStopAfterTurn: ({ message }) => {
+          if (activeComputerNoProgressLoopDetected) return true;
           if (!message.content.some((item) => item.type === "toolCall")) return false;
           activeRunToolTurns += 1;
           if (activeRunToolTurns < activeRunToolTurnLimit) return false;
@@ -1493,6 +1663,11 @@ export function createAgentTurnExecutor(
           activeRunToolTurns = 0;
           activeRunToolTurnLimitReached = false;
           activeRunToolTurnLimit = computerCapabilityRequested ? maxComputerToolTurns : maxToolTurns;
+          activeComputerStateFingerprint = undefined;
+          activeComputerCurrentUrl = undefined;
+          activeComputerSeenActionStates.clear();
+          activeComputerCompletedNavigations.clear();
+          activeComputerNoProgressLoopDetected = false;
           if (computerCapabilityRequested
             && (profile?.enabledPlugins.length ?? 0) > 0
             && profile?.enabledPlugins.includes("computer") !== true) {
@@ -1801,7 +1976,7 @@ export function createAgentTurnExecutor(
               // which has no assistant text. Let the caller turn that condition into
               // a normal, durable user-facing failure response instead of treating it
               // as an unhandled silent run.
-              if (activeRunToolTurnLimitReached) return "";
+              if (activeRunToolTurnLimitReached || activeComputerNoProgressLoopDetected) return "";
               const finalAssistant = lastAssistant(agent.state.messages);
               if (finalAssistant && (finalAssistant as { stopReason?: string }).stopReason === "error") {
                 throw new Error((finalAssistant as { errorMessage?: string }).errorMessage || agent.state.errorMessage || "Agent model request failed");
@@ -1818,6 +1993,18 @@ export function createAgentTurnExecutor(
                   runId: agentRunId,
                   ownerKind: (runtimeOptions.depth ?? 0) > 0 ? "subagent" : "main-agent",
                   }, executePrompt);
+            if (activeComputerNoProgressLoopDetected) {
+              const loopError = new Error("Computer loop guard detected a repeated action without observable progress");
+              const cleanup = combinedAfterFailure(afterFailureCallbacks);
+              if (cleanup) {
+                await cleanup(loopError).catch((error: unknown) => {
+                  reportOperationalError({ component: "turn-loop", operation: "clean up no-progress Computer run", error });
+                });
+              }
+              return {
+                text: "FRIDAY stopped this Computer task because it repeated an equivalent Computer action without observable progress. The Computer lease was released instead of continuing to spend model tokens.",
+              };
+            }
             if (activeRunToolTurnLimitReached) {
               const limitError = new Error(`Agent stopped after ${activeRunToolTurnLimit} tool turns without producing a final response`);
               const cleanup = combinedAfterFailure(afterFailureCallbacks);

@@ -287,7 +287,7 @@ export async function setupComputer(options: ComputerSetupOptions = {}): Promise
   const migratedScreenCount = migratedDesktopIndexes?.length ?? 1;
   const agentScreens = positiveInteger(options.agentScreens, existing.computer?.agentScreens ?? migratedScreenCount);
   const agentDesktops = await ensureAgentDesktops(agentScreens, migratedDesktopIndexes, run);
-  const browserMode = options.browserMode ?? existing.computer?.browserMode ?? "shared";
+  const browserMode = options.browserMode ?? existing.computer?.browserMode ?? "managed-cdp";
   if (browserMode !== "shared" && browserMode !== "managed-cdp") throw new Error("Computer browser mode must be shared or managed-cdp");
   await removeRetiredComputerArtifacts(home, run);
   const managedProfile = join(fridayHome, "computer", "browser-profile");

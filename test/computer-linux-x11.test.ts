@@ -421,7 +421,7 @@ describe("native Linux/X11 Computer provider", () => {
       query: "Add",
       maxElements: 10,
     });
-    expect(first.domSummary).toBeUndefined();
+    expect(first.domSummary).toContain("token=[REDACTED]");
     expect(first.observationId).toBe("obs-1");
     expect(first.elements).toHaveLength(1);
     expect(first.elements?.[0]).toMatchObject({
@@ -438,6 +438,7 @@ describe("native Linux/X11 Computer provider", () => {
       query: "Add",
       maxElements: 10,
     });
+    expect(second.domSummary).toContain("token=[REDACTED]");
     expect(second.observationId).toBe("obs-2");
     expect(second.elements?.[0]).toMatchObject({ id: "e1", ref: "obs-2:e1" });
     expect(second.delta).toMatchObject({ baseObservationId: "obs-1", retained: 1, added: [], updated: [], removedIds: [] });
@@ -640,11 +641,11 @@ describe("native Linux/X11 Computer provider", () => {
         params: expect.objectContaining({ type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }),
       }),
     ]));
-    const selectorCalls = cdp.calls.filter((call) => call.method === "Runtime.callFunctionOn");
-    expect(selectorCalls.some((call) => String(call.params?.functionDeclaration ?? "").includes("#safe-input"))).toBe(false);
-    expect(selectorCalls.some((call) => String(call.params?.functionDeclaration ?? "").includes("#safe-button"))).toBe(false);
-    expect(selectorCalls.some((call) => (call.params?.arguments as readonly { value?: unknown }[] | undefined)?.some((argument) => argument.value === "#safe-input"))).toBe(true);
-    expect(cdp.calls.some((call) => call.method === "Runtime.evaluate" && String(call.params?.expression ?? "").includes("el.click()"))).toBe(false);
+    expect(cdp.calls.some((call) => call.method === "Runtime.callFunctionOn")).toBe(false);
+    const selectorEvaluations = cdp.calls.filter((call) => call.method === "Runtime.evaluate");
+    expect(selectorEvaluations.some((call) => String(call.params?.expression ?? "").includes("#safe-input"))).toBe(true);
+    expect(selectorEvaluations.some((call) => String(call.params?.expression ?? "").includes("#safe-button"))).toBe(true);
+    expect(selectorEvaluations.some((call) => String(call.params?.expression ?? "").includes("el.click()"))).toBe(false);
   });
 
   it("rejects protected click targets discovered from the live DOM before dispatching mouse input", async () => {
@@ -709,7 +710,8 @@ describe("native Linux/X11 desktop placement", () => {
           return { success: true };
         }
         if (method !== "Target.createTarget") throw new Error(`unexpected browser command ${method}`);
-        expect(activeDesktop).toBe(1);
+        expect(activeDesktop).toBe(0);
+        expect(params).toMatchObject({ background: true });
         targetDesktop = activeDesktop;
         targets.push({ id: "native-tab", title: "", url: "about:blank", type: "page", webSocketDebuggerUrl: "ws://127.0.0.1/devtools/page/native-tab" });
         titles.set("native-tab", "");
@@ -765,6 +767,7 @@ describe("native Linux/X11 desktop placement", () => {
           return { ok: true, stdout: `0 ${activeDesktop === 0 ? "*" : "-"} DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 Desktop 1\n1 ${activeDesktop === 1 ? "*" : "-"} DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 FRIDAY\n`, stderr: "" };
         }
         if (args[0] === "-s") { activeDesktop = Number(args[1]); return { ok: true, stdout: "", stderr: "" }; }
+        if (args[0] === "-ir" && args[2] === "-t") { targetDesktop = Number(args[3]); return { ok: true, stdout: "", stderr: "" }; }
         if (args[0] === "-l") {
           const title = titles.get("native-tab") ?? "";
           return { ok: true, stdout: targets.length > 0 ? `0x01200001 ${targetDesktop} host ${title} - Brave\n` : "", stderr: "" };
@@ -784,9 +787,11 @@ describe("native Linux/X11 desktop placement", () => {
     const view = await adapter.openSharedScreen?.({ screenId: "DESKTOP-2", screenLeaseId: "lease", ownerId: "owner", ownerKind: "main-agent", runId: "run", name: "FRIDAY", switchTo: false });
     expect(view).toMatchObject({ screenId: "DESKTOP-2", backend: "x11-ewmh", viewOnly: false, viewerId: "native-browser:native-tab" });
     expect(activeDesktop).toBe(0);
-    expect(cdpCalls).toContainEqual(expect.objectContaining({ method: "Target.createTarget" }));
+    expect(cdpCalls).toContainEqual(expect.objectContaining({ method: "Target.createTarget", params: expect.objectContaining({ background: true }) }));
     expect(new Set(calls.map((call) => call.command))).toEqual(new Set(["wmctrl"]));
-    expect(calls.filter((call) => call.args[0] === "-s").map((call) => call.args[1])).toEqual(["1", "0"]);
+    expect(calls.filter((call) => call.args[0] === "-s")).toEqual([]);
+    expect(calls).toContainEqual({ command: "wmctrl", args: ["-ir", "0x01200001", "-t", "1"] });
+    expect(activeDesktop).toBe(0);
     await expect(adapter.doctor?.()).resolves.toEqual([]);
   });
 
@@ -820,6 +825,7 @@ describe("native Linux/X11 desktop placement", () => {
       platform: "linux",
       uid: 1000,
       executable: async () => true,
+      async cleanupRunProcesses() {},
       async launchCommand(command, args) {
         launches.push({ command, args });
         const launchUrl = args.at(-1) ?? "";
@@ -849,13 +855,22 @@ describe("native Linux/X11 desktop placement", () => {
           return { ok: true, stdout: args[1] === fridayWindow.id ? `${fridayWindow.title}\n` : `${humanWindow.title}\n`, stderr: "" };
         }
         if (command === "xdotool" && args[0] === "windowactivate") return { ok: true, stdout: "", stderr: "" };
+        if (command === "xdotool" && (args[0] === "key" || args[0] === "type" || args[0] === "click")) return { ok: true, stdout: "", stderr: "" };
         if (command === "xdotool" && args[0] === "windowclose") { closed.push(args[1]!); return { ok: true, stdout: "", stderr: "" }; }
         if (command === "python3" && args[0] === "-c") return { ok: true, stdout: "", stderr: "" };
         if (command === "python3" && args.includes("snapshot")) {
+          const queryIndex = args.indexOf("--query");
+          const query = queryIndex >= 0 ? args[queryIndex + 1] : undefined;
           return { ok: true, stdout: JSON.stringify({
             frameTitle: "FRIDAY Browser",
             url: "https://example.com/account",
-            elements: [{ path: "0/1", role: "button", name: "Continue", context: "Example account", left: 100, top: 100, right: 220, bottom: 140, visible: true, enabled: true, interactive: true, clickable: true, actions: ["click"] }],
+            media: { elementCount: 1, playing: true, paused: false, ended: false },
+            elements: query === "Continue"
+              ? [{ path: "0/1", role: "button", name: "Continue", context: "Example account", left: 100, top: 100, right: 220, bottom: 140, visible: true, enabled: true, interactive: true, clickable: true, actions: ["click"] }]
+              : [
+                { path: "0/1", role: "button", name: "Continue", context: "Example account", left: 100, top: 100, right: 220, bottom: 140, visible: true, enabled: true, interactive: true, clickable: true, actions: ["click"] },
+                { path: "0/2", role: "button", name: "Pause (k)", context: "Video player", left: 300, top: 700, right: 380, bottom: 740, visible: true, enabled: true, interactive: true, clickable: true, actions: ["click"] },
+              ],
           }), stderr: "" };
         }
         if (command === "python3" && args.includes("action")) return { ok: true, stdout: JSON.stringify({ performed: true }), stderr: "" };
@@ -876,10 +891,37 @@ describe("native Linux/X11 desktop placement", () => {
     expect(markers.has(humanWindow.id)).toBe(false);
     expect(fridayWindow.desktop).toBe(1);
     expect(calls).toContainEqual({ command: "wmctrl", args: ["-ir", fridayWindow.id, "-t", "1"] });
+    expect(calls.filter((call) => call.command === "wmctrl" && call.args[0] === "-s")).toEqual([]);
 
-    const observation = await adapter.observeScreen("DESKTOP-2", 1, undefined, { scope: "interactive", maxElements: 10 });
+    const observation = await adapter.observeScreen("DESKTOP-2", 1, undefined, { scope: "interactive", query: "Continue", maxElements: 10 });
     expect(observation.elements?.[0]).toMatchObject({ role: "button", name: "Continue", source: "atspi" });
+    expect(observation.tabs[0]?.media).toMatchObject({ elementCount: 1, playing: true, paused: false, ended: false });
     expect(activeDesktop).toBe(0);
+    await adapter.observeScreen("DESKTOP-2", 1, undefined, { scope: "interactive", maxElements: 10 });
+    await expect(adapter.runBrowserAction?.({
+      screenId: "DESKTOP-2",
+      controlGeneration: 1,
+      action: { kind: "navigate", url: "https://example.com/search?q=music" },
+      automationOrder: ["accessibility"],
+    })).resolves.toMatchObject({ mode: "accessibility", performed: true });
+    expect(activeDesktop).toBe(0);
+    expect(calls.filter((call) => call.command === "wmctrl" && call.args[0] === "-s")).toEqual([]);
+    expect(calls.some((call) => call.command === "xdotool" && call.args[0] === "windowactivate")).toBe(false);
+    const backgroundKeys = calls.filter((call) => call.command === "xdotool" && (call.args[0] === "key" || call.args[0] === "type"));
+    expect(backgroundKeys.length).toBeGreaterThanOrEqual(3);
+    expect(backgroundKeys.every((call) => call.args.includes("--window") && call.args.includes(fridayWindow.id))).toBe(true);
+    const accessibilityCalls = calls.filter((call) => call.command === "python3" && (call.args.includes("snapshot") || call.args.includes("action")));
+    expect(accessibilityCalls.every((call) => !call.args.includes("--active"))).toBe(true);
+
+    await expect(adapter.cleanupRunProcesses?.({
+      screenId: "DESKTOP-2",
+      screenLeaseId: "lease",
+      ownerId: "owner",
+      ownerKind: "main-agent",
+      runId: "run",
+    })).resolves.toBeUndefined();
+    expect(activeDesktop).toBe(0);
+    expect(calls.filter((call) => call.command === "wmctrl" && call.args[0] === "-s")).toEqual([]);
 
     await expect(adapter.closeSharedScreens?.()).resolves.toBe(1);
     expect(closed).toEqual([fridayWindow.id]);
