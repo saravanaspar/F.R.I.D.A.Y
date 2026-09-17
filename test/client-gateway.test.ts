@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
+import { clientRequestSigningPayload, clientWebSocketSigningPayload } from "@friday/client-protocol";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,10 +27,25 @@ import { PluginTestHost } from "./helpers/plugin-host.js";
 import { WebSocket } from "ws";
 import { SESSION_JOBS_CAPABILITY, type SessionJobRecord } from "../plugins/session-jobs/contract.js";
 import { ARTIFACTS_CAPABILITY } from "../plugins/artifacts/contract.js";
+import { PERMISSIONS_CAPABILITY } from "../plugins/permissions/contract.js";
+import { PERMISSIONS_TRUSTED_CAPABILITY } from "../plugins/permissions/trusted-contract.js";
+import { createPermissionsController } from "../plugins/permissions/policy.js";
 
 const execFileAsync = promisify(execFile);
 const roots: string[] = [];
 const originalStateDir = process.env.FRIDAY_STATE_DIR;
+
+function installTestPermissions(stateDir: string): void {
+  const controller = createPermissionsController({ stateDir: join(stateDir, "permissions"), approve: async () => true });
+  provideCapability(PERMISSIONS_CAPABILITY, controller.permissions);
+  provideCapability(PERMISSIONS_TRUSTED_CAPABILITY, controller.trusted);
+}
+
+function signedRequestBody(deviceId: string, challenge: string, path: string, input: Record<string, unknown>, privateKey: KeyObject): Record<string, unknown> {
+  const payload = clientRequestSigningPayload({ challenge, deviceId, method: "POST", path, body: input });
+  const signature = sign(null, Buffer.from(payload), privateKey).toString("base64url");
+  return { ...input, deviceId, challenge, signature };
+}
 
 afterEach(async () => {
   uninstallCapabilityRegistry();
@@ -45,6 +61,7 @@ describe("Phase 1 client gateway", () => {
     process.env.FRIDAY_STATE_DIR = stateDir;
     const host = new PluginTestHost();
     await host.activatePlugin(capabilitiesPlugin);
+    installTestPermissions(stateDir);
     await host.activatePlugin(createEventsPlugin({ autoStartWorker: false }));
     await host.activatePlugin(devicesPlugin);
     await host.activatePlugin(clientsPlugin);
@@ -102,6 +119,7 @@ describe("Phase 1 client gateway", () => {
     process.env.FRIDAY_STATE_DIR = stateDir;
     const host = new PluginTestHost();
     await host.activatePlugin(capabilitiesPlugin);
+    installTestPermissions(stateDir);
     await host.activatePlugin(createEventsPlugin({ autoStartWorker: false }));
     await host.activatePlugin(devicesPlugin);
     await host.activatePlugin(clientsPlugin);
@@ -119,13 +137,13 @@ describe("Phase 1 client gateway", () => {
     expect((await fetch(`${base}/health`)).status).toBe(200);
     const challengeResponse = await fetch(`${base}/v1/auth/challenge`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceId: descriptor.deviceId }) });
     const challenge = await challengeResponse.json() as { challenge: string };
-    const signature = sign(null, Buffer.from(challenge.challenge), keys.privateKey).toString("base64url");
+    const replayBody = { afterSequence: 0 };
     events.publish({ type: "http.before", source: "client-gateway", data: { ok: true } });
-    const replay = await fetch(`${base}/v1/events/replay`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceId: descriptor.deviceId, challenge: challenge.challenge, signature, afterSequence: 0 }) });
+    const replay = await fetch(`${base}/v1/events/replay`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(signedRequestBody(descriptor.deviceId, challenge.challenge, "/v1/events/replay", replayBody, keys.privateKey)) });
     expect((await replay.json() as { events: readonly unknown[] }).events).toHaveLength(1);
 
     const streamChallenge = await devices.issueChallenge(descriptor.deviceId);
-    const streamSignature = sign(null, Buffer.from(streamChallenge.challenge), keys.privateKey).toString("base64url");
+    const streamSignature = sign(null, Buffer.from(clientWebSocketSigningPayload({ challenge: streamChallenge.challenge, deviceId: descriptor.deviceId, afterSequence: 1 })), keys.privateKey).toString("base64url");
     const socket = new WebSocket(`${base.replace("http", "ws")}/v1/stream`);
     const messages: string[] = [];
     await new Promise<void>((resolve, reject) => {
@@ -138,7 +156,7 @@ describe("Phase 1 client gateway", () => {
     const peerPairing = await devices.beginPairing(peer);
     await devices.approvePairing(peerPairing.pairingId);
     const peerChallenge = await devices.issueChallenge(peer.deviceId);
-    const peerSignature = sign(null, Buffer.from(peerChallenge.challenge), peerKeys.privateKey).toString("base64url");
+    const peerSignature = sign(null, Buffer.from(clientWebSocketSigningPayload({ challenge: peerChallenge.challenge, deviceId: peer.deviceId, afterSequence: 0 })), peerKeys.privateKey).toString("base64url");
     const peerSocket = new WebSocket(`${base.replace("http", "ws")}/v1/stream`);
     const peerMessages: string[] = [];
     await new Promise<void>((resolve, reject) => {
@@ -170,6 +188,7 @@ describe("Phase 1 client gateway", () => {
     process.env.FRIDAY_STATE_DIR = stateDir;
     const host = new PluginTestHost();
     await host.activatePlugin(capabilitiesPlugin);
+    installTestPermissions(stateDir);
     await host.activatePlugin(createEventsPlugin({ autoStartWorker: false }));
     await host.activatePlugin(devicesPlugin);
     await host.activatePlugin(agentProfilesPlugin);
@@ -186,8 +205,7 @@ describe("Phase 1 client gateway", () => {
     const base = `http://127.0.0.1:${status.port}`;
     const post = async (path: string, input: Record<string, unknown>) => {
       const challenge = await devices.issueChallenge(descriptor.deviceId);
-      const signature = sign(null, Buffer.from(challenge.challenge), keys.privateKey).toString("base64url");
-      const response = await fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceId: descriptor.deviceId, challenge: challenge.challenge, signature, ...input }) });
+      const response = await fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(signedRequestBody(descriptor.deviceId, challenge.challenge, path, input, keys.privateKey)) });
       expect(response.status).toBeLessThan(400);
       return response.json() as Promise<Record<string, unknown>>;
     };
@@ -223,6 +241,7 @@ describe("Phase 1 client gateway", () => {
 
     const host = new PluginTestHost();
     await host.activatePlugin(capabilitiesPlugin);
+    installTestPermissions(stateDir);
     await host.activatePlugin(createEventsPlugin({ autoStartWorker: false }));
     await host.activatePlugin(devicesPlugin);
     await host.activatePlugin(sessionResourcesPlugin);
@@ -257,11 +276,10 @@ describe("Phase 1 client gateway", () => {
     const base = `http://127.0.0.1:${status.port}`;
     const post = async (path: string, input: Record<string, unknown>) => {
       const challenge = await devices.issueChallenge(descriptor.deviceId);
-      const signature = sign(null, Buffer.from(challenge.challenge), keys.privateKey).toString("base64url");
       const response = await fetch(`${base}${path}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ deviceId: descriptor.deviceId, challenge: challenge.challenge, signature, ...input }),
+        body: JSON.stringify(signedRequestBody(descriptor.deviceId, challenge.challenge, path, input, keys.privateKey)),
       });
       expect(response.status).toBeLessThan(400);
       return response.json() as Promise<Record<string, unknown>>;
@@ -309,7 +327,7 @@ describe("Phase 1 client gateway", () => {
     });
     expect(turnResponse.result).toMatchObject({ status: "completed", sessionId: "phase3-session" });
     expect(submittedTurns).toHaveLength(1);
-    expect(submittedTurns[0]).toMatchObject({ projectId: "atlas", sessionAffinityId: expect.any(String) });
+    expect(submittedTurns[0]).toMatchObject({ projectId: "atlas", sessionAffinityId: expect.any(String), principal: { authority: "channel", channel: "client", accountId: "gateway", senderId: descriptor.deviceId } });
 
     const workspaceResponse = await post("/v1/projects/worktrees/create", { projectId: "atlas", name: "client-slice" });
     const directory = (workspaceResponse.workspace as { directory: string }).directory;
@@ -332,6 +350,7 @@ describe("Phase 1 client gateway", () => {
     process.env.FRIDAY_STATE_DIR = stateDir;
     const host = new PluginTestHost();
     await host.activatePlugin(capabilitiesPlugin);
+    installTestPermissions(stateDir);
     await host.activatePlugin(createEventsPlugin({ autoStartWorker: false }));
     await host.activatePlugin(devicesPlugin);
     const now = new Date().toISOString();
@@ -368,8 +387,7 @@ describe("Phase 1 client gateway", () => {
     const base = `http://127.0.0.1:${status.port}`;
     const post = async (path: string, input: Record<string, unknown>) => {
       const challenge = await devices.issueChallenge(descriptor.deviceId);
-      const signature = sign(null, Buffer.from(challenge.challenge), keys.privateKey).toString("base64url");
-      const response = await fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceId: descriptor.deviceId, challenge: challenge.challenge, signature, ...input }) });
+      const response = await fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(signedRequestBody(descriptor.deviceId, challenge.challenge, path, input, keys.privateKey)) });
       expect(response.status).toBeLessThan(400);
       return response.json() as Promise<Record<string, unknown>>;
     };
@@ -439,6 +457,7 @@ describe("Phase 1 client gateway", () => {
 
     const host = new PluginTestHost();
     await host.activatePlugin(capabilitiesPlugin);
+    installTestPermissions(stateDir);
     await host.activatePlugin(createEventsPlugin({ autoStartWorker: false }));
     await host.activatePlugin(devicesPlugin);
     await host.activatePlugin(createComputerPlugin({ adapters: [adapter], service: { pollIntervalMs: 60_000 } }));
@@ -464,11 +483,10 @@ describe("Phase 1 client gateway", () => {
     const base = `http://127.0.0.1:${status.port}`;
     const call = async (path: string, input: Record<string, unknown>) => {
       const challenge = await devices.issueChallenge(descriptor.deviceId);
-      const signature = sign(null, Buffer.from(challenge.challenge), keys.privateKey).toString("base64url");
       const response = await fetch(`${base}${path}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ deviceId: descriptor.deviceId, challenge: challenge.challenge, signature, ...input }),
+        body: JSON.stringify(signedRequestBody(descriptor.deviceId, challenge.challenge, path, input, keys.privateKey)),
       });
       const payload = await response.json() as Record<string, unknown>;
       return { response, payload };
@@ -520,6 +538,81 @@ describe("Phase 1 client gateway", () => {
       controlLease: { holder: "agent", holderId: "job-client-phase4" },
       observation: { screenId: "agent-1", screenshotArtifactRef: "artifact:client-safe-screen" },
     });
+
+    await gateway.stop();
+    await host.dispose();
+  });
+
+  it("binds signatures to the requested operation and rate-limits challenge admission", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "friday-client-auth-security-"));
+    roots.push(stateDir);
+    process.env.FRIDAY_STATE_DIR = stateDir;
+    const host = new PluginTestHost();
+    await host.activatePlugin(capabilitiesPlugin);
+    installTestPermissions(stateDir);
+    await host.activatePlugin(createEventsPlugin({ autoStartWorker: false }));
+    await host.activatePlugin(devicesPlugin);
+    await host.activatePlugin(clientsPlugin);
+    await host.completePluginBootstrap();
+
+    const devices = requireCapability(DEVICES_CAPABILITY);
+    const gateway = requireCapability(CLIENT_GATEWAY_CAPABILITY);
+    const keys = generateKeyPairSync("ed25519");
+    const descriptor: DeviceDescriptor = { deviceId: "desktop-auth-security", name: "Auth security", type: "test", publicKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString() };
+    const pairing = await devices.beginPairing(descriptor);
+    await devices.approvePairing(pairing.pairingId);
+    const status = await gateway.start({ port: 0 });
+    const base = `http://127.0.0.1:${status.port}`;
+
+    const challengeResponse = await fetch(`${base}/v1/auth/challenge`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceId: descriptor.deviceId }) });
+    const challenge = await challengeResponse.json() as { challenge: string };
+    const wrongPathPayload = clientRequestSigningPayload({ challenge: challenge.challenge, deviceId: descriptor.deviceId, method: "POST", path: "/v1/events/replay", body: {} });
+    const wrongPathSignature = sign(null, Buffer.from(wrongPathPayload), keys.privateKey).toString("base64url");
+    const substituted = await fetch(`${base}/v1/projects/list`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceId: descriptor.deviceId, challenge: challenge.challenge, signature: wrongPathSignature }) });
+    expect(substituted.status).toBeGreaterThanOrEqual(400);
+
+    const statuses: number[] = [];
+    for (let index = 0; index < 31; index += 1) {
+      const response = await fetch(`${base}/v1/auth/challenge`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceId: descriptor.deviceId }) });
+      statuses.push(response.status);
+    }
+    expect(statuses).toContain(429);
+
+    await gateway.stop();
+    await host.dispose();
+  });
+
+  it("denies system-write gateway mutations to read-only paired devices", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "friday-client-read-only-"));
+    roots.push(stateDir);
+    process.env.FRIDAY_STATE_DIR = stateDir;
+    const host = new PluginTestHost();
+    await host.activatePlugin(capabilitiesPlugin);
+    installTestPermissions(stateDir);
+    await host.activatePlugin(createEventsPlugin({ autoStartWorker: false }));
+    await host.activatePlugin(devicesPlugin);
+    await host.activatePlugin(agentProfilesPlugin);
+    await host.activatePlugin(clientsPlugin);
+    await host.completePluginBootstrap();
+
+    const devices = requireCapability(DEVICES_CAPABILITY);
+    const gateway = requireCapability(CLIENT_GATEWAY_CAPABILITY);
+    const keys = generateKeyPairSync("ed25519");
+    const descriptor: DeviceDescriptor = { deviceId: "desktop-read-only", name: "Read only", type: "test", publicKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString() };
+    const pairing = await devices.beginPairing(descriptor);
+    await devices.approvePairing(pairing.pairingId, { role: "read-only" });
+    const status = await gateway.start({ port: 0 });
+    const base = `http://127.0.0.1:${status.port}`;
+    const call = async (path: string, input: Record<string, unknown>) => {
+      const challenge = await devices.issueChallenge(descriptor.deviceId);
+      return fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(signedRequestBody(descriptor.deviceId, challenge.challenge, path, input, keys.privateKey)) });
+    };
+
+    const mutation = await call("/v1/agent-profiles/create", { name: "Must not be created", approvalPolicy: "full" });
+    expect(mutation.status).toBeGreaterThanOrEqual(400);
+    const read = await call("/v1/agent-profiles/list", {});
+    expect(read.status).toBe(200);
+    expect((await read.json() as { profiles: readonly unknown[] }).profiles).toEqual([]);
 
     await gateway.stop();
     await host.dispose();

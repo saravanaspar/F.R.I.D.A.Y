@@ -10,6 +10,8 @@ import { SESSION_JOBS_CAPABILITY } from "../session-jobs/contract.js";
 import { PROJECTS_CAPABILITY } from "../projects/contract.js";
 import { COMPUTER_CAPABILITY } from "../computer/contract.js";
 import { ARTIFACTS_CAPABILITY } from "../artifacts/contract.js";
+import { PERMISSIONS_CAPABILITY } from "../permissions/contract.js";
+import { PERMISSIONS_TRUSTED_CAPABILITY } from "../permissions/trusted-contract.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION } from "../system/contract.js";
 import { CLIENT_GATEWAY_CAPABILITY, type ClientConnection, type ClientConnectInput, type ClientEventMessage, type ClientGatewayListenOptions, type ClientGatewayServerStatus, type ClientGatewayService } from "./contract.js";
 import { startClientTransport, type ClientTransportController } from "./transport.js";
@@ -27,18 +29,31 @@ function eventMessage(event: EventRecord, requestId: string): ClientEventMessage
 
 const clientsPlugin: FridayPlugin = definePlugin({
   id: "clients",
-  requires: [DEVICES_CAPABILITY, EVENTS_CAPABILITY],
+  requires: [DEVICES_CAPABILITY, EVENTS_CAPABILITY, PERMISSIONS_CAPABILITY, PERMISSIONS_TRUSTED_CAPABILITY],
   optional: [AGENT_PROFILES_CAPABILITY, CONVERSATIONS_CAPABILITY, TURN_LOOP_CAPABILITY, SESSION_JOBS_CAPABILITY, PROJECTS_CAPABILITY, COMPUTER_CAPABILITY, ARTIFACTS_CAPABILITY],
   provides: [CLIENT_GATEWAY_CAPABILITY],
 }, (ctx) => {
   const devices = ctx.services.require(DEVICES_CAPABILITY);
   const events = ctx.services.require(EVENTS_CAPABILITY);
-  const connections = new Map<string, { readonly connectionId: string; readonly deviceId: string; readonly connectedAt: string; readonly close: () => void }>();
+  const permissions = ctx.services.require(PERMISSIONS_CAPABILITY);
+  const permissionsTrusted = ctx.services.require(PERMISSIONS_TRUSTED_CAPABILITY);
+  const connections = new Map<string, { readonly connectionId: string; readonly deviceId: string; readonly role: "read-only" | "operator"; readonly connectedAt: string; readonly close: () => void }>();
   let transport: ClientTransportController | undefined;
 
   const service: ClientGatewayService = Object.freeze({
     connect: async (input: ClientConnectInput) => {
-      const device = await devices.authenticate(input.deviceId, input.challenge, input.signature);
+      const device = await devices.authenticate(input.deviceId, input.challenge, input.signature, input.signaturePayload);
+      const identitySelector = { channel: "client", accountId: "gateway", senderId: device.deviceId } as const;
+      const existingIdentity = permissionsTrusted.identities().find((identity) =>
+        identity.channel === identitySelector.channel && identity.accountId === identitySelector.accountId && identity.senderId === identitySelector.senderId
+      );
+      if (!existingIdentity || existingIdentity.role !== device.role) {
+        permissionsTrusted.runAsSystem("client-gateway", () => permissionsTrusted.trustChannelIdentity({
+          ...identitySelector,
+          role: device.role,
+          label: `Paired device: ${device.name}`,
+        }));
+      }
       const connectionId = randomUUID();
       const connectedAt = new Date().toISOString();
       const listeners = new Set<(message: ClientEventMessage) => void>();
@@ -56,7 +71,7 @@ const clientsPlugin: FridayPlugin = definePlugin({
         listeners.clear();
       };
       const connection: ClientConnection = Object.freeze({
-        connectionId, deviceId: device.deviceId, connectedAt,
+        connectionId, deviceId: device.deviceId, role: device.role, connectedAt,
         resume: (afterSequence = 0) => {
           if (closed) throw new Error("client connection is closed");
           if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new Error("afterSequence must be a non-negative integer");
@@ -69,13 +84,13 @@ const clientsPlugin: FridayPlugin = definePlugin({
         },
         close,
       });
-      connections.set(connectionId, { connectionId, deviceId: device.deviceId, connectedAt, close });
+      connections.set(connectionId, { connectionId, deviceId: device.deviceId, role: device.role, connectedAt, close });
       return connection;
     },
-    connections: () => Object.freeze([...connections.values()].map(({ connectionId, deviceId, connectedAt }) => Object.freeze({ connectionId, deviceId, connectedAt }))),
+    connections: () => Object.freeze([...connections.values()].map(({ connectionId, deviceId, role, connectedAt }) => Object.freeze({ connectionId, deviceId, role, connectedAt }))),
     latestSequence: () => events.storageStatus().latestSequence,
     start: async (options: ClientGatewayListenOptions = {}) => {
-      if (!transport) transport = await startClientTransport(service, devices, options, {
+      if (!transport) transport = await startClientTransport(service, devices, permissions, permissionsTrusted, options, {
         agentProfiles: ctx.services.optional(AGENT_PROFILES_CAPABILITY),
         conversations: ctx.services.optional(CONVERSATIONS_CAPABILITY),
         turnRuntime: ctx.services.optional(TURN_LOOP_CAPABILITY),

@@ -255,6 +255,176 @@ describe("Turn Loop agent executor", () => {
     }
   });
 
+  it("terminates a repeated no-progress Computer action without waiting for the generic tool-turn ceiling", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "faux";
+    process.env.FRIDAY_MODEL_ID = "faux-1";
+    const stateDir = tempRoot();
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(sessionsPlugin);
+    await friday.activatePlugin(promptsPlugin);
+    await friday.activatePlugin(modelPlugin);
+    await friday.activatePlugin(agentPlugin);
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
+    let toolCalls = 0;
+    const computerBrowser: AgentToolContribution = {
+      id: "computer-browser",
+      sourcePluginId: "computer",
+      name: "computer_browser",
+      label: "Computer browser",
+      description: "Test Computer browser action.",
+      parameters: {
+        type: "object",
+        properties: { action: { type: "string" }, url: { type: "string" } },
+        required: ["action", "url"],
+        additionalProperties: false,
+      },
+      async execute() {
+        toolCalls += 1;
+        return {
+          output: {
+            mode: "accessibility",
+            performed: true,
+            verification: { structuralChange: false, urlChanged: false },
+            observation: {
+              observedAt: new Date().toISOString(),
+              screenId: "agent-1",
+              observationId: `obs-${toolCalls}`,
+              url: "https://example.com/search?q=music",
+              tabs: [{ id: "tab-1", title: "Search", url: "https://example.com/search?q=music", active: true }],
+              elements: [{
+                id: "e1", ref: `obs-${toolCalls}:e1`, role: "link", name: "First result",
+                bbox: { left: 10, top: 10, right: 100, bottom: 40 },
+                visible: true, enabled: true, focused: false, interactive: true, clickable: true, editable: false,
+                selectable: false, scrollable: false, draggable: false, actions: ["click"], source: "atspi", confidence: 0.95,
+              }],
+              processes: [],
+            },
+          },
+        };
+      },
+    };
+    const executor = createAgentTurnExecutor({
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: withTestModel(requireCapability(MODEL_CAPABILITY), faux),
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions: requireCapability(SESSIONS_CAPABILITY),
+      tools: { createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService,
+      toolContributions: () => [computerBrowser],
+    }, { stateDir, maxToolTurns: 32 });
+    try {
+      const repeated = modelRuntime.fauxToolCall("computer_browser", { action: "navigate", url: "https://example.com/search?q=music" });
+      faux.setResponses([
+        modelRuntime.fauxAssistantMessage(repeated, { stopReason: "toolUse" }),
+        modelRuntime.fauxAssistantMessage(repeated, { stopReason: "toolUse" }),
+        modelRuntime.fauxAssistantMessage(repeated, { stopReason: "toolUse" }),
+        modelRuntime.fauxAssistantMessage("should not be requested"),
+      ]);
+      const result = await executor.execute({ turn: turn("computer-no-progress", "find and play some music"), decision: decision("session:new") });
+      expect(result.text).toContain("repeated an equivalent Computer action without observable progress");
+      expect(toolCalls).toBe(1);
+      expect(faux.state.callCount).toBe(2);
+    } finally {
+      await executor.dispose();
+      faux.unregister();
+      await friday.dispose();
+    }
+  });
+
+
+
+  it("terminates a generic Computer state cycle before repeating an already-executed state/action pair", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "faux";
+    process.env.FRIDAY_MODEL_ID = "faux-1";
+    const stateDir = tempRoot();
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    await friday.activatePlugin(sessionResourcesPlugin);
+    await friday.activatePlugin(sessionsPlugin);
+    await friday.activatePlugin(promptsPlugin);
+    await friday.activatePlugin(modelPlugin);
+    await friday.activatePlugin(agentPlugin);
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
+    let browserCalls = 0;
+    let state = "a";
+    const observation = (label: string) => ({
+      observedAt: new Date().toISOString(),
+      screenId: "agent-1",
+      observationId: `obs-${label}-${browserCalls}`,
+      url: `https://example.com/${label}`,
+      tabs: [{ id: "tab-1", title: `State ${label}`, url: `https://example.com/${label}`, active: true }],
+      elements: [{
+        id: "e1", ref: `obs-${label}-${browserCalls}:e1`, role: "button", name: label === "a" ? "Go forward" : "Go back",
+        bbox: { left: 10, top: 10, right: 100, bottom: 40 }, visible: true, enabled: true, focused: false,
+        interactive: true, clickable: true, editable: false, selectable: false, scrollable: false, draggable: false,
+        actions: ["click"], source: "atspi", confidence: 0.95,
+      }],
+      processes: [],
+    });
+    const observe: AgentToolContribution = {
+      id: "computer-observe",
+      sourcePluginId: "computer",
+      name: "computer_observe",
+      label: "Observe",
+      description: "Observe test state.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      async execute() { return { output: observation(state) }; },
+    };
+    const browser: AgentToolContribution = {
+      id: "computer-browser",
+      sourcePluginId: "computer",
+      name: "computer_browser",
+      label: "Browser",
+      description: "Move between test states.",
+      parameters: {
+        type: "object",
+        properties: { action: { type: "string" }, target: { type: "string" } },
+        required: ["action", "target"],
+        additionalProperties: false,
+      },
+      async execute(input) {
+        browserCalls += 1;
+        state = input.target === "forward" ? "b" : "a";
+        return {
+          output: {
+            mode: "accessibility",
+            performed: true,
+            verification: { structuralChange: true, urlChanged: true },
+            observation: observation(state),
+          },
+        };
+      },
+    };
+    const executor = createAgentTurnExecutor({
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: withTestModel(requireCapability(MODEL_CAPABILITY), faux),
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions: requireCapability(SESSIONS_CAPABILITY),
+      tools: { createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService,
+      toolContributions: () => [observe, browser],
+    }, { stateDir, maxToolTurns: 32 });
+    try {
+      faux.setResponses([
+        modelRuntime.fauxAssistantMessage(modelRuntime.fauxToolCall("computer_observe", {}), { stopReason: "toolUse" }),
+        modelRuntime.fauxAssistantMessage(modelRuntime.fauxToolCall("computer_browser", { action: "click", target: "forward" }), { stopReason: "toolUse" }),
+        modelRuntime.fauxAssistantMessage(modelRuntime.fauxToolCall("computer_browser", { action: "click", target: "back" }), { stopReason: "toolUse" }),
+        modelRuntime.fauxAssistantMessage(modelRuntime.fauxToolCall("computer_browser", { action: "click", target: "forward" }), { stopReason: "toolUse" }),
+        modelRuntime.fauxAssistantMessage("should not be requested"),
+      ]);
+      const result = await executor.execute({ turn: turn("computer-cycle", "do the browser task"), decision: decision("session:new") });
+      expect(result.text).toContain("repeated an equivalent Computer action without observable progress");
+      expect(browserCalls).toBe(2);
+      expect(faux.state.callCount).toBe(4);
+    } finally {
+      await executor.dispose();
+      faux.unregister();
+      await friday.dispose();
+    }
+  });
+
   it("persists routed sessions, reuses live runtimes, and safely evicts/reopens them", async () => {
     process.env.FRIDAY_MODEL_PROVIDER = "faux";
     process.env.FRIDAY_MODEL_ID = "faux-1";
