@@ -14,11 +14,12 @@ const MAX_DEVICES = 64;
 const MAX_PENDING = 16;
 const DEFAULT_TTL_MS = 10 * 60 * 1_000;
 
-function rootDir(): string {
-  const configured = process.env.FRIDAY_HOME?.trim() || process.env.FRIDAY_STATE_DIR?.trim();
+export function getDevicesStateDir(environment: NodeJS.ProcessEnv = process.env): string {
+  const configured = environment.FRIDAY_STATE_DIR?.trim() || environment.FRIDAY_HOME?.trim();
   const root = configured ? (isAbsolute(configured) ? configured : resolve(configured)) : join(homedir(), ".friday");
   return join(root, "devices");
 }
+function rootDir(): string { return getDevicesStateDir(); }
 function pathFor(name: string): string { return join(rootDir(), name); }
 async function privateRoot(create: boolean): Promise<void> {
   const root = rootDir();

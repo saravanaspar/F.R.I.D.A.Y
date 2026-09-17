@@ -84,7 +84,7 @@ Run the focused test set first:
 ```bash
 FRIDAY_HOME=/tmp/friday-focused-home npx vitest run --config vitest.config.ts \
   test/computer.test.ts \
-  test/computer-linux-sway.test.ts \
+  test/computer-linux-x11.test.ts \
   test/linux-computer-deployment.test.ts \
   test/plugin-boundaries.test.ts \
   test/doctor.test.ts \
@@ -442,20 +442,19 @@ Run these tests on Debian/Raspberry Pi OS or Ubuntu/Kubuntu as a normal user, ne
 
 | Action | Steps | Expected result |
 |---|---|---|
-| Compatibility setup | `scripts/setup-linux-computer.sh compatibility` | Installs user units/config under `~/.config`, sets loopback CDP variables, enables headless Sway, and prints the smoke command. |
-| Managed setup | `scripts/setup-linux-computer.sh managed` | Installs files but does not replace the current desktop; prints the Sway command. |
+| Native X11 setup | `scripts/setup-linux-computer.sh native` | Creates/reuses FRIDAY X11 virtual desktops, configures loopback CDP, installs the persistent Brave/Chrome/Chromium supervisor, and purges retired hidden-compositor/viewer artifacts. |
 | Invalid setup mode | `scripts/setup-linux-computer.sh invalid` | Exit 2 with usage; no files changed. |
-| Smoke | `scripts/smoke-linux-computer.sh` | Prints `PASS: Sway Agent output and loopback Chromium CDP are healthy.` plus socket/CDP values. |
+| Smoke | `scripts/smoke-linux-computer.sh` | Prints `PASS: native X11 virtual desktops and loopback browser CDP are healthy.` plus desktop/CDP values. |
 | Smoke timeout | Set `FRIDAY_COMPUTER_SMOKE_ATTEMPTS=1` on an unready host. | Fails with a bounded readiness message; it does not loop forever. |
-| Real browser conformance | `npx tsx scripts/conformance-linux-computer.ts` | Prints `PASS: real Chromium CDP navigate/click/type/press and provider safety conformance are healthy.` |
-| Doctor provider check | `FRIDAY_COMPUTER_PROVIDER=linux-sway npm run friday -- doctor` | Reports Linux Computer health, Sway outputs, Chromium CDP, and any actionable warning. |
+| Real browser conformance | `npx tsx scripts/conformance-linux-computer.ts` | Prints `PASS: real Chromium-family CDP navigate/click/type/press and provider safety conformance are healthy.` |
+| Doctor provider check | `FRIDAY_COMPUTER_PROVIDER=linux-x11 npm run friday -- doctor` | Reports native X11 virtual desktops, loopback browser CDP, and actionable host issues. |
 
 ### Provider behavior buttons/actions
 
 | Action | Test | Expected result |
 |---|---|---|
 | `computer.status` | Run with a healthy provider. | Shows node availability, resources, browser readiness, screens, and leases. |
-| `computer.doctor` | Run before/after Sway or Chromium is stopped. | Healthy host has no provider issue; stopped dependency is reported as degraded/unavailable. |
+| `computer.doctor` | Run before/after the browser supervisor is stopped or `wmctrl` is unavailable. | Healthy host has no provider issue; missing native desktop/browser dependency is reported as degraded/unavailable. |
 | `computer.node.refresh` | Supply node ID. | Returns fresh telemetry/screens/browser state. |
 | `computer.node.restart` | Run with no active lease, using a test host. | Restarts provider-owned user services and returns refreshed node state. Active leases are rejected. |
 | `computer.node.update` | Run with no active lease. | Performs provider-managed service refresh/update action; active leases are rejected. |
@@ -471,7 +470,7 @@ Run these tests on Debian/Raspberry Pi OS or Ubuntu/Kubuntu as a normal user, ne
 | Protected click/type/press | Target an input/selector containing password, OTP, token, PIN, CAPTCHA, or protected focus. | Provider refuses before dispatch and tells tester to use human takeover. |
 | Human takeover login wall | Use a synthetic login page; Agent reaches wall; human enters fake credentials; hand back. | Secrets/keystrokes/sensitive screenshot are absent; same Session Job resumes from fresh state without replay. |
 | Resource pressure | Configure low memory/CPU/renderer thresholds or occupy Agent screens. | Admission reports `WAITING_FOR_COMPUTER`; job resumes automatically when capacity returns. |
-| Two-Agent screens | Managed Sway with two headless outputs; acquire two leases. | Agents receive distinct screens/targets while sharing filesystem/browser profile. |
+| Two-Agent screens | Configure two FRIDAY X11 virtual desktops; acquire two leases. | Agents receive distinct native desktops/browser targets while sharing filesystem and the persistent FRIDAY browser profile. |
 
 ## 14. Security and negative tests
 

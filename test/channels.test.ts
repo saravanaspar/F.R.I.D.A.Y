@@ -6,11 +6,12 @@ import { PluginTestHost } from "./helpers/plugin-host.js";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { collectContributions, definePlugin, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import { createVaultPlugin } from "../plugins/vault/index.js";
-import { createChannelsPlugin } from "../plugins/channels/index.js";
+import { createChannelsPlugin, createSpeakReplyAgentTool } from "../plugins/channels/index.js";
 import { readSavedChannels } from "../plugins/channels/config.js";
 import { CHANNELS_CAPABILITY } from "../plugins/channels/contract.js";
 import { CHANNELS_TRUSTED_CAPABILITY } from "../plugins/channels/trusted-contract.js";
 import { EVENTS_CAPABILITY } from "../plugins/events/contract.js";
+import { ROUTING_CAPABILITY, type RoutingDecision, type RoutingMessage, type RoutingService } from "../plugins/routing/contract.js";
 import { createEventsService } from "../plugins/events/events.js";
 import sessionsPlugin from "../plugins/sessions/index.js";
 import agentProfilesPlugin from "../plugins/agent-profiles/index.js";
@@ -21,6 +22,7 @@ import type { InboundTurn } from "../plugins/turn-loop/contract.js";
 import { TURN_INGRESS_HOOK } from "../plugins/turn-loop/contract.js";
 import { SYSTEM_ACTION_CONTRIBUTION } from "../plugins/system/contract.js";
 import { getPermissionsStateDir, loadTrustedIdentities } from "../plugins/permissions/identity-store.js";
+import type { VoiceService } from "../plugins/voice/contract.js";
 
 const dirs: string[] = [];
 const originalFridayHome = process.env.FRIDAY_HOME;
@@ -97,12 +99,221 @@ function channelTurnForSystem(): InboundTurn {
 }
 
 describe("channels plugin", () => {
+  it("bridges generic Voice synthesis to only the originating trusted channel", async () => {
+    const sent: Array<{ target: unknown; audio: unknown }> = [];
+    const voice = {
+      status: () => ({
+        sttConfigured: false,
+        ttsConfigured: true,
+        sttCredentialConfigured: false,
+        ttsCredentialConfigured: true,
+        ttsProvider: "openai",
+        ttsModel: "gpt-4o-mini-tts",
+      }),
+      synthesize: async () => Object.freeze([Object.freeze({
+        bytes: Uint8Array.from([9, 8, 7]),
+        mimeType: "audio/mpeg",
+        provider: "openai" as const,
+        model: "gpt-4o-mini-tts",
+        voice: "alloy",
+      })]),
+    } satisfies Pick<VoiceService, "status" | "synthesize">;
+    const tool = createSpeakReplyAgentTool({
+      voice: () => voice,
+      sendAudio: async (target, audio) => {
+        sent.push({ target, audio });
+        return { channel: target.channel, accountId: target.accountId, conversationId: target.conversationId, messageIds: ["voice-99"] };
+      },
+    });
+
+    const result = await tool.execute({ text: "Hello from FRIDAY", voiceNote: true }, undefined, {
+      cwd: process.cwd(),
+      sessionId: "session-voice",
+      turn: {
+        id: "turn-voice",
+        text: "reply with voice",
+        timestamp: Date.now(),
+        principal: { authority: "channel", channel: "telegram", accountId: "default", conversationId: "chat-123", senderId: "operator", threadId: "7" },
+        reply: async () => undefined,
+      },
+    } as never);
+
+    expect(result.output).toEqual({ sent: true, chunks: 1, messageIds: ["voice-99"] });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.target).toEqual({ channel: "telegram", accountId: "default", conversationId: "chat-123", threadId: "7" });
+    expect(sent[0]?.audio).toMatchObject({ mimeType: "audio/mpeg", voiceNote: true, fileName: "friday-voice-1.mp3" });
+
+    await expect(tool.execute({ text: "hello" }, undefined, {
+      cwd: process.cwd(),
+      sessionId: "session-local",
+      turn: {
+        id: "turn-local",
+        text: "reply with voice",
+        timestamp: Date.now(),
+        principal: { authority: "local", userId: "operator" },
+        reply: async () => undefined,
+      },
+    } as never)).rejects.toThrow(/originating channel/);
+  });
   it("does not register a CLI channel or expose local conversational ingestion", async () => {
     await activate();
     const safe = requireCapability(CHANNELS_CAPABILITY);
     const trusted = requireCapability(CHANNELS_TRUSTED_CAPABILITY);
     expect(safe.list()).toEqual([]);
     expect(trusted).not.toHaveProperty("ingestLocal");
+  });
+
+  it("ignores pre-integration Telegram history but retries admitted post-integration work", async () => {
+    const home = temp();
+    process.env.FRIDAY_HOME = home;
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    let eventNow = new Date("2100-01-01T00:00:00.000Z");
+    const events = createEventsService({ stateDir: join(home, "events"), now: () => eventNow });
+    await friday.activatePlugin(definePlugin({ id: "test-events", provides: [EVENTS_CAPABILITY] }, (ctx) => {
+      ctx.services.provide(EVENTS_CAPABILITY, events);
+      ctx.effect(() => events.close());
+    }));
+
+    const beforeIntegration = Date.now() - 60_000;
+    const eventData = (id: string, text: string, timestamp: number) => ({
+      id,
+      principal: { channel: "telegram", accountId: "default", conversationId: "chat-1", senderId: "operator-1" },
+      text,
+      timestamp,
+      attachments: [],
+      chatType: "dm",
+    });
+    events.publish({
+      id: "stale-before-integration",
+      type: "channel.ingress.accepted",
+      source: "channels",
+      subject: "channel:telegram:default",
+      occurredAt: new Date(beforeIntegration).toISOString(),
+      data: eventData("telegram-old", "old prompt", beforeIntegration),
+    });
+
+    let failedOnce = false;
+    const turns: string[] = [];
+    await friday.activatePlugin(definePlugin({ id: "turn-ingress-integration-boundary-test" }, (ctx) => {
+      ctx.on(TURN_INGRESS_HOOK, (turn) => {
+        if (turn.text === "fail once" && !failedOnce) {
+          failedOnce = true;
+          throw new Error("simulated interactive turn failure");
+        }
+        turns.push(turn.text);
+      });
+    }));
+    await friday.activatePlugin(createVaultPlugin({ stateDir: join(home, "vault"), workspaceRoot: process.cwd() }));
+    await friday.activatePlugin(createChannelsPlugin({
+      autoStart: false,
+      telegram: {
+        credentialRef: "vault://channels/telegram/default/bot-token",
+        allowedSenderIds: ["operator-1"],
+      },
+    }));
+
+    const consumer = events.consumer("channels.turn-ingress.v1");
+    expect(consumer?.retry.maxAttempts).toBe(3);
+    await expect(events.runPending({ maxDeliveries: 10 })).resolves.toEqual([
+      { consumerId: "channels.turn-ingress.v1", eventId: "stale-before-integration", status: "success" },
+    ]);
+    expect(turns).toEqual([]);
+
+    const afterIntegration = Date.now() + 2_000;
+    events.publish({
+      id: "post-integration-failure",
+      type: "channel.ingress.accepted",
+      source: "channels",
+      subject: "channel:telegram:default",
+      occurredAt: new Date(afterIntegration).toISOString(),
+      data: eventData("telegram-failed", "fail once", afterIntegration),
+    });
+    await expect(events.runPending({ maxDeliveries: 10 })).resolves.toEqual([
+      expect.objectContaining({ consumerId: "channels.turn-ingress.v1", eventId: "post-integration-failure", status: "error" }),
+    ]);
+    expect(turns).toEqual([]);
+
+    eventNow = new Date(eventNow.getTime() + 2_000);
+    await expect(events.runPending({ maxDeliveries: 10 })).resolves.toEqual([
+      { consumerId: "channels.turn-ingress.v1", eventId: "post-integration-failure", status: "success" },
+    ]);
+    expect(turns).toEqual(["fail once"]);
+  });
+
+  it("routes one same-conversation burst in one classifier batch and emits one aggregate Agent turn", async () => {
+    const home = temp();
+    process.env.FRIDAY_HOME = home;
+    const friday = new PluginTestHost();
+    await friday.activatePlugin(capabilitiesPlugin);
+    const events = createEventsService({ stateDir: join(home, "events") });
+    await friday.activatePlugin(definePlugin({ id: "test-events", provides: [EVENTS_CAPABILITY] }, (ctx) => {
+      ctx.services.provide(EVENTS_CAPABILITY, events);
+      ctx.effect(() => events.close());
+    }));
+    const batches: string[][] = [];
+    const routing: RoutingService = Object.freeze({
+      async route(message: RoutingMessage): Promise<RoutingDecision> {
+        return Object.freeze({
+          messageId: message.id,
+          destination: Object.freeze({ kind: "transient" as const, id: "transient:utility" }),
+          execution: Object.freeze({ profile: "utility" as const, capabilityProfile: "none" as const }),
+          confidence: 1,
+        });
+      },
+      async routeBatch(messages: readonly RoutingMessage[]): Promise<readonly RoutingDecision[]> {
+        batches.push(messages.map((message) => message.text));
+        return Object.freeze(messages.map((message) => Object.freeze({
+          messageId: message.id,
+          destination: Object.freeze({ kind: "transient" as const, id: "transient:utility" }),
+          execution: Object.freeze({ profile: "utility" as const, capabilityProfile: "none" as const }),
+          confidence: 1,
+        })));
+      },
+      subscribe() { return () => {}; },
+      recentContext() { return Object.freeze([]); },
+    });
+    await friday.activatePlugin(definePlugin({ id: "test-routing", provides: [ROUTING_CAPABILITY] }, (ctx) => {
+      ctx.services.provide(ROUTING_CAPABILITY, routing);
+    }));
+    const turns: InboundTurn[] = [];
+    await friday.activatePlugin(definePlugin({ id: "turn-ingress-batch-test" }, (ctx) => {
+      ctx.on(TURN_INGRESS_HOOK, (turn) => { turns.push(turn); });
+    }));
+    await friday.activatePlugin(createVaultPlugin({ stateDir: join(home, "vault"), workspaceRoot: process.cwd() }));
+    await friday.activatePlugin(createChannelsPlugin({
+      autoStart: false,
+      telegram: {
+        credentialRef: "vault://channels/telegram/default/bot-token",
+        allowedSenderIds: ["operator-1"],
+      },
+    }));
+
+    const base = Date.now() + 2_000;
+    for (const [index, text] of ["hi", "what can you do?", "summarize our next step"].entries()) {
+      events.publish({
+        id: `burst-${index}`,
+        type: "channel.ingress.accepted",
+        source: "channels",
+        subject: "channel:telegram:default",
+        occurredAt: new Date(base + index).toISOString(),
+        data: {
+          id: `telegram-${index}`,
+          principal: { channel: "telegram", accountId: "default", conversationId: "chat-1", senderId: "operator-1" },
+          text,
+          timestamp: base + index,
+          attachments: [],
+          chatType: "dm",
+        },
+      });
+    }
+
+    await events.runPending({ maxDeliveries: 10 });
+    expect(batches).toEqual([["hi", "what can you do?", "summarize our next step"]]);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.text).toContain("hi");
+    expect(turns[0]?.text).toContain("what can you do?");
+    expect(turns[0]?.text).toContain("summarize our next step");
   });
 
   it("contributes a scheduled reminder whose destination is bound to the originating conversation", async () => {

@@ -37,8 +37,7 @@
     "package:binary": "npm run build:binary && node scripts/package-release-binary.mjs",
     "test:coverage": "vitest run --config vitest.config.ts --coverage",
     "check:silent-failures": "node scripts/check-no-silent-failures.mjs",
-    "generate-models": "node --experimental-strip-types scripts/generate-models.ts",
-    "check:models": "node --experimental-strip-types scripts/generate-models.ts --check",
+    "check:models": "node --experimental-strip-types scripts/check-model-profiles.ts",
     "version:set": "node scripts/release-version.mjs --set",
     "check:versions": "node scripts/release-version.mjs --check-packages",
     "check:architecture": "node scripts/check-plugin-boundaries.mjs && node scripts/generate-builtin-plugins.mjs --check",
@@ -46,7 +45,12 @@
     "inspect:plugins:json": "node scripts/check-plugin-boundaries.mjs --catalog-json",
     "generate:builtin-plugins": "node scripts/generate-builtin-plugins.mjs",
     "clean:workspace-node-modules": "node scripts/workspace-packages.mjs clean-node-modules",
-    "check:workspace-node-modules": "node scripts/workspace-packages.mjs check-node-modules"
+    "check:workspace-node-modules": "node scripts/workspace-packages.mjs check-node-modules",
+    "presetup:computer": "npm run build:workspaces",
+    "setup:computer": "tsx src/friday.ts setup computer",
+    "presetup:service": "npm run build:workspaces",
+    "setup:service": "tsx src/friday.ts setup service",
+    "verify:report": "node scripts/verify-report.mjs"
   },
   "dependencies": {
     "@friday/client-protocol": "1.0.4",

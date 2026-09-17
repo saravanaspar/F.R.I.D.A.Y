@@ -71,6 +71,7 @@ function fakeAdapter(overrides: Partial<ComputerNodeAdapter> = {}): ComputerNode
   toolRequests: ComputerNodeToolExecutionRequest[];
   cleanupRequests: ComputerRunProcessCleanupRequest[];
   observations: number;
+  armHighImpactBrowserGate(): void;
   lifecycle: { restarts: number; updates: number; resets: number };
 } {
   let snapshotValue = healthySnapshot();
@@ -78,6 +79,7 @@ function fakeAdapter(overrides: Partial<ComputerNodeAdapter> = {}): ComputerNode
   const toolRequests: ComputerNodeToolExecutionRequest[] = [];
   const cleanupRequests: ComputerRunProcessCleanupRequest[] = [];
   let observations = 0;
+  let highImpactBrowserGate = false;
   const lifecycle = { restarts: 0, updates: 0, resets: 0 };
   const adapter: ComputerNodeAdapter & {
     setSnapshot(value: ComputerNodeRuntimeSnapshot): void;
@@ -85,6 +87,7 @@ function fakeAdapter(overrides: Partial<ComputerNodeAdapter> = {}): ComputerNode
     toolRequests: ComputerNodeToolExecutionRequest[];
     cleanupRequests: ComputerRunProcessCleanupRequest[];
     observations: number;
+    armHighImpactBrowserGate(): void;
     lifecycle: { restarts: number; updates: number; resets: number };
   } = {
     descriptor: Object.freeze({
@@ -120,6 +123,16 @@ function fakeAdapter(overrides: Partial<ComputerNodeAdapter> = {}): ComputerNode
     async cleanupRunProcesses(request) { cleanupRequests.push(request); },
     async runBrowserAction(request) {
       browserRequests.push(request);
+      if (highImpactBrowserGate && request.action.kind === "click" && !request.action.visualProbeToken) {
+        return {
+          mode: "cdp" as const,
+          performed: false,
+          confidence: 0.95,
+          visualProbeRequired: { ref: request.action.target, reason: "high-impact-action" as const, recommendedSize: "small" as const },
+          observation: observation(request.screenId),
+        };
+      }
+      if (highImpactBrowserGate && request.action.kind === "click" && request.action.visualProbeToken) highImpactBrowserGate = false;
       return { mode: request.automationOrder[0]!, observation: observation(request.screenId) };
     },
     async visualProbe(request) {
@@ -145,6 +158,7 @@ function fakeAdapter(overrides: Partial<ComputerNodeAdapter> = {}): ComputerNode
     toolRequests,
     cleanupRequests,
     get observations() { return observations; },
+    armHighImpactBrowserGate() { highImpactBrowserGate = true; },
     lifecycle,
     ...overrides,
   };
@@ -188,6 +202,67 @@ describe("Phase 4 Shared Agent Computer", () => {
       { kind: "type", target: "password", text: "never-log-this", sensitive: true },
     )).rejects.toThrow(/human takeover|protected-credential/);
 
+    await service.close();
+  });
+
+  it("presents a shared Agent screen only for the active bound lease and closes only provider-owned views", async () => {
+    let opened = 0;
+    let closed = 0;
+    const adapter = fakeAdapter({
+      async sharedScreenSupport() {
+        return Object.freeze({
+          level: "full" as const,
+          backend: "x11-ewmh" as const,
+          desktopEnvironment: "KDE",
+          sessionType: "x11" as const,
+          canCreateWorkspace: true,
+          canPlaceViewer: true,
+          canSwitchWorkspace: true,
+          viewOnly: false as const,
+          missing: Object.freeze([]),
+          reason: "test native desktop backend",
+        });
+      },
+      async openSharedScreen(request) {
+        opened += 1;
+        return Object.freeze({
+          nodeId: "node-1",
+          screenId: request.screenId,
+          workspaceName: request.name ?? `FRIDAY ${request.screenId}`,
+          backend: "x11-ewmh" as const,
+          viewOnly: false as const,
+          viewerId: "friday-computer-share-test",
+        });
+      },
+      async closeSharedScreens() { closed += 1; return 1; },
+    });
+    const service = createComputerService({ idFactory: sequentialIds() });
+    await service.registerNode(adapter);
+    const grant = await service.requestScreen({ ownerId: "shared-owner" });
+    if (grant.state !== "acquired") throw new Error("expected Computer screen grant");
+    const binding = Object.freeze({
+      nodeId: grant.screenLease.nodeId,
+      screenId: grant.screenLease.screenId,
+      screenLeaseId: grant.screenLease.id,
+      ownerId: grant.screenLease.ownerId,
+      ownerKind: "main-agent" as const,
+      runId: "shared-run",
+      generation: grant.controlLease.generation,
+    });
+
+    await expect(service.openSharedScreen(binding, { name: "FRIDAY Agent 1" })).resolves.toEqual(expect.objectContaining({
+      nodeId: "node-1",
+      screenId: "agent-1",
+      workspaceName: "FRIDAY Agent 1",
+      viewOnly: false,
+    }));
+    expect(opened).toBe(1);
+    await expect(service.closeSharedScreens("node-1")).resolves.toBe(1);
+    expect(closed).toBe(1);
+
+    await service.releaseScreen(grant.screenLease.id, grant.screenLease.ownerId);
+    await expect(service.openSharedScreen(binding)).rejects.toThrow(/screen lease|active/i);
+    expect(opened).toBe(1);
     await service.close();
   });
 
@@ -661,12 +736,27 @@ describe("Phase 4 Shared Agent Computer", () => {
     await friday.dispose();
   });
   it("exposes permission-gated Agent observe/browser tools only against the active leased Computer generation", async () => {
-    const adapter = fakeAdapter();
+    const order: string[] = [];
+    let sharedOpened = 0;
+    const adapter = fakeAdapter({
+      async openSharedScreen(request) {
+        order.push("present");
+        sharedOpened += 1;
+        return {
+          nodeId: "node-1",
+          screenId: request.screenId,
+          workspaceName: request.name ?? `FRIDAY ${request.screenId}`,
+          backend: "x11-ewmh" as const,
+          viewOnly: false as const,
+          viewerId: `viewer-${request.screenId}`,
+        };
+      },
+    });
     const authorization: PermissionRequest[] = [];
     const progressUpdates: TurnProgressUpdate[] = [];
     const permissions: PermissionsService = {
       normalizeMode: () => "auto",
-      async authorize(request) { authorization.push(request); return { allowed: true, approvedBy: "policy" }; },
+      async authorize(request) { order.push("authorize"); authorization.push(request); return { allowed: true, approvedBy: "policy" }; },
       assertWorkspacePath: (_workspace, path) => path,
     };
     const permissionProvider = definePlugin(
@@ -690,6 +780,7 @@ describe("Phase 4 Shared Agent Computer", () => {
       ownerKind: "main-agent" as const,
       runId: "run-agent-tools",
       admission: { requireBrowser: true, demand: { browserRenderers: 1, gpu: true } },
+      presentation: "shared" as const,
       generation: grant.controlLease.generation,
     };
     const executionContext: AgentToolExecutionContext = {
@@ -711,6 +802,8 @@ describe("Phase 4 Shared Agent Computer", () => {
     await expect(observe.execute({}, undefined, executionContext)).resolves.toMatchObject({
       output: { screenId: "agent-1", observationId: "obs-1", elements: [{ ref: "obs-1:e1" }] },
     });
+    expect(order).toEqual(["authorize", "present"]);
+    expect(sharedOpened).toBe(1);
     const browser = tools.find((tool) => tool.name === "computer_browser")!;
     adapter.setSnapshot(Object.freeze({
       ...healthySnapshot(),
@@ -754,10 +847,10 @@ describe("Phase 4 Shared Agent Computer", () => {
     await expect(browser.execute({ action: "type", target: "password", text: "do-not-capture", sensitive: true }, undefined, executionContext))
       .rejects.toThrow(/human takeover|protected-credential/);
     expect(authorization.map((request) => request.action)).toEqual([
-      { id: "computer.observe", effect: "private-read", resource: "computer:node-1:screen:agent-1", network: true },
-      { id: "computer.browser.action", effect: "external-write", resource: "computer:node-1:screen:agent-1", network: true },
-      { id: "computer.visual.probe", effect: "private-read", resource: "computer:node-1:screen:agent-1", network: true },
+      { id: "computer.task.control", effect: "external-write", resource: "computer:node-1:screen:agent-1", network: true },
     ]);
+    expect(authorization[0]?.reason).toMatch(/covers ordinary browser navigation\/click\/type\/scroll plus observation and bounded visual probes/i);
+    expect(sharedOpened).toBe(1);
 
     await service.takeOver(grant.screenLease.id, "human:operator", null);
     const pausedObserve = observe.execute({}, undefined, executionContext);
@@ -777,6 +870,38 @@ describe("Phase 4 Shared Agent Computer", () => {
     await expect(browser.execute({ action: "click", target: "obs-1:e1" }, undefined, executionContext)).resolves.toMatchObject({
       output: { mode: "playwright-dom", observation: { screenId: "agent-1" } },
     });
+    expect(authorization).toHaveLength(1);
+    // A durable retry can recreate the Agent run/owner/lease for the same admitted
+    // request. It must reuse the request-scoped Computer approval/presentation.
+    await expect(observe.execute({}, undefined, { ...executionContext, computerExecution: { ...binding, runId: "run-agent-tools-2" } })).resolves.toMatchObject({
+      output: { screenId: "agent-1" },
+    });
+    expect(authorization.map((request) => request.action.id)).toEqual(["computer.task.control"]);
+    expect(sharedOpened).toBe(1);
+    expect(order.slice(0, 2)).toEqual(["authorize", "present"]);
+
+    const secondRunContext: AgentToolExecutionContext = {
+      ...executionContext,
+      jobId: "job-agent-tools-2",
+      computerExecution: { ...binding, runId: "run-agent-tools-2" },
+    };
+    adapter.armHighImpactBrowserGate();
+    await expect(browser.execute({ action: "click", target: "obs-1:e1" }, undefined, secondRunContext)).resolves.toMatchObject({
+      output: { performed: false, visualProbeRequired: { reason: "high-impact-action", ref: "obs-1:e1" } },
+    });
+    expect(authorization).toHaveLength(2);
+    await expect(visual.execute({ ref: "obs-1:e1", size: "small", return: "text" }, undefined, secondRunContext)).resolves.toMatchObject({
+      output: { probeToken: "probe-test" },
+    });
+    expect(authorization).toHaveLength(2);
+    await expect(browser.execute({ action: "click", target: "obs-1:e1", probeToken: "probe-test" }, undefined, secondRunContext)).resolves.toMatchObject({
+      output: { observation: { screenId: "agent-1" } },
+    });
+    expect(authorization.map((request) => request.action.id)).toEqual([
+      "computer.task.control",
+      "computer.task.control",
+      "computer.browser.high-impact",
+    ]);
     expect(adapter.browserRequests.at(-1)?.controlGeneration).toBe(handBack.controlLease.generation);
 
     const browserRequestsBeforeSecondTakeover = adapter.browserRequests.length;

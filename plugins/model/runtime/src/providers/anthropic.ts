@@ -771,7 +771,7 @@ function supportsAdaptiveThinking(modelId: string): boolean {
 
 /**
  * Map ThinkingLevel to Anthropic effort levels for adaptive thinking. The effort is
- * driven by each model's `thinkingLevelMap` (see generate-models.ts); the switch is a
+ * driven by each runtime model's `thinkingLevelMap` when available; the switch is a
  * fallback for levels without an explicit mapping.
  */
 function mapThinkingLevelToEffort(

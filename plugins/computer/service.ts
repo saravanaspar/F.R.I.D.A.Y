@@ -35,6 +35,7 @@ import {
   type ComputerScreenKind,
   type ComputerScreenRequest,
   type ComputerScreenRequestResult,
+  type ComputerSharedScreenSupport,
   type ComputerService,
   type ComputerStatusSnapshot,
   type ComputerToolExecutionRequest,
@@ -68,6 +69,8 @@ const TRANSCRIPT_POLICY = Object.freeze({
   captureSecrets: false as const,
   captureSensitiveScreenshots: false as const,
 });
+
+type ComputerSharedScreenView = Awaited<ReturnType<ComputerService["openSharedScreen"]>>;
 
 interface NodeState {
   readonly adapter: ComputerNodeAdapter;
@@ -324,12 +327,38 @@ function observationText(value: unknown, label: string, maximum: number): string
   return safe;
 }
 
+function normalizeBrowserMediaState(
+  input: NonNullable<ComputerBrowserTabSnapshot["media"]>,
+): NonNullable<ComputerBrowserTabSnapshot["media"]> {
+  const elementCount = nonNegativeInteger(input.elementCount, "browser media element count", 64);
+  const currentTime = input.currentTime === undefined
+    ? undefined
+    : finiteNumber(input.currentTime, "browser media current time", 0, Number.MAX_SAFE_INTEGER);
+  const duration = input.duration === undefined
+    ? undefined
+    : finiteNumber(input.duration, "browser media duration", 0, Number.MAX_SAFE_INTEGER);
+  const volume = input.volume === undefined
+    ? undefined
+    : finiteNumber(input.volume, "browser media volume", 0, 1);
+  return Object.freeze({
+    elementCount,
+    playing: Boolean(input.playing),
+    paused: Boolean(input.paused),
+    ended: Boolean(input.ended),
+    ...(currentTime === undefined ? {} : { currentTime }),
+    ...(duration === undefined ? {} : { duration }),
+    ...(input.muted === undefined ? {} : { muted: Boolean(input.muted) }),
+    ...(volume === undefined ? {} : { volume }),
+  });
+}
+
 function normalizeTab(input: ComputerBrowserTabSnapshot): ComputerBrowserTabSnapshot {
   return Object.freeze({
     id: id(input.id, "browser tab id"),
     title: observationText(input.title, "browser tab title", 1_024),
     url: observationText(input.url, "browser tab url", 4_096),
     active: Boolean(input.active),
+    ...(input.media === undefined ? {} : { media: normalizeBrowserMediaState(input.media) }),
   });
 }
 
@@ -1666,6 +1695,86 @@ export function createComputerService(options: ComputerServiceOptions = {}): Com
         ownerId: binding.ownerId,
       });
       return true;
+    },
+
+    async sharedScreenSupport(nodeIdInput, signal) {
+      signal?.throwIfAborted();
+      const nodeId = id(nodeIdInput, "Computer node id", 128);
+      const state = requireNodeState(nodeId);
+      if (!state.adapter.sharedScreenSupport) {
+        const unsupported: ComputerSharedScreenSupport = Object.freeze({
+          level: "unsupported",
+          backend: "unsupported",
+          desktopEnvironment: "unknown",
+          sessionType: "unknown",
+          canCreateWorkspace: false,
+          canPlaceViewer: false,
+          canSwitchWorkspace: false,
+          viewOnly: true,
+          missing: Object.freeze([]),
+          reason: `Computer node ${nodeId} does not provide shared-screen presentation`,
+        });
+        return unsupported;
+      }
+      return state.adapter.sharedScreenSupport(signal);
+    },
+
+    async openSharedScreen(rawBinding, options, signal) {
+      signal?.throwIfAborted();
+      const binding = normalizeExecutionBinding(rawBinding);
+      const prepared = await serialize(() => {
+        const control = service.assertAgentControl(binding.screenLeaseId, binding.ownerId, binding.generation);
+        const screenLease = requireScreenLease(control.screenLeaseId);
+        if (screenLease.nodeId !== binding.nodeId || screenLease.screenId !== binding.screenId) {
+          throw new Error("Computer shared-screen binding does not match the active screen lease");
+        }
+        const state = requireNodeState(screenLease.nodeId);
+        if (!state.adapter.openSharedScreen) throw new Error(`Computer node ${state.node.id} does not provide shared-screen presentation`);
+        return Object.freeze({ screenLease, adapter: state.adapter });
+      });
+      const view = await prepared.adapter.openSharedScreen!({
+        screenId: prepared.screenLease.screenId,
+        screenLeaseId: prepared.screenLease.id,
+        ownerId: binding.ownerId,
+        ownerKind: binding.ownerKind,
+        runId: binding.runId,
+        ...(options?.name === undefined ? {} : { name: text(options.name, "Computer shared-screen name", 128) }),
+        ...(options?.switchTo === undefined ? {} : { switchTo: Boolean(options.switchTo) }),
+        ...(signal === undefined ? {} : { signal }),
+      });
+      const normalized: ComputerSharedScreenView = Object.freeze({
+        nodeId: id(view.nodeId, "Computer shared-screen node id", 128),
+        screenId: id(view.screenId, "Computer shared-screen screen id", 128),
+        workspaceName: text(view.workspaceName, "Computer shared-screen workspace name", 128),
+        backend: view.backend,
+        viewOnly: Boolean(view.viewOnly),
+        viewerId: id(view.viewerId, "Computer shared-screen viewer id", 160),
+      });
+      if (normalized.nodeId !== binding.nodeId || normalized.screenId !== binding.screenId) {
+        throw new Error("Computer provider returned a shared-screen view for a different binding");
+      }
+      publish("computer.shared-screen.opened", `computer:${binding.nodeId}:screen:${binding.screenId}`, {
+        nodeId: binding.nodeId,
+        screenId: binding.screenId,
+        workspaceName: normalized.workspaceName,
+        backend: normalized.backend,
+        viewOnly: normalized.viewOnly,
+      });
+      return normalized;
+    },
+
+    async closeSharedScreens(nodeIdInput, signal) {
+      signal?.throwIfAborted();
+      const states = nodeIdInput === undefined
+        ? [...nodes.values()]
+        : [requireNodeState(id(nodeIdInput, "Computer node id", 128))];
+      let closedViews = 0;
+      for (const state of states) {
+        if (!state.adapter.closeSharedScreens) continue;
+        closedViews += await state.adapter.closeSharedScreens(signal);
+      }
+      publish("computer.shared-screens.closed", "computer", { nodeId: nodeIdInput ?? null, closedViews });
+      return closedViews;
     },
 
     async observeScreen(screenLeaseIdInput, ownerIdInput, generation, signal, rawRequest) {

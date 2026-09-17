@@ -800,10 +800,13 @@ describe("access policy and chunking", () => {
 });
 
 describe("Telegram transport", () => {
-  it("uses an opaque Vault ref, default-denies unknown senders, and normalizes allowed messages", async () => {
+  it("uses the persisted Telegram integration boundary without discarding valid post-integration backlog on restart", async () => {
     const responses = [
       { ok: true, result: { id: 99, username: "friday_bot" } },
-      { ok: true, result: [{ update_id: 1, message: { message_id: 7, date: 2, chat: { id: 10, type: "private" }, from: { id: 11, first_name: "Ada" }, text: "hello" } }] },
+      { ok: true, result: [
+        { update_id: 1, message: { message_id: 7, date: 1, chat: { id: 10, type: "private" }, from: { id: 11, first_name: "Ada" }, text: "stale-before-integration" } },
+        { update_id: 2, message: { message_id: 8, date: 2, chat: { id: 10, type: "private" }, from: { id: 11, first_name: "Ada" }, text: "valid-after-integration" } },
+      ] },
     ];
     const fetchMock = vi.fn(async () => ({
       ok: true,
@@ -815,6 +818,7 @@ describe("Telegram transport", () => {
       credentialRef: "vault://channels/telegram/default/bot-token",
       allowedSenderIds: ["11"],
       pollTimeoutSeconds: 1,
+      activatedAt: 2_500,
     }, {
       consume: async (ref, consumer) => {
         expect(ref).toBe("vault://channels/telegram/default/bot-token");
@@ -827,10 +831,16 @@ describe("Telegram transport", () => {
     await transport.start((message) => { seen.push(message.text); });
     await new Promise((resolve) => setTimeout(resolve, 10));
     await transport.stop();
-    expect(seen).toContain("hello");
+    expect(seen).toEqual(["valid-after-integration"]);
+    const getUpdatesBodies = fetchMock.mock.calls
+      .filter(([input]) => String(input).endsWith("/getUpdates"))
+      .map(([, init]) => JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    expect(getUpdatesBodies[0]).toMatchObject({ offset: 0 });
+    expect(getUpdatesBodies[1]).toMatchObject({ offset: 3 });
+    expect(getUpdatesBodies.some((body) => body.offset === -1)).toBe(false);
     // An immediately-empty long-poll response must yield instead of creating
     // an unbounded promise/microtask spin that starves timers and shutdown.
-    expect(fetchMock.mock.calls.length).toBeLessThan(10);
+    expect(fetchMock.mock.calls.length).toBeLessThan(12);
     expect(secretValues.length).toBeGreaterThan(0);
     expect(JSON.stringify(transport.status())).not.toContain("telegram-token");
   });
@@ -1023,6 +1033,74 @@ function secretConsumer(values: Readonly<Record<string, string>>) {
   };
 }
 
+describe("trusted outbound audio", () => {
+  it("routes bounded audio only through transports that explicitly support it", async () => {
+    const hub = new ChannelHub({ credentialVault: new FakeVault() });
+    const seen: Uint8Array[] = [];
+    const transport: ChannelTransport = {
+      channel: "telegram",
+      accountId: "default",
+      start: async () => undefined,
+      stop: async () => undefined,
+      status: () => ({ channel: "telegram", accountId: "default", state: "running" }),
+      send: async (target) => ({ channel: "telegram", accountId: "default", conversationId: target.conversationId, messageIds: ["text"] }),
+      sendAudio: async (target, audio) => {
+        seen.push(audio.bytes);
+        return { channel: "telegram", accountId: "default", conversationId: target.conversationId, messageIds: ["voice-1"] };
+      },
+    };
+    hub.registerTransport(transport);
+    const source = Uint8Array.from([1, 2, 3]);
+    await expect(hub.sendAudio({ channel: "telegram", accountId: "default", conversationId: "chat-1" }, { bytes: source, mimeType: "audio/mpeg", voiceNote: true }))
+      .resolves.toMatchObject({ messageIds: ["voice-1"] });
+    expect(seen[0]).toEqual(source);
+    expect(seen[0]).not.toBe(source);
+    await expect(hub.sendAudio({ channel: "telegram", accountId: "default", conversationId: "chat-1" }, { bytes: new Uint8Array(), mimeType: "audio/mpeg" }))
+      .rejects.toThrow(/non-empty/);
+  });
+
+  it("sends synthesized MP3 through Telegram's playable audio endpoint with multipart bytes", async () => {
+    const telegramFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toMatch(/\/sendAudio$/);
+      expect(init?.body).toBeInstanceOf(FormData);
+      const body = init?.body as FormData;
+      expect(body.get("chat_id")).toBe("chat-voice");
+      expect(body.get("message_thread_id")).toBe("42");
+      const audio = body.get("audio");
+      expect(audio).toBeInstanceOf(Blob);
+      expect((audio as Blob).type).toBe("audio/mpeg");
+      expect(Array.from(new Uint8Array(await (audio as Blob).arrayBuffer()))).toEqual([10, 20, 30]);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 77 } }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", telegramFetch);
+    const telegram = new TelegramChannelTransport({ credentialRef: "vault://telegram/voice" }, secretConsumer({ "vault://telegram/voice": "telegram-token" }));
+    await expect(telegram.sendAudio({ channel: "telegram", accountId: "default", conversationId: "chat-voice", threadId: "42" }, {
+      bytes: Uint8Array.from([10, 20, 30]),
+      mimeType: "audio/mpeg",
+      fileName: "reply.mp3",
+      voiceNote: true,
+    })).resolves.toMatchObject({ messageIds: ["77"] });
+  });
+
+  it("uses Telegram's native voice-note endpoint only for OGG/Opus audio", async () => {
+    const telegramFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toMatch(/\/sendVoice$/);
+      const body = init?.body as FormData;
+      const voice = body.get("voice");
+      expect(voice).toBeInstanceOf(Blob);
+      expect((voice as Blob).type).toBe("audio/ogg");
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 78 } }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", telegramFetch);
+    const telegram = new TelegramChannelTransport({ credentialRef: "vault://telegram/voice-ogg" }, secretConsumer({ "vault://telegram/voice-ogg": "telegram-token" }));
+    await expect(telegram.sendAudio({ channel: "telegram", accountId: "default", conversationId: "chat-voice" }, {
+      bytes: Uint8Array.from([1, 2, 3]),
+      mimeType: "audio/ogg",
+      voiceNote: true,
+    })).resolves.toMatchObject({ messageIds: ["78"] });
+  });
+});
+
 describe("native protected-action payloads", () => {
   it("emits opaque callback payloads for Telegram, Discord, and Slack", async () => {
     const action = { requestId: "123e4567-e89b-12d3-a456-426614174000", approveLabel: "Approve", denyLabel: "Deny" };
@@ -1070,6 +1148,10 @@ describe("native protected-action payloads", () => {
         expect(JSON.parse(String(init?.body))).toMatchObject({ callback_query_id: "callback-1", text: "Approved" });
         return new Response(JSON.stringify({ ok: true, result: true }), { status: 200, headers: { "content-type": "application/json" } });
       }
+      if (method === "deleteMessage") {
+        expect(JSON.parse(String(init?.body))).toMatchObject({ chat_id: 42, message_id: 10 });
+        return new Response(JSON.stringify({ ok: true, result: true }), { status: 200, headers: { "content-type": "application/json" } });
+      }
       throw new Error(`unexpected Telegram method ${method}`);
     });
     vi.stubGlobal("fetch", telegramFetch);
@@ -1084,6 +1166,7 @@ describe("native protected-action payloads", () => {
     while (!delivered && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
     expect(delivered).toBe(true);
     expect(telegramFetch.mock.calls.some(([input]) => String(input).endsWith("/answerCallbackQuery"))).toBe(true);
+    expect(telegramFetch.mock.calls.some(([input]) => String(input).endsWith("/deleteMessage"))).toBe(true);
     await transport.stop();
   });
 });

@@ -13,6 +13,8 @@ import { initializeOnboardingState, updateOnboardingStep, type OnboardingStepId 
 import type { HostPrivilegeMode } from "../plugins/runtime-settings/runtime-env.js";
 import { selectSandboxProvider } from "../plugins/sandbox/providers/index.js";
 import { recordSetupLog } from "./setup-log.js";
+import { setupComputer } from "./computer-setup.js";
+import { setupFridayUserService } from "./user-service-setup.js";
 
 async function setupSelfRepository(path: string): Promise<void> {
   const repository = resolve(path);
@@ -45,6 +47,8 @@ function setupHelp(): void {
     "  friday setup sandbox            Prepare the configured sandbox provider and its approved image",
     "  friday setup whatsapp           Install the optional WhatsApp bridge dependencies",
     "  friday setup voice              Configure hosted/local STT + TTS and automatically provision selected local models",
+    "  friday setup computer [shared|managed-cdp] [1-8]  Configure Linux X11 Computer; shared keeps your normal browser logins/windows",
+    "  friday setup service            Install/update the always-on FRIDAY user service from the release binary",
     "  friday setup privileges [broker|none]  Locally enable the restricted privilege broker or disable all FRIDAY sudo operations",
     "  friday setup self-repository <path>  Save the canonical FRIDAY source checkout for self-improvement",
     "  friday setup --help",
@@ -125,6 +129,11 @@ async function optionalStep(
   await updateOnboardingStep(step, "complete", home);
 }
 
+function showSetupLine(io: OnboardingIO, line: string): void {
+  if (io.info) io.info(line);
+  else io.write(`${line}\n`);
+}
+
 async function runCustomOptionalSetup(io: OnboardingIO, home: string, hostPrivilegeMode: HostPrivilegeMode): Promise<void> {
   const configureCore = io.confirm
     ? await io.confirm("Configure the main reasoning model, permissions, timezone, and additional channels in this terminal?", false)
@@ -141,6 +150,19 @@ async function runCustomOptionalSetup(io: OnboardingIO, home: string, hostPrivil
   });
   await optionalStep(io, home, "sandbox", "Prepare the coding sandbox now?", setupSandbox);
   await optionalStep(io, home, "executionPython", "Provision the private execution Python environment now?", async () => { await setupExecutionPython(home); });
+
+  const computer = io.confirm
+    ? await io.confirm("Configure Linux Computer/browser automation now?", false)
+    : ["y", "yes"].includes((await io.question("Configure Linux Computer/browser automation now? [y/N] ")).trim().toLowerCase());
+  if (computer) await setupComputer();
+
+  const service = io.confirm
+    ? await io.confirm("Install FRIDAY as an always-on user service now?", false)
+    : ["y", "yes"].includes((await io.question("Install FRIDAY as an always-on user service now? [y/N] ")).trim().toLowerCase());
+  if (service) {
+    const target = await setupFridayUserService();
+    showSetupLine(io, `[service] installed ${target}`);
+  }
 
   const selfRepo = io.confirm
     ? await io.confirm("Configure the self-improvement source repository now?", false)
@@ -258,6 +280,36 @@ async function runSetupCliInternal(args: readonly string[]): Promise<void> {
     process.stdout.write(mode === "broker"
       ? "[privileges] policy=broker: FRIDAY may run only explicitly allowlisted privileged helper operations; the model has no arbitrary sudo tool or password access.\n"
       : "[privileges] policy=none: FRIDAY will not invoke sudo; root-required operations must be run manually on this host.\n");
+    return;
+  }
+  if (component === "computer") {
+    if (rest.length > 2) throw new Error("Usage: friday setup computer [shared|managed-cdp] [1-8]");
+    let mode: "shared" | "managed-cdp" | undefined;
+    let agentScreens: number | undefined;
+    for (const raw of rest) {
+      const value = raw.trim().toLowerCase();
+      if (value === "shared" || value === "managed-cdp") {
+        if (mode !== undefined) throw new Error("Usage: friday setup computer [shared|managed-cdp] [1-8]");
+        mode = value;
+        continue;
+      }
+      if (/^[1-8]$/.test(value)) {
+        if (agentScreens !== undefined) throw new Error("Usage: friday setup computer [shared|managed-cdp] [1-8]");
+        agentScreens = Number(value);
+        continue;
+      }
+      throw new Error("Usage: friday setup computer [shared|managed-cdp] [1-8]");
+    }
+    await setupComputer({
+      ...(mode === undefined ? {} : { browserMode: mode }),
+      ...(agentScreens === undefined ? {} : { agentScreens }),
+    });
+    return;
+  }
+  if (component === "service") {
+    if (rest.length > 0) throw new Error("Usage: friday setup service");
+    const target = await setupFridayUserService();
+    process.stdout.write(`[service] installed ${target}\n`);
     return;
   }
   if (rest.length > 0) throw new Error(`Unexpected setup arguments: ${rest.join(" ")}`);

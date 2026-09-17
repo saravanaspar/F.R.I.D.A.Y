@@ -178,7 +178,7 @@ friday
 
 On the first setup, F.R.I.D.A.Y asks for **Quick setup** or **Custom setup**. Existing/local onboarding is not removed. Both modes begin with the same mandatory local security block:
 
-1. a routing/system model and its credential when required;
+1. a routing/system provider, its credential when required, then a model selected from the provider's live credential-visible model list when supported;
 2. at least **one enabled ingress channel** with one explicitly confirmed exact operator identity;
 3. an explicit host privilege policy: **restricted approved-operation broker** or **no privileged operations**.
 
@@ -186,7 +186,7 @@ A main reasoning model is no longer mandatory during bootstrap. In router-only m
 
 Runtime defaults are not published until the routing model and first exact operator pairing are complete. `allowAll` may widen transport admission, but it never creates an operator implicitly. The host privilege policy is independent from Agent permission mode: `full` Agent permission still cannot sudo when host privilege mode is `none`. Broker mode never grants an arbitrary root shell; sudo authentication/installation happens only in the local terminal, and remote operations use only the fixed root-owned helper with `sudo -n`. Secrets are never written to `runtime.env`.
 
-After bootstrap, a trusted channel can continue onboarding and administration with typed actions for the main/routing models, permissions/timezone, additional channels, Voice, sandbox, execution Python, MCP, Skills, self-improvement source, Doctor and diagnostics. Channel `diagnostics.doctor` runs the same canonical check set as local `friday doctor`; only the presentation differs. `onboarding.main-model.setup` is conversational: it can ask for provider/model choices and, when needed, choose API-key or supported OAuth authentication. API-key input and OAuth code/redirect prompts use protected channel interactions, and resulting credentials go directly to Vault instead of through ordinary router/main-model text. Successful Voice, execution-Python, sandbox, MCP and Skills operations advance the resumable onboarding state automatically.
+After bootstrap, a trusted channel can continue onboarding and administration with typed actions for the main/routing models, permissions/timezone, additional channels, Voice, sandbox, execution Python, MCP, Skills, self-improvement source, Doctor and diagnostics. Channel `diagnostics.doctor` runs the same canonical check set as local `friday doctor`; only the presentation differs. `onboarding.main-model.setup` is conversational: it asks for the provider, establishes API-key or supported OAuth authentication when needed, then—when the provider exposes live discovery—shows only credential-visible models that also have FRIDAY runtime descriptors. API-key input and OAuth code/redirect prompts use protected channel interactions, and resulting credentials go directly to Vault instead of through ordinary router/main-model text. Successful Voice, execution-Python, sandbox, MCP and Skills operations advance the resumable onboarding state automatically.
 
 Useful setup commands:
 
@@ -198,6 +198,8 @@ friday setup execution-python
 friday setup self-repository /path/to/F.R.I.D.A.Y
 friday setup whatsapp
 friday setup voice
+friday setup computer
+friday setup service
 friday setup privileges broker
 friday setup privileges none
 friday setup --help
@@ -216,6 +218,8 @@ The core assistant does not silently install privileged host software. Enable on
 | Self-improvement from source | Git + npm + a clean F.R.I.D.A.Y checkout | Save the canonical checkout with `friday setup self-repository /path/to/F.R.I.D.A.Y`. Release-binary self-improvement builds, verifies, stages, and hands off to a new host-native binary before activation. |
 | WhatsApp bridge | npm/Node tooling | Provision bridge dependencies with `friday setup whatsapp`. |
 | Voice | Provider API access | Configure and preflight STT/TTS with `friday setup voice`. OpenAI reuses the canonical model-provider Vault credential; Deepgram and ElevenLabs keys are stored in Voice-owned Vault refs. |
+| Linux Computer | X11 desktop; Brave/Chrome/Chromium | Configure with `friday setup computer`. The default opens FRIDAY-owned windows in the normal browser profile so existing logins are shared; the installed binary checks/provisions the fixed approved host dependencies when broker mode is enabled. |
+| Always-on user service | systemd user manager | Install/update the bundled unit with `friday setup service`; no source-tree `cp` step is required. |
 
 Run `friday doctor` at any time for a sectioned installation, configuration, security, tooling, and recovery report. Every actionable warning/error includes a one-line repair guide. Doctor is non-interactive by default, does not make outbound network calls, and never reads plaintext Vault secrets. Use `friday doctor --fix` only when you want guided, confirmed repairs for deterministic fixes, or `friday doctor --json` for machine-readable diagnostics.
 
@@ -335,15 +339,15 @@ Catchable fatal failures are secret-redacted and synchronously recorded under:
 
 A hard `SIGKILL`, some OOM kills, or total host failure can still prevent application-level logging, so supervisor/system logs remain important. Setup commands also append bounded redacted outcome records to `~/.friday/logs/setup.ndjson`. From a trusted channel, `run doctor` / diagnostic review can inspect FRIDAY-owned status, operational failures, failed spans, crashes and setup outcomes. It deliberately does not read arbitrary host logs or Vault secret values. With a configured main reasoning model, an operator may explicitly approve diagnostic self-repair; the existing isolated candidate/evaluation/promotion/handoff gates remain mandatory.
 
-For always-on Linux installations, an example systemd user unit is included:
+For always-on Linux installations, the release binary owns deployment of its bundled systemd user unit:
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp deploy/systemd/friday.service ~/.config/systemd/user/friday.service
-systemctl --user daemon-reload
-systemctl --user enable --now friday
+friday setup service
+systemctl --user status friday.service --no-pager
 journalctl --user -u friday -f
 ```
+
+No source checkout, `cp deploy/...`, or setup shell script is required for a release install.
 
 See [`docs/operations/ALWAYS_ON.md`](docs/operations/ALWAYS_ON.md) for the supported process lifecycle and restart model.
 

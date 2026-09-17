@@ -1,7 +1,7 @@
 import { chmod, mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runOnboarding as runOnboardingRaw, runRouterBootstrap, type OnboardingOptions } from "../src/onboarding.js";
 import { maybeManageChannels } from "../src/onboarding-channels.js";
 import { readSavedChannels, updateSavedChannel } from "../plugins/channels/config.js";
@@ -10,11 +10,16 @@ import { normalizeCustomProvider, readCustomModels, upsertCustomModel } from "..
 import {
   getRuntimeEnvironmentPath,
   loadRuntimeEnvironment,
+  RUNTIME_ENV_KEYS,
   parseRuntimeEnvironment,
   updateRuntimeSettings,
 } from "../plugins/runtime-settings/runtime-env.js";
 
 const temporaryDirectories: string[] = [];
+
+beforeEach(() => {
+  for (const key of RUNTIME_ENV_KEYS) vi.stubEnv(key, "");
+});
 
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "friday-onboarding-"));
@@ -23,6 +28,7 @@ async function temporaryDirectory(): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
@@ -50,6 +56,13 @@ describe("FRIDAY onboarding", () => {
       permission: "ask",
       timezone: "UTC",
       setupSandbox: false,
+      // This test owns only the first-run channel invariant. Keep model/auth
+      // discovery out of scope so provider-module startup cannot turn the
+      // assertion into a wall-clock-dependent integration test.
+      catalog: {
+        providers: () => ["openai"],
+        models: () => [{ id: "gpt-test", name: "GPT Test" }],
+      },
       io: {
         isInteractive: false,
         question: async () => { throw new Error("unexpected prompt"); },
@@ -141,6 +154,376 @@ describe("FRIDAY onboarding", () => {
     expect(builds).toBe(0);
     await runOnboarding({ ...common, setupSandbox: true });
     expect(builds).toBe(1);
+  });
+
+  it("captures the provider credential before model selection and shows only live key-scoped models", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "");
+    const home = await temporaryDirectory();
+    const events: string[] = [];
+    let modelChoices: readonly string[] = [];
+    let routingChoices: readonly string[] = [];
+    let discoveryCalls = 0;
+
+    const saved = await runOnboarding({
+      home,
+      setupSandbox: false,
+      configureChannels: false,
+      catalog: {
+        providers: () => ["google"],
+        models: () => [
+          { id: "gemini-2.5-flash-lite", name: "Gemini 2.5 Flash-Lite" },
+          { id: "gemini-3.5-flash-lite", name: "Gemini 3.5 Flash Lite", featured: true },
+        ],
+      },
+      modelDiscovery: {
+        supports: (provider) => provider === "google",
+        async list(provider, apiKey) {
+          discoveryCalls += 1;
+          events.push(`discover:${provider}:${apiKey}`);
+          return ["gemini-3.5-flash-lite", "provider-only-unknown-model"];
+        },
+      },
+      io: {
+        isInteractive: true,
+        select: async (input) => {
+          events.push(`select:${input.message}`);
+          if (input.message === "Choose your provider") return "google";
+          if (input.message === "Choose a model") {
+            modelChoices = input.choices.map((choice) => choice.value);
+            return "gemini-3.5-flash-lite";
+          }
+          if (input.message === "Routing model") return "separate";
+          if (input.message === "Routing model provider") return "google";
+          if (input.message === "Routing model model") {
+            routingChoices = input.choices.map((choice) => choice.value);
+            return "gemini-3.5-flash-lite";
+          }
+          if (input.message === "Permission mode") return "ask";
+          throw new Error(`unexpected selector: ${input.message}`);
+        },
+        confirm: async () => true,
+        secretQuestion: async () => { events.push("secret"); return "test-google-key"; },
+        question: async (message) => { throw new Error(`unexpected question: ${message}`); },
+        text: async (_prompt, initial) => initial ?? "UTC",
+        write: () => undefined,
+      },
+    });
+
+    expect(saved).toMatchObject({
+      modelProvider: "google",
+      modelId: "gemini-3.5-flash-lite",
+      routingProvider: "google",
+      routingModelId: "gemini-3.5-flash-lite",
+    });
+    expect(discoveryCalls).toBe(1);
+    expect(modelChoices).toEqual(["gemini-3.5-flash-lite", "provider-only-unknown-model"]);
+    expect(routingChoices).toEqual(["gemini-3.5-flash-lite", "provider-only-unknown-model"]);
+    expect(events.indexOf("secret")).toBeLessThan(events.indexOf("select:Choose a model"));
+    expect(events).toContain("discover:google:test-google-key");
+  });
+
+  it("authenticates OpenRouter before model selection and loads only models returned for that key", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "");
+    const home = await temporaryDirectory();
+    const events: string[] = [];
+    let modelChoices: readonly string[] = [];
+
+    const saved = await runOnboarding({
+      home,
+      useMainForRouting: true,
+      setupSandbox: false,
+      configureChannels: false,
+      catalog: {
+        providers: () => ["openrouter"],
+        models: () => [
+          { id: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol" },
+          { id: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5" },
+        ],
+      },
+      modelDiscovery: {
+        supports: (provider) => provider === "openrouter",
+        async list(provider, apiKey) {
+          events.push(`discover:${provider}:${apiKey}`);
+          return ["anthropic/claude-sonnet-5", "provider-only-model"];
+        },
+      },
+      io: {
+        isInteractive: true,
+        select: async (input) => {
+          events.push(`select:${input.message}`);
+          if (input.message === "Choose your provider") return "openrouter";
+          if (input.message === "Choose a model") {
+            modelChoices = input.choices.map((choice) => choice.value);
+            return "anthropic/claude-sonnet-5";
+          }
+          if (input.message === "Permission mode") return "ask";
+          throw new Error(`unexpected selector: ${input.message}`);
+        },
+        confirm: async () => true,
+        secretQuestion: async () => { events.push("secret"); return "openrouter-test-key"; },
+        question: async (message) => { throw new Error(`unexpected question: ${message}`); },
+        text: async (_prompt, initial) => initial ?? "UTC",
+        write: () => undefined,
+      },
+    });
+
+    expect(saved).toMatchObject({
+      modelProvider: "openrouter",
+      modelId: "anthropic/claude-sonnet-5",
+    });
+    expect(modelChoices).toEqual(["anthropic/claude-sonnet-5", "provider-only-model"]);
+    expect(events.indexOf("secret")).toBeLessThan(events.indexOf("select:Choose a model"));
+    expect(events).toContain("discover:openrouter:openrouter-test-key");
+  });
+
+  it("does not truncate live OpenRouter models before the searchable picker", async () => {
+    vi.stubEnv("OPENROUTER_API_KEY", "");
+    const home = await temporaryDirectory();
+    const liveIds = [
+      ...Array.from({ length: 130 }, (_, index) => `alpha/model-${String(index).padStart(3, "0")}`),
+      "stealth/union-alpha",
+    ];
+    let modelChoices: readonly string[] = [];
+
+    const saved = await runOnboarding({
+      home,
+      useMainForRouting: true,
+      setupSandbox: false,
+      configureChannels: false,
+      catalog: {
+        providers: () => ["openrouter"],
+        models: () => [],
+      },
+      modelDiscovery: {
+        supports: (provider) => provider === "openrouter",
+        async list() {
+          return liveIds;
+        },
+        pricingTier(_provider, modelId) {
+          return modelId === "stealth/union-alpha" ? "free" : "paid";
+        },
+      },
+      io: {
+        isInteractive: true,
+        select: async (input) => {
+          if (input.message === "Choose your provider") return "openrouter";
+          if (input.message === "Choose a model") {
+            modelChoices = input.choices.map((choice) => choice.value);
+            return "stealth/union-alpha";
+          }
+          if (input.message === "Permission mode") return "ask";
+          throw new Error(`unexpected selector: ${input.message}`);
+        },
+        confirm: async () => true,
+        secretQuestion: async () => "openrouter-test-key",
+        question: async (message) => { throw new Error(`unexpected question: ${message}`); },
+        text: async (_prompt, initial) => initial ?? "UTC",
+        write: () => undefined,
+      },
+    });
+
+    expect(modelChoices).toHaveLength(liveIds.length);
+    expect(modelChoices[0]).toBe("stealth/union-alpha");
+    expect(modelChoices).toContain("stealth/union-alpha");
+    expect(saved).toMatchObject({
+      modelProvider: "openrouter",
+      modelId: "stealth/union-alpha",
+    });
+  });
+
+  it("refuses a hardcoded model picker when authenticated live discovery is unavailable", async () => {
+    vi.stubEnv("ZAI_API_KEY", "");
+    const home = await temporaryDirectory();
+    const selections: string[] = [];
+
+    await expect(runOnboarding({
+      home,
+      useMainForRouting: true,
+      setupSandbox: false,
+      configureChannels: false,
+      catalog: {
+        providers: () => ["zai"],
+        models: () => [{ id: "must-not-be-used" }],
+      },
+      modelDiscovery: {
+        supports: () => false,
+        list: async () => { throw new Error("discovery should not run"); },
+      },
+      io: {
+        isInteractive: true,
+        select: async (input) => {
+          selections.push(input.message);
+          if (input.message === "Choose your provider") return "zai";
+          throw new Error(`model picker should not be reached: ${input.message}`);
+        },
+        confirm: async () => true,
+        secretQuestion: async () => { throw new Error("API key should not be requested without live discovery"); },
+        question: async (message) => { throw new Error(`unexpected question: ${message}`); },
+        text: async (_prompt, initial) => initial ?? "UTC",
+        write: () => undefined,
+      },
+    })).rejects.toThrow(/hardcoded model lists are disabled/);
+
+    expect(selections).toEqual(["Choose your provider"]);
+  });
+
+  it("completes OAuth authentication and account model discovery before showing models, then reuses the saved OAuth session", async () => {
+    const home = await temporaryDirectory();
+    const events: string[] = [];
+    let loginCalls = 0;
+    let modelChoices: readonly string[] = [];
+    const oauthAccess: NonNullable<OnboardingOptions["oauthAccess"]> = {
+      get(provider: string) {
+        if (provider !== "openai-codex") return undefined;
+        return {
+          id: "openai-codex",
+          name: "OpenAI Codex",
+          usesCallbackServer: true,
+          async login(callbacks) {
+            loginCalls += 1;
+            events.push("oauth:login");
+            callbacks.onAuth({ url: "https://example.test/oauth" });
+            return { access: "oauth-access", refresh: "oauth-refresh", expires: Date.now() + 60_000 };
+          },
+          async refreshToken(credentials: { access: string; refresh: string; expires: number }) {
+            return credentials;
+          },
+          getApiKey(credentials: { access: string }) {
+            return credentials.access;
+          },
+          async discoverModelIds(credentials: { access: string }) {
+            events.push(`oauth:models:${credentials.access}`);
+            return ["gpt-5.4", "account-only-model"];
+          },
+        };
+      },
+    };
+    const catalog = {
+      providers: () => ["openai-codex"],
+      models: () => [{ id: "gpt-5.3-codex" }, { id: "gpt-5.4" }],
+    };
+    const modelDiscovery = {
+      supports: () => false,
+      list: async () => { throw new Error("discovery should not run"); },
+    };
+    const io = {
+      isInteractive: true,
+      select: async (input: { message: string; choices: readonly { value: string }[] }) => {
+        events.push(`select:${input.message}`);
+        if (input.message === "Choose your provider") return "openai-codex";
+        if (input.message === "Choose a model") {
+          modelChoices = input.choices.map((choice) => choice.value);
+          return "gpt-5.4";
+        }
+        if (input.message === "Permission mode") return "ask";
+        throw new Error(`unexpected selector: ${input.message}`);
+      },
+      confirm: async () => true,
+      question: async (message: string) => { throw new Error(`unexpected question: ${message}`); },
+      text: async (_prompt: string, initial?: string) => initial ?? "UTC",
+      write: () => undefined,
+    };
+
+    await runOnboarding({
+      home,
+      useMainForRouting: true,
+      setupSandbox: false,
+      configureChannels: false,
+      catalog,
+      modelDiscovery,
+      oauthAccess,
+      io,
+    });
+
+    expect(events.indexOf("oauth:login")).toBeLessThan(events.indexOf("select:Choose a model"));
+    expect(events.indexOf("oauth:models:oauth-access")).toBeLessThan(events.indexOf("select:Choose a model"));
+    expect(modelChoices).toEqual(["account-only-model", "gpt-5.4"]);
+    expect(loginCalls).toBe(1);
+
+    events.length = 0;
+    await runOnboarding({
+      home,
+      useMainForRouting: true,
+      setupSandbox: false,
+      configureChannels: false,
+      catalog,
+      modelDiscovery,
+      oauthAccess,
+      io,
+    });
+    expect(loginCalls).toBe(1);
+    expect(events).not.toContain("oauth:login");
+    expect(events).toContain("oauth:models:oauth-access");
+    expect(events).toContain("select:Choose a model");
+  });
+
+  it("does not expose an OAuth provider model picker when authentication fails", async () => {
+    const home = await temporaryDirectory();
+    const selections: string[] = [];
+
+    await expect(runOnboarding({
+      home,
+      useMainForRouting: true,
+      setupSandbox: false,
+      configureChannels: false,
+      catalog: {
+        providers: () => ["github-copilot"],
+        models: () => [{ id: "gpt-5.4" }],
+      },
+      modelDiscovery: { supports: () => false, list: async () => [] },
+      oauthAccess: {
+        get: () => ({
+          id: "github-copilot",
+          name: "GitHub Copilot",
+          async login() { throw new Error("OAuth denied"); },
+          async refreshToken(credentials) { return credentials; },
+          getApiKey(credentials) { return credentials.access; },
+        }),
+      },
+      io: {
+        isInteractive: true,
+        select: async (input) => {
+          selections.push(input.message);
+          if (input.message === "Choose your provider") return "github-copilot";
+          throw new Error(`model picker should not be reached: ${input.message}`);
+        },
+        question: async (message) => { throw new Error(`unexpected question: ${message}`); },
+        write: () => undefined,
+      },
+    })).rejects.toThrow("OAuth denied");
+
+    expect(selections).toEqual(["Choose your provider"]);
+  });
+
+  it("rejects an explicitly requested model that the live credential cannot access", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "");
+    const home = await temporaryDirectory();
+
+    await expect(runOnboarding({
+      home,
+      provider: "google",
+      model: "gemini-2.5-flash-lite",
+      setupSandbox: false,
+      configureChannels: false,
+      catalog: {
+        providers: () => ["google"],
+        models: () => [
+          { id: "gemini-2.5-flash-lite" },
+          { id: "gemini-3.5-flash-lite" },
+        ],
+      },
+      modelDiscovery: {
+        supports: () => true,
+        list: async () => ["gemini-3.5-flash-lite"],
+      },
+      io: {
+        isInteractive: true,
+        confirm: async () => true,
+        secretQuestion: async () => "test-google-key",
+        question: async (message) => { throw new Error(`unexpected question: ${message}`); },
+        write: () => undefined,
+      },
+    })).rejects.toThrow("google/gemini-2.5-flash-lite is not available to the configured credential");
   });
 
   it("uses rich selector and confirmation hooks when the terminal UI provides them", async () => {

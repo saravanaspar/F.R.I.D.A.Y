@@ -4,7 +4,7 @@ const SAFE_VAULT_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 const API_KEY_PROVIDERS = new Set([
   "openai", "anthropic", "google", "deepseek", "xai", "groq", "cerebras", "openrouter",
-  "mistral", "minimax", "minimax-cn", "moonshotai", "moonshotai-cn", "huggingface", "fireworks",
+  "mistral", "nvidia", "minimax", "minimax-cn", "moonshotai", "moonshotai-cn", "huggingface", "fireworks",
   "opencode", "opencode-go", "kimi-coding", "zai", "azure-openai-responses", "vercel-ai-gateway",
   "cloudflare-workers-ai", "cloudflare-ai-gateway", "xiaomi", "xiaomi-token-plan-cn",
   "xiaomi-token-plan-ams", "xiaomi-token-plan-sgp",

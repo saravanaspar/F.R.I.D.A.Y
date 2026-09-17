@@ -1,4 +1,9 @@
+- Removed the retired Linux hidden-compositor/viewer implementation from source: the built-in provider is now `linux-x11` only, the provider file/tests are named for X11, old viewer-manager and headless compositor deployment files are deleted, and native desktop tests use `DESKTOP-N` fixtures.
 # Changelog
+- Native Linux desktop migration: visible Computer work now targets real X11 virtual desktops with the user's selected Brave/Chrome/Chromium browser directly on the desktop; setup disables the old Sway/HEADLESS/WayVNC/TigerVNC deployment and no longer injects KWin scripts. A single persistent FRIDAY browser profile is shared by every FRIDAY desktop, so sign-in is one-time per FRIDAY profile rather than per desktop.
+- Computer durable-retry hardening: routine task approval keys use stable admitted turn/job identity instead of ephemeral Agent run/lease ids, and post-run managed-process cleanup now uses Execution `closeRun(runId)` so successful Telegram Computer turns are not retried merely because async-local Agent ownership has already unwound.
+- Computer follow-up/status and browser lifecycle hardening: Shared Agent Screen presentation now begins only after task approval, read-only playback/page-status questions bypass a new control lease/approval, Linux compatibility mode reuses one FRIDAY-owned Chromium target per Agent screen and prunes stale unmapped FRIDAY pages across core restarts, and observations expose bounded media state so playback must be verified rather than inferred from a search/watch page.
+- Computer task approvals are now lease/run-scoped: one approval covers ordinary observe/visual/browser operations on the same Agent screen, high-impact browser actions remain separately approved, and Shared Agent Screen viewer/server units are reused across retries with on-failure restart instead of being torn down and relaunched.
 
 Notable user-facing changes to F.R.I.D.A.Y are tracked here.
 
@@ -6,6 +11,35 @@ The project is in active development. GitHub Releases contain the authoritative
 published release artifacts and generated release notes.
 
 ## [Unreleased]
+
+### Shared Agent Screens and restart-safe Computer control
+
+- Replaced the incorrect “visible means non-`HEADLESS-*`” rule with Shared Agent Screens. Normal Computer utility requests lease the existing isolated `HEADLESS-N` Agent output, mirror that exact output through a private view-only VNC channel, and place the viewer on a dedicated Human-switchable host workspace; explicit headless/background requests skip presentation.
+- Added host workspace backends for KDE Plasma/KWin, Sway, Hyprland, and conditional EWMH-compatible X11 desktops, plus fail-closed support reporting for unsupported/missing-dependency hosts such as GNOME Wayland without a safe external placement backend.
+- Shared-screen viewers use FRIDAY-owned transient user units, a private UNIX socket, disabled VNC input/clipboard, and exact-prefix cleanup. They remain visible after a completed task until explicitly closed, without keeping Agent actions alive.
+- Computer utility turns persist a private run marker with only the exact FRIDAY-owned Computer execution binding. A durable retry after a FRIDAY restart is stopped instead of resuming stale GUI actions, and the recorded run-scoped resources are cleaned through the existing Computer service.
+- Direct cleanup requests such as stopping active Computer/headless work are routed deterministically to a host-side cleanup path and operate only on recorded FRIDAY-owned run bindings and screen leases. They never use broad process-name killing and do not target the FRIDAY runtime, plugin processes, or unrelated user applications.
+- Follow-up verification hardening keeps the Computer public contract within FRIDAY's bounded capability-catalog limit, preserves the established compatibility-mode `systemctl enable --now` deployment contract while still refreshing host desktop environment on restart, and isolates refinement tests from an operator's exported `FRIDAY_STATE_DIR` so `npm run verify` cannot reuse live runtime state.
+
+### Capability-aware utility execution
+
+- Split transient utility routing from capability selection. Pure conversational turns can use `capabilityProfile=none`, Computer/browser/UI requests use `capabilityProfile=computer`, and other one-off Agent work can retain the general capability surface instead of treating every utility turn as tool-free.
+- Computer-routed utility turns now acquire their own Computer screen lease even without a Project Computer target, expose only Computer-contributed tools plus Computer-specific prompt policy, and keep unrelated tools, Skills, Project context, recursion packages, and capability prompt sections out of the model request.
+- Kept older routed work backward compatible by widening missing capability-profile metadata to `general`; host validation rejects invalid destination/capability combinations, and batching keys include the capability profile so no-tool and Computer work are not accidentally merged.
+
+### Durable post-integration channel batching
+
+- Telegram now persists a one-time integration activation boundary instead of flushing the provider cursor on every process start. Provider messages older than that boundary are ignored, while valid post-integration messages survive FRIDAY restarts and retain bounded retry/recovery.
+- Same-sender/same-conversation bursts are coalesced into bounded batches. Routing classifies up to 100 messages with one classifier request, validates one decision per message, never batches across trusted continuity scopes, groups compatible Agent work, and delivers immediate results as one cumulative channel reply.
+- Added private append-only daily routing JSONL traces under the FRIDAY state root with classifier prompts, provider-visible response content, parsed decisions, model/stop metadata, usage when exposed, and bounded error details; SQLite/events remain the authoritative durable control plane.
+- Transient utility Agent turns now use a minimal prompt/tool surface: no tool schemas, Skills catalog, Project context, recursion packages, or unrelated host/runtime capability sections are injected, while core prompt policy, runtime facts, and explicit user/persona configuration remain available.
+
+### Credential-scoped model onboarding
+
+- Reordered API-key onboarding to `provider -> credential -> live provider model discovery -> FRIDAY-compatible model choice`, preventing stale generated-catalog entries from being offered when the configured credential cannot access them. Main and routing selections reuse one discovery result per provider during a setup session.
+- Added bounded, secret-redacting live model discovery in the Model subsystem for Google, OpenAI, Anthropic, DeepSeek, xAI, Groq, and Mistral, while retaining the generated catalog as the source of execution/capability metadata and falling back to the existing catalog flow for providers without a safe discovery adapter.
+- Updated protected remote credential validation and trusted-channel main-model onboarding to use the same discovery boundary, so retired or ACL-inaccessible model ids fail before runtime settings are published.
+- Corrected Devices state-root precedence to honor mission-scoped `FRIDAY_STATE_DIR` before `FRIDAY_HOME`, preventing client/gateway tests and mission runtimes from accidentally reusing globally paired device state.
 
 ### Prompt trust, context provenance, and Agent coordination
 

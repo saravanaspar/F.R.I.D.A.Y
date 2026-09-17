@@ -2,7 +2,7 @@
  * GitHub Copilot OAuth flow
  */
 
-import { getProviderModels, type AuthModelDescriptor } from "../model-access.js";
+import type { AuthModelDescriptor } from "../model-access.js";
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthProviderInterface } from "./types.js";
 import { oauthFetch } from "./fetch.js";
 
@@ -75,6 +75,7 @@ function getBaseUrlFromToken(token: string): string | null {
 	const match = token.match(/proxy-ep=([^;]+)/);
 	if (!match) return null;
 	const proxyHost = match[1];
+	if (!proxyHost) return null;
 	// Convert proxy.xxx to api.xxx
 	const apiHost = proxyHost.replace(/^proxy\./, "api.");
 	return `https://${apiHost}`;
@@ -299,21 +300,61 @@ async function enableGitHubCopilotModel(token: string, modelId: string, enterpri
 }
 
 /**
- * Enable all known GitHub Copilot models that may require policy acceptance.
- * Called after successful login to ensure all models are available.
+ * Enable only models returned by the authenticated Copilot account. FRIDAY does
+ * not carry a baked-in Copilot model list.
  */
-async function enableAllGitHubCopilotModels(
-	token: string,
-	enterpriseDomain?: string,
+async function enableAvailableGitHubCopilotModels(
+	credentials: OAuthCredentials,
 	onProgress?: (model: string, success: boolean) => void,
 ): Promise<void> {
-	const models = getProviderModels("github-copilot");
+	const creds = credentials as CopilotCredentials;
+	const modelIds = await discoverGitHubCopilotModelIds(credentials);
 	await Promise.all(
-		models.map(async (model) => {
-			const success = await enableGitHubCopilotModel(token, model.id, enterpriseDomain);
-			onProgress?.(model.id, success);
+		modelIds.map(async (modelId) => {
+			const success = await enableGitHubCopilotModel(creds.access, modelId, creds.enterpriseUrl);
+			onProgress?.(modelId, success);
 		}),
 	);
+}
+
+/**
+ * Fetch the model ids that the authenticated Copilot edge exposes to this
+ * account. The provider response is the source of truth; FRIDAY does not
+ * intersect this list with a bundled model catalog.
+ */
+export async function discoverGitHubCopilotModelIds(
+	credentials: OAuthCredentials,
+): Promise<readonly string[]> {
+	const creds = credentials as CopilotCredentials;
+	const baseUrl = getGitHubCopilotBaseUrl(creds.access, creds.enterpriseUrl);
+	const response = await oauthFetch(`${baseUrl}/models`, {
+		headers: {
+			Accept: "application/json",
+			Authorization: `Bearer ${creds.access}`,
+			...COPILOT_HEADERS,
+		},
+	});
+	if (!response.ok) {
+		throw new Error(`GitHub Copilot model discovery failed (${response.status}${response.statusText ? ` ${response.statusText}` : ""})`);
+	}
+	let raw: unknown;
+	try {
+		raw = await response.json();
+	} catch {
+		throw new Error("GitHub Copilot model discovery returned invalid JSON");
+	}
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		throw new Error("Invalid GitHub Copilot model response");
+	}
+	const data = (raw as Record<string, unknown>).data;
+	if (!Array.isArray(data)) throw new Error("Invalid GitHub Copilot model response");
+	const ids = new Set<string>();
+	for (const item of data) {
+		if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+		const id = (item as Record<string, unknown>).id;
+		if (typeof id === "string" && id.trim()) ids.add(id.trim());
+	}
+	return Object.freeze([...ids]);
 }
 
 /**
@@ -361,7 +402,7 @@ export async function loginGitHubCopilot(options: {
 
 	// Enable all models after successful login
 	options.onProgress?.("Enabling models...");
-	await enableAllGitHubCopilotModels(credentials.access, enterpriseDomain ?? undefined);
+	await enableAvailableGitHubCopilotModels(credentials);
 	return credentials;
 }
 
@@ -371,10 +412,14 @@ export const githubCopilotOAuthProvider: OAuthProviderInterface = {
 
 	async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
 		return loginGitHubCopilot({
-			onAuth: (url, instructions) => callbacks.onAuth({ url, instructions }),
+			onAuth: (url, instructions) =>
+				callbacks.onAuth({
+					url,
+					...(instructions === undefined ? {} : { instructions }),
+				}),
 			onPrompt: callbacks.onPrompt,
-			onProgress: callbacks.onProgress,
-			signal: callbacks.signal,
+			...(callbacks.onProgress === undefined ? {} : { onProgress: callbacks.onProgress }),
+			...(callbacks.signal === undefined ? {} : { signal: callbacks.signal }),
 		});
 	},
 
@@ -385,6 +430,10 @@ export const githubCopilotOAuthProvider: OAuthProviderInterface = {
 
 	getApiKey(credentials: OAuthCredentials): string {
 		return credentials.access;
+	},
+
+	discoverModelIds(credentials: OAuthCredentials): Promise<readonly string[]> {
+		return discoverGitHubCopilotModelIds(credentials);
 	},
 
 	modifyModels<T extends AuthModelDescriptor>(models: T[], credentials: OAuthCredentials): T[] {

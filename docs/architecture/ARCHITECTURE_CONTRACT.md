@@ -46,7 +46,10 @@ Those belong to plugins.
 entrypoint. On first run its mandatory bootstrap establishes the routing/system
 model plus a credential when that provider requires one, at least one ingress
 channel with one explicitly confirmed exact operator identity, and an explicit
-host-privilege policy (`broker` or `none`). The IANA timezone and dedicated
+host-privilege policy (`broker` or `none`). For API-key providers with a supported
+model-list endpoint, the credential is established before model choice and only
+credential-visible ids that intersect FRIDAY's runtime descriptor catalog are
+offered. The IANA timezone and dedicated
 `FRIDAY_WORKSPACE` are persisted as bounded runtime settings. The main reasoning
 model is optional during router-only bootstrap and can be configured later; a
 legacy main-only installation may derive routing from the main pair until a

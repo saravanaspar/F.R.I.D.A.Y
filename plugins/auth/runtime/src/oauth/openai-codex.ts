@@ -24,6 +24,10 @@ const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const REDIRECT_URI = "http://localhost:1455/auth/callback";
 const SCOPE = "openid profile email offline_access";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
+const CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models";
+// Ask the authenticated Codex backend for its current catalog. FRIDAY still
+// intersects the returned slugs with its own descriptors before selection.
+const CODEX_MODEL_DISCOVERY_CLIENT_VERSION = "99.99.99";
 
 type TokenSuccess = { type: "success"; access: string; refresh: string; expires: number };
 type TokenFailure = { type: "failed"; message: string; status?: number };
@@ -316,6 +320,54 @@ function getAccountId(accessToken: string): string | null {
 	return typeof accountId === "string" && accountId.length > 0 ? accountId : null;
 }
 
+/** Fetch model slugs visible to the authenticated ChatGPT/Codex account. */
+export async function discoverOpenAICodexModelIds(
+	credentials: OAuthCredentials,
+): Promise<readonly string[]> {
+	const accountId = typeof credentials.accountId === "string" && credentials.accountId.trim()
+		? credentials.accountId.trim()
+		: getAccountId(credentials.access);
+	if (!accountId) throw new Error("OpenAI Codex OAuth credential is missing the ChatGPT account id");
+
+	const url = new URL(CODEX_MODELS_URL);
+	url.searchParams.set("client_version", CODEX_MODEL_DISCOVERY_CLIENT_VERSION);
+	const response = await oauthFetch(url, {
+		headers: {
+			Accept: "application/json",
+			Authorization: `Bearer ${credentials.access}`,
+			"chatgpt-account-id": accountId,
+			originator: "pi",
+			"User-Agent": "pi",
+		},
+	});
+	if (!response.ok) {
+		throw new Error(`OpenAI Codex model discovery failed (${response.status}${response.statusText ? ` ${response.statusText}` : ""})`);
+	}
+
+	let raw: unknown;
+	try {
+		raw = await response.json();
+	} catch {
+		throw new Error("OpenAI Codex model discovery returned invalid JSON");
+	}
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		throw new Error("OpenAI Codex model discovery returned an invalid response");
+	}
+	const models = (raw as Record<string, unknown>).models;
+	if (!Array.isArray(models)) throw new Error("OpenAI Codex model discovery returned an invalid response");
+	const ids = new Set<string>();
+	for (const item of models) {
+		if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+		const record = item as Record<string, unknown>;
+		const slug = record.slug;
+		if (typeof slug !== "string" || !slug.trim()) continue;
+		if (record.visibility !== undefined && record.visibility !== "list") continue;
+		if (record.supported_in_api === false) continue;
+		ids.add(slug.trim());
+	}
+	return Object.freeze([...ids]);
+}
+
 /**
  * Login with OpenAI Codex OAuth
  *
@@ -478,5 +530,9 @@ export const openaiCodexOAuthProvider: OAuthProviderInterface = {
 
 	getApiKey(credentials: OAuthCredentials): string {
 		return credentials.access;
+	},
+
+	discoverModelIds(credentials: OAuthCredentials): Promise<readonly string[]> {
+		return discoverOpenAICodexModelIds(credentials);
 	},
 };

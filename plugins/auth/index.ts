@@ -2,6 +2,7 @@ import { reportOperationalError } from "@friday/operational-errors";
 import * as auth from "@friday/auth";
 import type { FridayPlugin } from "../../src/plugin.js";
 import { modelCredentialVaultRef, modelOAuthCredentialVaultRef, modelProviderTypicallyNeedsApiKey } from "./model-credential-ref.js";
+import { decodeModelOAuthCredential, encodeModelOAuthCredential } from "./model-oauth-credential.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { CHANNELS_TRUSTED_CAPABILITY } from "../channels/trusted-contract.js";
 import { MODEL_CAPABILITY } from "../model/contract.js";
@@ -49,24 +50,6 @@ function targetFromPrincipal(principal: Parameters<ProtectedCredentialService["c
   });
 }
 
-function encodeOAuthCredentials(credentials: Record<string, unknown>): Uint8Array {
-  const text = JSON.stringify(credentials);
-  if (!text || text.length > 128_000) throw new Error("OAuth credential bundle is invalid or too large");
-  return Buffer.from(text, "utf8");
-}
-
-function decodeOAuthCredentials(bytes: Uint8Array, provider: string): import("@friday/auth").OAuthCredentials {
-  let parsed: unknown;
-  try { parsed = JSON.parse(Buffer.from(bytes).toString("utf8")); }
-  catch { throw new Error(`Stored OAuth credential for ${provider} is invalid`); }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`Stored OAuth credential for ${provider} is invalid`);
-  const record = parsed as Record<string, unknown>;
-  if (typeof record.access !== "string" || typeof record.refresh !== "string" || typeof record.expires !== "number") {
-    throw new Error(`Stored OAuth credential for ${provider} is incomplete`);
-  }
-  return record as import("@friday/auth").OAuthCredentials;
-}
-
 const authPlugin: FridayPlugin = definePlugin({
   id: "auth",
   requires: [MODEL_CAPABILITY, VAULT_CAPABILITY, VAULT_TRUSTED_CAPABILITY],
@@ -76,13 +59,6 @@ const authPlugin: FridayPlugin = definePlugin({
   const model = ctx.services.require(MODEL_CAPABILITY);
   const vault = ctx.services.require(VAULT_CAPABILITY);
   const trustedVault = ctx.services.require(VAULT_TRUSTED_CAPABILITY);
-
-  auth.configureModelCatalogAccess({
-    getModels: (provider) => {
-      const knownProvider = model.getProviders().find((candidate) => candidate === provider);
-      return knownProvider ? model.getModels(knownProvider) : [];
-    },
-  });
 
   const protectedCredentials: ProtectedCredentialService = Object.freeze({
     async capture(input: ProtectedCredentialCaptureInput) {
@@ -125,9 +101,9 @@ const authPlugin: FridayPlugin = definePlugin({
     const provider = safeProvider(input.provider);
     const knownProvider = model.getProviders().find((candidate) => candidate === provider);
     if (!knownProvider) throw new Error(`Unknown model provider: ${provider}`);
-    const models = model.getModels(knownProvider);
-    const testModel = models.find((candidate) => candidate.featured) ?? models[0];
-    if (!testModel) throw new Error(`No models are registered for provider ${provider}`);
+    if (!model.supportsLiveModelDiscovery(provider)) {
+      throw new Error(`${provider} does not expose live API-key model discovery to FRIDAY; hardcoded model lists are disabled`);
+    }
     const ref = credentials.ref(provider);
     const mode = input.mode ?? (vault.exists(ref) ? "rotate" : "create");
     const pending = channels.requestCredentialCapture({
@@ -139,13 +115,9 @@ const authPlugin: FridayPlugin = definePlugin({
       inputMode: "opaque-token",
       async validateSecret(secret: Uint8Array) {
         const apiKey = Buffer.from(secret).toString("utf8");
-        const response = await model.completeSimple(
-          testModel as never,
-          { messages: [{ role: "user", content: "Reply only with OK.", timestamp: Date.now() }] },
-          { apiKey, maxTokens: 4, temperature: 0 },
-        );
-        if (response.stopReason === "error" || response.stopReason === "aborted") {
-          throw new Error(`${provider} rejected the credential`);
+        const available = await model.discoverAvailableModelIds(provider, apiKey);
+        if (available.length === 0) {
+          throw new Error(`${provider} credential exposes no generative models`);
         }
       },
       successMessage: `Credential verified and stored for ${provider}.`,
@@ -184,14 +156,49 @@ const authPlugin: FridayPlugin = definePlugin({
       const oauthProvider = auth.getOAuthProvider(provider);
       if (!oauthProvider) throw new Error(`OAuth provider is no longer registered: ${provider}`);
       let oauthCredentials: import("@friday/auth").OAuthCredentials | undefined;
-      await trustedVault.consume(oauthRef, (secret) => { oauthCredentials = decodeOAuthCredentials(secret, provider); });
+      await trustedVault.consume(oauthRef, (secret) => { oauthCredentials = decodeModelOAuthCredential(secret, provider) as import("@friday/auth").OAuthCredentials; });
       if (!oauthCredentials) return undefined;
       if (Date.now() >= oauthCredentials.expires) {
         oauthCredentials = await oauthProvider.refreshToken(oauthCredentials);
-        const encoded = encodeOAuthCredentials(oauthCredentials);
+        const encoded = encodeModelOAuthCredential(oauthCredentials);
         try { trustedVault.rotate(oauthRef, encoded); } finally { encoded.fill(0); }
       }
       return oauthProvider.getApiKey(oauthCredentials);
+    },
+    async listAvailableModelIds(providerInput: string, options: { readonly signal?: AbortSignal | undefined } = {}) {
+      const provider = safeProvider(providerInput);
+      const oauthRef = credentials.oauthRef(provider);
+      if (vault.exists(oauthRef)) {
+        const oauthProvider = auth.getOAuthProvider(provider);
+        if (!oauthProvider) throw new Error(`OAuth provider is no longer registered: ${provider}`);
+        let oauthCredentials: import("@friday/auth").OAuthCredentials | undefined;
+        await trustedVault.consume(oauthRef, (secret) => {
+          oauthCredentials = decodeModelOAuthCredential(secret, provider) as import("@friday/auth").OAuthCredentials;
+        });
+        if (!oauthCredentials) throw new Error(`Stored OAuth credential is unavailable for ${provider}`);
+        if (Date.now() >= oauthCredentials.expires) {
+          oauthCredentials = await oauthProvider.refreshToken(oauthCredentials);
+          const encoded = encodeModelOAuthCredential(oauthCredentials);
+          try { trustedVault.rotate(oauthRef, encoded); } finally { encoded.fill(0); }
+        }
+        if (oauthProvider.discoverModelIds) {
+          const ids = await oauthProvider.discoverModelIds(oauthCredentials);
+          if (ids.length === 0) throw new Error(`${provider} account exposes no generative models`);
+          for (const id of ids) model.getModel(provider as never, id as never);
+          return ids;
+        }
+      }
+
+      const apiKey = await credentials.getApiKey(provider);
+      if (!apiKey) throw new Error(`${provider} authentication is required before model discovery`);
+      if (!model.supportsLiveModelDiscovery(provider)) {
+        throw new Error(`${provider} does not expose live model discovery to FRIDAY; hardcoded model lists are disabled`);
+      }
+      const ids = await model.discoverAvailableModelIds(provider, apiKey, {
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      });
+      if (ids.length === 0) throw new Error(`${provider} credential exposes no generative models`);
+      return ids;
     },
     async requestApiKeyCapture(input: ApiKeyCaptureInput) { return beginApiKeyCapture(input); },
     async captureApiKey(input: ApiKeyCaptureInput) {
@@ -253,7 +260,7 @@ const authPlugin: FridayPlugin = definePlugin({
         },
       });
       const ref = credentials.oauthRef(providerId);
-      const encoded = encodeOAuthCredentials(oauthCredentials);
+      const encoded = encodeModelOAuthCredential(oauthCredentials);
       try {
         if (vault.exists(ref)) trustedVault.rotate(ref, encoded);
         else trustedVault.create({ ref, kind: "oauth", secret: encoded });

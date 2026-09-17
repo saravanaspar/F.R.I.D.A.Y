@@ -173,12 +173,22 @@ export interface ChannelAttachmentContent {
   readonly fileName?: string | undefined;
 }
 
+/** Trusted outbound audio payload. Transports may choose a native voice-note
+ * surface when `voiceNote` is true and the provider supports the MIME type. */
+export interface ChannelOutboundAudio {
+  readonly bytes: Uint8Array;
+  readonly mimeType: string;
+  readonly fileName?: string | undefined;
+  readonly voiceNote?: boolean | undefined;
+}
+
 export interface ChannelTransport {
   readonly channel: ChannelKind;
   readonly accountId: string;
   start(handler: ChannelInboundHandler): Promise<void>;
   stop(): Promise<void>;
   send(target: ChannelTarget, text: string): Promise<ChannelSendResult>;
+  sendAudio?(target: ChannelTarget, audio: ChannelOutboundAudio): Promise<ChannelSendResult>;
   sendProtectedAction?(target: ChannelTarget, text: string, action: ChannelProtectedAction): Promise<ChannelSendResult>;
   sendProtectedQuestion?(target: ChannelTarget, text: string, question: ChannelProtectedQuestion): Promise<ChannelSendResult>;
   /** Optional trusted fetch port for attachments previously emitted by this transport. */

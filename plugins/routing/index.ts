@@ -19,6 +19,7 @@ import {
   type RoutingMemoryHint,
   type RoutingSessionCandidate,
 } from "./router.js";
+import { appendRoutingTrace, traceJson } from "./trace-jsonl.js";
 
 const SESSION_CANDIDATE_LIMIT = 12;
 const SESSION_SEARCH_POOL = 48;
@@ -28,7 +29,6 @@ function stateRoot(environment: NodeJS.ProcessEnv = process.env): string {
   const configured = environment.FRIDAY_STATE_DIR?.trim() || environment.FRIDAY_HOME?.trim();
   return configured ? (isAbsolute(configured) ? configured : resolve(configured)) : join(homedir(), ".friday");
 }
-
 function clip(value: string, max: number): string {
   const normalized = value.replaceAll("\u0000", "\ufffd").replace(/\s+/g, " ").trim();
   return normalized.length <= max ? normalized : `${normalized.slice(0, Math.max(0, max - 1))}\u2026`;
@@ -37,20 +37,17 @@ function clip(value: string, max: number): string {
 function tokens(value: string): readonly string[] {
   return [...new Set((value.toLowerCase().match(/[\p{L}\p{N}_-]{2,}/gu) ?? []).slice(0, 32))];
 }
-
 function relevance(query: readonly string[], text: string): number {
   if (query.length === 0) return 0;
   const haystack = text.toLowerCase();
   return query.reduce((score, term) => score + (haystack.includes(term) ? 1 : 0), 0);
 }
-
 function sessionLabel(session: { id: string; cwd: string; name?: string | undefined }): string {
   const name = session.name?.trim();
   if (name) return clip(name, 160);
   const cwdName = basename(session.cwd.trim());
   return cwdName ? clip(cwdName, 160) : `Session ${session.id.slice(0, 8)}`;
 }
-
 function createSessionCandidateProvider(sessions: SessionsService, sessionJobs: () => SessionJobsService | undefined) {
   return async ({ query, principal }: { readonly query: string; readonly principal: RoutingPrincipal }): Promise<readonly RoutingSessionCandidate[]> => {
     const all = (await sessions.SessionManager.listAll(undefined, join(stateRoot(), "sessions")))
@@ -72,14 +69,12 @@ function createSessionCandidateProvider(sessions: SessionsService, sessionJobs: 
       }))
       .filter((entry) => entry.score > 0)
       .sort((left, right) => right.score - left.score || right.session.modified.getTime() - left.session.modified.getTime());
-
     const merged = new Map<string, (typeof all)[number]>();
     for (const { session } of searched) merged.set(session.id, session);
     for (const session of pool) {
       if (merged.size >= SESSION_CANDIDATE_LIMIT) break;
       merged.set(session.id, session);
     }
-
     return Object.freeze([...merged.values()].slice(0, SESSION_CANDIDATE_LIMIT).map((session) => {
       const active = activeBySession.get(session.id) ?? [];
       return Object.freeze({
@@ -95,7 +90,6 @@ function createSessionCandidateProvider(sessions: SessionsService, sessionJobs: 
     }));
   };
 }
-
 function createMemorySearch(memory: MemoryService) {
   return async ({ query, principal }: { readonly query: string; readonly principal: RoutingPrincipal }): Promise<readonly RoutingMemoryHint[]> => {
     const root = principalStateRoot(stateRoot(), principal);
@@ -115,7 +109,6 @@ function createMemorySearch(memory: MemoryService) {
     }
   };
 }
-
 function selectedModel(environment: NodeJS.ProcessEnv = process.env): { provider: string; modelId: string } {
   const provider = environment.FRIDAY_ROUTING_PROVIDER?.trim() || environment.FRIDAY_MODEL_PROVIDER?.trim();
   const modelId = environment.FRIDAY_ROUTING_MODEL_ID?.trim() || environment.FRIDAY_MODEL_ID?.trim();
@@ -126,40 +119,92 @@ function selectedModel(environment: NodeJS.ProcessEnv = process.env): { provider
   }
   return { provider, modelId };
 }
-
+function safeTraceError(error: unknown): Readonly<{ name: string; message: string }> {
+  if (error instanceof Error) return Object.freeze({ name: error.name || "Error", message: clip(error.message, 4_000) });
+  return Object.freeze({ name: "Error", message: clip(String(error), 4_000) });
+}
+function writeRoutingTrace(record: Parameters<typeof appendRoutingTrace>[1]): void {
+  try {
+    appendRoutingTrace(stateRoot(), record);
+  } catch (error) {
+    reportOperationalError({ component: "routing", operation: "append routing JSON trace", error, severity: "warn" });
+  }
+}
 function createClassifier(models: ModelService, credentials: () => ModelCredentialService | undefined): RoutingClassifier {
-  return async ({ systemPrompt, userPrompt, signal }) => {
+  return async ({ systemPrompt, userPrompt, signal, maxTokens, traceKind = "single", messageIds = [] }) => {
     const selected = selectedModel();
+    const timestamp = new Date().toISOString();
     const model = models.getModel(selected.provider as never, selected.modelId as never);
     if (!model) throw new Error(`Unknown routing model: ${selected.provider}/${selected.modelId}`);
-    const apiKey = await credentials()?.getApiKey(selected.provider);
-    const response = await models.completeSimple(
-      model,
-      {
+    let rawResponseText: string | undefined;
+    let providerContent: ReturnType<typeof traceJson> | undefined;
+    let stopReason: string | undefined;
+    let usage: ReturnType<typeof traceJson> | undefined;
+    try {
+      const apiKey = await credentials()?.getApiKey(selected.provider);
+      const response = await models.completeSimple(
+        model,
+        {
+          systemPrompt,
+          messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }],
+        },
+        {
+          temperature: 0,
+          maxTokens: maxTokens ?? 384,
+          reasoning: "off",
+          ...(apiKey === undefined ? {} : { apiKey }),
+          ...(signal === undefined ? {} : { signal }),
+        },
+      );
+      providerContent = traceJson(response.content);
+      stopReason = response.stopReason;
+      const responseRecord = response as unknown as Record<string, unknown>;
+      if (responseRecord.usage !== undefined) usage = traceJson(responseRecord.usage);
+      rawResponseText = response.content
+        .filter((content): content is { type: "text"; text: string } => content.type === "text")
+        .map((content) => content.text)
+        .join("\n")
+        .trim();
+      if (response.stopReason === "error" || response.stopReason === "aborted") {
+        throw new Error(`Routing model failed: ${response.errorMessage || response.stopReason}`);
+      }
+      if (response.stopReason === "length") throw new Error("Routing model output was truncated");
+      if (!rawResponseText) throw new Error("Routing model returned no JSON decision");
+      const parsed = models.parseJsonWithRepair<unknown>(rawResponseText);
+      writeRoutingTrace({
+        timestamp,
+        traceKind,
+        provider: selected.provider,
+        model: selected.modelId,
+        messageIds: Object.freeze([...messageIds]),
         systemPrompt,
-        messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }],
-      },
-      {
-        temperature: 0,
-        maxTokens: 384,
-        ...(apiKey === undefined ? {} : { apiKey }),
-        ...(signal === undefined ? {} : { signal }),
-      },
-    );
-    if (response.stopReason === "error" || response.stopReason === "aborted") {
-      throw new Error(`Routing model failed: ${response.errorMessage || response.stopReason}`);
+        userPrompt,
+        rawResponseText,
+        ...(providerContent === undefined ? {} : { providerContent }),
+        parsedResponse: traceJson(parsed),
+        ...(stopReason === undefined ? {} : { stopReason }),
+        ...(usage === undefined ? {} : { usage }),
+      });
+      return parsed;
+    } catch (error) {
+      writeRoutingTrace({
+        timestamp,
+        traceKind,
+        provider: selected.provider,
+        model: selected.modelId,
+        messageIds: Object.freeze([...messageIds]),
+        systemPrompt,
+        userPrompt,
+        ...(rawResponseText === undefined ? {} : { rawResponseText }),
+        ...(providerContent === undefined ? {} : { providerContent }),
+        ...(stopReason === undefined ? {} : { stopReason }),
+        ...(usage === undefined ? {} : { usage }),
+        error: safeTraceError(error),
+      });
+      throw error;
     }
-    if (response.stopReason === "length") throw new Error("Routing model output was truncated");
-    const text = response.content
-      .filter((content): content is { type: "text"; text: string } => content.type === "text")
-      .map((content) => content.text)
-      .join("\n")
-      .trim();
-    if (!text) throw new Error("Routing model returned no JSON decision");
-    return models.parseJsonWithRepair<unknown>(text);
   };
 }
-
 function eventOccurredAt(timestamp: number): string {
   const candidate = Number.isFinite(timestamp) ? new Date(timestamp) : new Date();
   return Number.isNaN(candidate.getTime()) ? new Date().toISOString() : candidate.toISOString();
@@ -171,17 +216,14 @@ function routeEventKey(message: { id: string; principal: RoutingPrincipal }): st
     message.id,
   ])).digest("hex");
 }
-
 function destinationEventKey(kind: string, id: string): string {
   return createHash("sha256").update(JSON.stringify([kind, id])).digest("hex").slice(0, 32);
 }
-
 const routingPlugin: FridayPlugin = definePlugin({ id: "routing", requires: [EVENTS_CAPABILITY, MEMORY_CAPABILITY, MODEL_CAPABILITY, SESSIONS_CAPABILITY], optional: [MODEL_CREDENTIALS_CAPABILITY, SESSION_JOBS_CAPABILITY], provides: [ROUTING_CAPABILITY] }, (ctx) => {
   const events = ctx.services.require(EVENTS_CAPABILITY);
   const memory = ctx.services.require(MEMORY_CAPABILITY);
   const models = ctx.services.require(MODEL_CAPABILITY);
   const sessions = ctx.services.require(SESSIONS_CAPABILITY);
-
   const routing = createRoutingService({
     classify: createClassifier(models, () => ctx.services.optional(MODEL_CREDENTIALS_CAPABILITY)),
     sessions: createSessionCandidateProvider(sessions, () => ctx.services.optional(SESSION_JOBS_CAPABILITY)),
@@ -200,7 +242,10 @@ const routingPlugin: FridayPlugin = definePlugin({ id: "routing", requires: [EVE
             kind: decision.destination.kind,
             key: destinationEventKey(decision.destination.kind, decision.destination.id),
           },
-          execution: { profile: decision.execution.profile },
+          execution: {
+            profile: decision.execution.profile,
+            ...(decision.execution.capabilityProfile === undefined ? {} : { capabilityProfile: decision.execution.capabilityProfile }),
+          },
           confidence: decision.confidence,
         },
       });
@@ -225,7 +270,6 @@ const routingPlugin: FridayPlugin = definePlugin({ id: "routing", requires: [EVE
     },
   });
 
-
   ctx.services.provide(ROUTING_CAPABILITY, routing);
 });
 
@@ -233,6 +277,7 @@ export default routingPlugin;
 export * from "./contract.js";
 export {
   createRoutingService,
+  ROUTING_BATCH_SYSTEM_PROMPT,
   ROUTING_SYSTEM_PROMPT,
   type RoutingClassifier,
   type RoutingClassifierRequest,
@@ -240,3 +285,4 @@ export {
   type RoutingServiceOptions,
   type RoutingSessionCandidate,
 } from "./router.js";
+export { appendRoutingTrace, routingTracePath, traceJson, type RoutingTraceRecord } from "./trace-jsonl.js";

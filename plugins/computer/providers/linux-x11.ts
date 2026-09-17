@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
-import { access, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { access, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { cpus, freemem, homedir, loadavg, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { WebSocket } from "ws";
+import { reportOperationalError } from "@friday/operational-errors";
 import type {
   ComputerBrowserAction,
   ComputerBrowserActionRequest,
@@ -49,6 +50,23 @@ const SENSITIVE_URL_KEY = /(access[_-]?token|auth|authorization|code|credential|
 const SENSITIVE_TITLE = /(captcha|one[- ]time|otp|passcode|password|verification code)/i;
 const HIGH_IMPACT_ACTION = /\b(place\s+order|buy(?:\s+now)?|pay|submit\s+payment|confirm\s+purchase|delete|send|transfer|checkout)\b/i;
 const PAGE_STATE_EXPRESSION = String.raw`(() => ({ href: location.href, readyState: document.readyState }))()`;
+const MEDIA_STATE_EXPRESSION = String.raw`(() => {
+  const media = [...document.querySelectorAll("audio,video")];
+  const playing = media.find((element) => !element.paused && !element.ended && element.readyState >= 2);
+  const selected = playing || media[0];
+  if (!selected) return { elementCount: 0, playing: false, paused: true, ended: false };
+  const finite = (value) => Number.isFinite(value) ? Number(value) : undefined;
+  return {
+    elementCount: media.length,
+    playing: Boolean(playing),
+    paused: Boolean(selected.paused),
+    ended: Boolean(selected.ended),
+    currentTime: finite(selected.currentTime),
+    duration: finite(selected.duration),
+    muted: Boolean(selected.muted),
+    volume: finite(selected.volume),
+  };
+})()`;
 const ACTIVE_ELEMENT_SAFETY_FUNCTION = String.raw`function (expectedSelector) {
   const el = document.activeElement;
   if (!el) return { protected: false, expected: expectedSelector === null };
@@ -262,7 +280,6 @@ const PROBE_REGION_FUNCTION = String.raw`function (input) {
     const rectArea = rect.width * rect.height;
     const directControl = ['input', 'textarea', 'select', 'button', 'a', 'label', 'iframe', 'img', 'canvas'].includes(tag)
       || el.hasAttribute('role') || el.hasAttribute('contenteditable') || el.hasAttribute('aria-label') || el.hasAttribute('title');
-    // Ignore giant layout ancestors so an unrelated password label elsewhere on the page cannot poison a tiny crop.
     if (!directControl && el.children.length > 0 && rectArea > regionArea * 4) continue;
     const signature = [tag, el.getAttribute('type'), el.getAttribute('name'), el.getAttribute('id'), el.getAttribute('class'), el.getAttribute('autocomplete'), el.getAttribute('aria-label'), el.getAttribute('placeholder'), el.getAttribute('role'), el.getAttribute('src'), el.getAttribute('title')].filter(Boolean).join(' ');
     const value = String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 512);
@@ -294,15 +311,6 @@ export interface LinuxCdpClient {
   targetCommand(targetId: string, method: string, params?: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<unknown>;
 }
 
-interface SwayOutput {
-  readonly name?: unknown;
-  readonly make?: unknown;
-  readonly model?: unknown;
-  readonly serial?: unknown;
-  readonly active?: unknown;
-  readonly scale?: unknown;
-  readonly rect?: Readonly<{ readonly x?: unknown; readonly y?: unknown; readonly width?: unknown; readonly height?: unknown }> | undefined;
-}
 
 interface OutputGeometry {
   readonly id: string;
@@ -311,6 +319,7 @@ interface OutputGeometry {
   readonly width: number;
   readonly height: number;
   readonly kind: "human" | "agent";
+  readonly desktopIndex?: number | undefined;
 }
 
 interface BrowserPageState {
@@ -378,6 +387,39 @@ interface BrowserElementValidation {
   readonly pageBottom?: unknown;
 }
 
+interface SharedAccessibilityElement {
+  readonly path?: unknown;
+  readonly role?: unknown;
+  readonly name?: unknown;
+  readonly value?: unknown;
+  readonly context?: unknown;
+  readonly left?: unknown;
+  readonly top?: unknown;
+  readonly right?: unknown;
+  readonly bottom?: unknown;
+  readonly visible?: unknown;
+  readonly enabled?: unknown;
+  readonly focused?: unknown;
+  readonly interactive?: unknown;
+  readonly clickable?: unknown;
+  readonly editable?: unknown;
+  readonly selectable?: unknown;
+  readonly scrollable?: unknown;
+  readonly draggable?: unknown;
+  readonly selected?: unknown;
+  readonly checked?: unknown;
+  readonly expanded?: unknown;
+  readonly protected?: unknown;
+  readonly challenge?: unknown;
+  readonly actions?: unknown;
+}
+
+interface SharedAccessibilitySnapshot {
+  readonly frameTitle?: unknown;
+  readonly url?: unknown;
+  readonly elements?: unknown;
+}
+
 interface ProviderElementRecord {
   readonly element: ComputerElement;
   readonly selector: string;
@@ -399,17 +441,17 @@ interface VisualProbeTokenRecord {
   readonly expiresAt: number;
 }
 
-export interface LinuxSwayComputerAdapterOptions {
+export interface LinuxX11ComputerAdapterOptions {
   readonly environment?: NodeJS.ProcessEnv | undefined;
   readonly platform?: NodeJS.Platform | undefined;
   readonly uid?: number | undefined;
   readonly runCommand?: ((command: string, args: readonly string[], signal?: AbortSignal) => Promise<LinuxCommandResult>) | undefined;
+  readonly launchCommand?: ((command: string, args: readonly string[]) => Promise<void>) | undefined;
   readonly cdp?: LinuxCdpClient | undefined;
   readonly now?: (() => Date) | undefined;
   readonly readText?: ((path: string) => Promise<string>) | undefined;
   readonly listDirectory?: ((path: string) => Promise<readonly string[]>) | undefined;
   readonly executable?: ((command: string) => Promise<boolean>) | undefined;
-  /** Optional override used by hosts/tests that provide their own tool facade. */
   readonly runTool?: ((request: import("../contract.js").ComputerNodeToolExecutionRequest) => Promise<import("../contract.js").ComputerToolExecutionResult>) | undefined;
   readonly cleanupRunProcesses?: ((request: import("../contract.js").ComputerRunProcessCleanupRequest) => Promise<void>) | undefined;
   readonly lifecycleCommand?: ((command: string, args: readonly string[], signal?: AbortSignal) => Promise<LinuxCommandResult>) | undefined;
@@ -441,16 +483,10 @@ function boundedPercent(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
-function configuredAgentOutputs(environment: NodeJS.ProcessEnv): ReadonlySet<string> {
-  return new Set((environment.FRIDAY_COMPUTER_AGENT_OUTPUTS ?? "")
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean));
-}
 
 function profileDirectory(environment: NodeJS.ProcessEnv): string {
   const configured = environment.FRIDAY_COMPUTER_BROWSER_PROFILE_DIR?.trim();
-  return resolve(configured || join(environment.FRIDAY_HOME?.trim() || join(homedir(), ".friday"), "computer", "chromium-profile"));
+  return resolve(configured || join(environment.FRIDAY_HOME?.trim() || join(homedir(), ".friday"), "computer", "browser-profile"));
 }
 
 function opaqueHash(prefix: string, value: string): string {
@@ -653,56 +689,90 @@ function numeric(value: unknown, fallback = 0): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function outputLabel(output: SwayOutput): string {
-  const parts = [output.make, output.model, output.serial]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .map((value) => value.trim());
-  return parts.join(" ").slice(0, 160);
+function configuredAgentDesktopIndexes(environment: NodeJS.ProcessEnv): ReadonlySet<number> {
+  const values = (environment.FRIDAY_COMPUTER_X11_AGENT_DESKTOPS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => Number(value));
+  if (values.some((value) => !Number.isSafeInteger(value) || value < 0 || value > 255)) {
+    throw new Error("FRIDAY_COMPUTER_X11_AGENT_DESKTOPS must contain zero-based desktop indexes");
+  }
+  return new Set(values);
 }
 
-function parseSwayOutputs(
+function parseWmctrlDesktops(
   raw: string,
   environment: NodeJS.ProcessEnv,
 ): { readonly screens: readonly ComputerScreenDescriptor[]; readonly geometry: ReadonlyMap<string, OutputGeometry> } {
-  let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch { throw new Error("swaymsg returned invalid output JSON"); }
-  if (!Array.isArray(parsed)) throw new Error("swaymsg output list is invalid");
-  const explicitAgents = configuredAgentOutputs(environment);
-  const active = parsed.filter((entry): entry is SwayOutput => Boolean(entry && typeof entry === "object" && (entry as SwayOutput).active !== false));
-  const physical = active.filter((entry) => typeof entry.name === "string" && !entry.name.startsWith("HEADLESS-"));
-  const requestedHuman = environment.FRIDAY_COMPUTER_HUMAN_OUTPUT?.trim();
-  const humanName = requestedHuman || (typeof physical[0]?.name === "string" ? physical[0].name : undefined);
+  const configuredAgents = configuredAgentDesktopIndexes(environment);
+  if (configuredAgents.size === 0) throw new Error("FRIDAY_COMPUTER_X11_AGENT_DESKTOPS is not configured");
   const screens: ComputerScreenDescriptor[] = [];
   const geometry = new Map<string, OutputGeometry>();
-  for (const output of active) {
-    if (typeof output.name !== "string" || !output.name.trim()) continue;
-    const name = output.name.trim();
-    const kind = name === humanName && !explicitAgents.has(name)
-      ? "human" as const
-      : (name.startsWith("HEADLESS-") || explicitAgents.has(name))
-        ? "agent" as const
-        : "human" as const;
-    const width = Math.max(0, Math.round(numeric(output.rect?.width)));
-    const height = Math.max(0, Math.round(numeric(output.rect?.height)));
-    const descriptor: ComputerScreenDescriptor = Object.freeze({
-      id: name,
-      label: outputLabel(output) || (kind === "human" ? `Human ${name}` : `Agent ${name}`),
-      kind,
-      ...(width > 0 ? { width } : {}),
-      ...(height > 0 ? { height } : {}),
-      ...(typeof output.scale === "number" && Number.isFinite(output.scale) && output.scale > 0 ? { scale: output.scale } : {}),
-    });
-    screens.push(descriptor);
-    geometry.set(name, Object.freeze({
-      id: name,
-      x: Math.round(numeric(output.rect?.x)),
-      y: Math.round(numeric(output.rect?.y)),
-      width: width || 1_280,
-      height: height || 720,
-      kind,
-    }));
+  const seen = new Set<number>();
+  for (const line of raw.split(/\r?\n/u)) {
+    if (!line.trim()) continue;
+    const match = line.match(/^\s*(\d+)\s+([*-])\s+DG:\s*(\d+)x(\d+)\s+VP:\s*(-?\d+),(-?\d+)\s+WA:\s*(?:(-?\d+),(-?\d+)\s+(\d+)x(\d+)|N\/A)\s*(.*)$/u);
+    if (!match) continue;
+    const desktopIndex = Number(match[1]);
+    if (!Number.isSafeInteger(desktopIndex) || desktopIndex < 0) continue;
+    seen.add(desktopIndex);
+    const width = Math.max(1, Number(match[3]) || Number(match[9]) || 1_280);
+    const height = Math.max(1, Number(match[4]) || Number(match[10]) || 720);
+    const kind = configuredAgents.has(desktopIndex) ? "agent" as const : "human" as const;
+    const id = `DESKTOP-${desktopIndex + 1}`;
+    const advertised = (match[11] ?? "").trim();
+    const label = kind === "agent" ? `FRIDAY Desktop ${desktopIndex + 1}` : (advertised || `Desktop ${desktopIndex + 1}`);
+    screens.push(Object.freeze({ id, label, kind, width, height, scale: 1 }));
+    geometry.set(id, Object.freeze({ id, x: 0, y: 0, width, height, kind, desktopIndex }));
   }
-  return { screens: Object.freeze(screens), geometry };
+  for (const desktopIndex of configuredAgents) {
+    if (!seen.has(desktopIndex)) throw new Error(`Configured FRIDAY X11 desktop ${desktopIndex + 1} does not exist`);
+  }
+  if (!screens.some((screen) => screen.kind === "agent")) throw new Error("No FRIDAY Agent virtual desktop is available");
+  return Object.freeze({ screens: Object.freeze(screens), geometry });
+}
+
+function x11DesktopIndex(screenId: string, geometry: ReadonlyMap<string, OutputGeometry>): number {
+  const desktopIndex = geometry.get(screenId)?.desktopIndex;
+  if (desktopIndex === undefined || !Number.isSafeInteger(desktopIndex) || desktopIndex < 0) {
+    throw new Error(`X11 Agent desktop is unavailable: ${screenId}`);
+  }
+  return desktopIndex;
+}
+
+interface X11WindowRecord {
+  readonly id: string;
+  readonly desktopIndex: number;
+  readonly title: string;
+}
+
+function parseWmctrlWindows(raw: string): readonly X11WindowRecord[] {
+  const windows: X11WindowRecord[] = [];
+  for (const line of raw.split(/\r?\n/u)) {
+    const match = line.match(/^\s*(0x[0-9a-f]+)\s+(-?\d+)\s+\S+\s+(.*)$/iu);
+    if (!match) continue;
+    const desktopIndex = Number(match[2]);
+    if (!Number.isSafeInteger(desktopIndex)) continue;
+    windows.push(Object.freeze({ id: match[1]!, desktopIndex, title: match[3] ?? "" }));
+  }
+  return Object.freeze(windows);
+}
+
+interface X11ClassWindowRecord extends X11WindowRecord {
+  readonly className: string;
+}
+
+function parseWmctrlClassWindows(raw: string): readonly X11ClassWindowRecord[] {
+  const windows: X11ClassWindowRecord[] = [];
+  for (const line of raw.split(/\r?\n/u)) {
+    const match = line.match(/^\s*(0x[0-9a-f]+)\s+(-?\d+)\s+(\S+)\s+\S+\s+(.*)$/iu);
+    if (!match) continue;
+    const desktopIndex = Number(match[2]);
+    if (!Number.isSafeInteger(desktopIndex)) continue;
+    windows.push(Object.freeze({ id: match[1]!, desktopIndex, className: match[3] ?? "", title: match[4] ?? "" }));
+  }
+  return Object.freeze(windows);
 }
 
 async function readCpuPercent(readText: (path: string) => Promise<string>): Promise<number> {
@@ -734,7 +804,7 @@ async function processSnapshot(
     try {
       const name = (await readText(`/proc/${entry}/comm`)).trim().replace(/[\0\r\n]/g, "").slice(0, 160);
       if (name && processes.length < MAX_PROCESSES) processes.push(Object.freeze({ pid, name }));
-      if (/^(chromium|chrome|google-chrome)$/i.test(name)) {
+      if (/^(brave|brave-browser|brave-browser-stable|chromium|chrome|google-chrome|google-chrome-stable)$/i.test(name)) {
         try {
           const commandLine = await readText(`/proc/${entry}/cmdline`);
           if (commandLine.includes("--type=renderer")) browserRenderers += 1;
@@ -925,20 +995,46 @@ function clampProbeBox(box: ComputerBoundingBox, width: number, height: number, 
   return Object.freeze({ left, top, right, bottom });
 }
 
-export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapterOptions = {}): ComputerNodeAdapter {
-  const environment = { ...(options.environment ?? process.env) };
+export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOptions = {}): ComputerNodeAdapter {
+  const environment: NodeJS.ProcessEnv = {
+    ...(options.environment ?? process.env),
+    FRIDAY_COMPUTER_PROVIDER: "linux-x11",
+    FRIDAY_COMPUTER_SESSION_MODE: "native-x11",
+  };
+  const nodeId = boundedId(environment.FRIDAY_COMPUTER_NODE_ID, DEFAULT_NODE_ID, "FRIDAY_COMPUTER_NODE_ID");
   const platform = options.platform ?? process.platform;
   const uid = options.uid ?? (typeof process.getuid === "function" ? process.getuid() : -1);
   const runCommand = options.runCommand ?? commandRunner(environment);
+  const launchCommand = options.launchCommand ?? ((command: string, args: readonly string[]) => new Promise<void>((resolveLaunch, rejectLaunch) => {
+    const child = spawn(command, [...args], { detached: true, stdio: "ignore", env: { ...environment } });
+    child.once("error", rejectLaunch);
+    child.once("spawn", () => { child.unref(); resolveLaunch(); });
+  }));
   const lifecycleCommand = options.lifecycleCommand ?? runCommand;
   const now = options.now ?? (() => new Date());
   const readText = options.readText ?? ((path: string) => readFile(path, "utf8"));
   const listDirectory = options.listDirectory ?? ((path: string) => readdir(path));
   const executable = options.executable ?? ((command: string) => defaultExecutable(command, environment));
+  const browserMode = environment.FRIDAY_COMPUTER_BROWSER_MODE?.trim().toLowerCase() === "shared" ? "shared" as const : "managed-cdp" as const;
+  const sharedBrowserBin = environment.FRIDAY_COMPUTER_BROWSER_BIN?.trim() || "brave-browser-stable";
+  let sharedBrowserArgs: readonly string[] = Object.freeze([]);
+  if (environment.FRIDAY_COMPUTER_BROWSER_ARGS?.trim()) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(environment.FRIDAY_COMPUTER_BROWSER_ARGS); } catch { throw new Error("FRIDAY_COMPUTER_BROWSER_ARGS must be a JSON string array"); }
+    if (!Array.isArray(parsed) || parsed.some((value) => typeof value !== "string")) throw new Error("FRIDAY_COMPUTER_BROWSER_ARGS must be a JSON string array");
+    sharedBrowserArgs = Object.freeze((parsed as string[]).slice(0, 16));
+  }
   const cdp = options.cdp ?? createHttpCdpClient(environment);
   const browserProfileDirectory = profileDirectory(environment);
-  const browserProfileId = opaqueHash("linux-profile", browserProfileDirectory);
-  const contextId = opaqueHash("linux-context", cdpBaseUrl(environment).toString());
+  const browserProfileId = browserMode === "shared"
+    ? opaqueHash("linux-shared-profile", `${sharedBrowserBin}\0${sharedBrowserArgs.join("\0")}`)
+    : opaqueHash("linux-profile", browserProfileDirectory);
+  const contextId = browserMode === "shared"
+    ? opaqueHash("linux-shared-context", `${nodeId}\0${sharedBrowserBin}`)
+    : opaqueHash("linux-context", cdpBaseUrl(environment).toString());
+  const atspiHelper = environment.FRIDAY_BUNDLED_ROOT?.trim()
+    ? join(resolve(environment.FRIDAY_BUNDLED_ROOT), "computer", "atspi_browser.py")
+    : resolve("plugins", "computer", "runtime", "atspi_browser.py");
   const browserActionTimeoutMs = positiveInteger(
     environment.FRIDAY_COMPUTER_BROWSER_ACTION_TIMEOUT_MS,
     BROWSER_ACTION_TIMEOUT_MS,
@@ -964,17 +1060,22 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
 
   async function lifecycle(action: "restart" | "update", signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
-    const args = action === "restart"
-      ? ["--user", "restart", "friday-computer-browser.service", "friday-computer-headless.service"]
-      : ["--user", "try-restart", "friday-computer-browser.service", "friday-computer-headless.service"];
+    if (browserMode === "shared") {
+      if (action === "restart") await closeSharedScreens(signal);
+      return;
+    }
+    const units = ["friday-computer-browser.service"];
+    const args = ["--user", action === "restart" ? "restart" : "try-restart", ...units];
     const result = await lifecycleCommand("systemctl", args, signal);
     if (!result.ok) throw new Error(`Linux Computer ${action} failed: ${sanitizeText(result.stderr || result.stdout, 512)}`);
   }
 
   async function resetManagedState(signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
-    // Only remove the FRIDAY-owned browser profile. Never touch the user's OS,
-    // home directory, or unrelated browser profiles.
+    if (browserMode === "shared") {
+      await closeSharedScreens(signal);
+      return;
+    }
     const home = resolve(environment.HOME?.trim() || homedir());
     if (browserProfileDirectory === "/" || browserProfileDirectory === home || browserProfileDirectory.length < 8) {
       throw new Error("Refusing to reset an unsafe Linux Computer browser profile path");
@@ -983,57 +1084,223 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     await mkdir(browserProfileDirectory, { recursive: true, mode: 0o700 });
   }
 
-  async function discoverSwaySocket(): Promise<string | undefined> {
-    const explicit = environment.FRIDAY_COMPUTER_SWAYSOCK?.trim() || environment.SWAYSOCK?.trim();
-    if (explicit) return explicit;
-    const runtime = environment.XDG_RUNTIME_DIR?.trim();
-    if (!runtime) return undefined;
+  async function x11Desktops(signal?: AbortSignal): Promise<{ readonly screens: readonly ComputerScreenDescriptor[]; readonly geometry: ReadonlyMap<string, OutputGeometry> }> {
+    if ((environment.XDG_SESSION_TYPE?.trim().toLowerCase() || environment.FRIDAY_COMPUTER_HOST_XDG_SESSION_TYPE?.trim().toLowerCase()) !== "x11") {
+      throw new Error("Native Linux Computer requires an X11 desktop session");
+    }
+    const result = await runCommand("wmctrl", ["-d"], signal);
+    if (!result.ok) throw new Error(sanitizeText(result.stderr || "wmctrl could not query virtual desktops", 512));
+    return parseWmctrlDesktops(result.stdout, environment);
+  }
+
+  async function activeX11Desktop(signal?: AbortSignal): Promise<number> {
+    const result = await runCommand("wmctrl", ["-d"], signal);
+    if (!result.ok) throw new Error(sanitizeText(result.stderr || "wmctrl could not query the active desktop", 512));
+    for (const line of result.stdout.split(/\r?\n/u)) {
+      const match = line.match(/^\s*(\d+)\s+\*/u);
+      if (match) return Number(match[1]);
+    }
+    throw new Error("wmctrl did not report an active X11 desktop");
+  }
+
+  async function switchX11Desktop(desktopIndex: number, signal?: AbortSignal): Promise<void> {
+    const result = await runCommand("wmctrl", ["-s", String(desktopIndex)], signal);
+    if (!result.ok) throw new Error(sanitizeText(result.stderr || `wmctrl could not switch to desktop ${desktopIndex + 1}`, 512));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (await activeX11Desktop(signal) === desktopIndex) return;
+      await delay(25, signal);
+    }
+    throw new Error(`X11 desktop ${desktopIndex + 1} did not become active`);
+  }
+
+  function sharedWindowMarker(screenId: string): string {
+    return `friday-screen:${nodeId}:${screenId}`;
+  }
+
+  async function x11ClassWindows(signal?: AbortSignal): Promise<readonly X11ClassWindowRecord[]> {
+    const result = await runCommand("wmctrl", ["-lx"], signal);
+    if (!result.ok) throw new Error(sanitizeText(result.stderr || "wmctrl could not query X11 windows", 512));
+    return parseWmctrlClassWindows(result.stdout);
+  }
+
+  async function readSharedWindowMarker(windowId: string, signal?: AbortSignal): Promise<string | undefined> {
+    const result = await runCommand("xprop", ["-id", windowId, "_FRIDAY_SCREEN_ID"], signal);
+    if (!result.ok) return undefined;
+    const match = result.stdout.match(/_FRIDAY_SCREEN_ID(?:\([^)]*\))?\s*=\s*"([^"]+)"/u);
+    return match?.[1];
+  }
+
+  async function markSharedWindow(screenId: string, windowId: string, signal?: AbortSignal): Promise<void> {
+    const result = await runCommand("xprop", ["-id", windowId, "-f", "_FRIDAY_SCREEN_ID", "8s", "-set", "_FRIDAY_SCREEN_ID", sharedWindowMarker(screenId)], signal);
+    if (!result.ok) throw new Error(sanitizeText(result.stderr || "xprop could not mark the FRIDAY browser window", 512));
+  }
+
+  async function recoverSharedWindowMappings(signal?: AbortSignal): Promise<readonly X11ClassWindowRecord[]> {
+    const windows = await x11ClassWindows(signal);
+    const live = new Set(windows.map((window) => window.id));
+    for (const [screenId, windowId] of [...targetByScreen.entries()]) {
+      if (live.has(windowId)) continue;
+      targetByScreen.delete(screenId);
+      observationStateByScreen.delete(screenId);
+      nextElementIdByScreen.delete(screenId);
+    }
+    const agentDesktopIndexes = new Set([...outputGeometry.values()].filter((entry) => entry.kind === "agent").map((entry) => entry.desktopIndex));
+    for (const window of windows) {
+      if (!agentDesktopIndexes.has(window.desktopIndex) || !/(brave|chrome|chromium)/iu.test(window.className)) continue;
+      const marker = await readSharedWindowMarker(window.id, signal);
+      if (!marker?.startsWith(`friday-screen:${nodeId}:`)) continue;
+      const screenId = marker.slice(`friday-screen:${nodeId}:`.length);
+      const geometry = outputGeometry.get(screenId);
+      if (!geometry || geometry.kind !== "agent" || geometry.desktopIndex !== window.desktopIndex) continue;
+      const existing = targetByScreen.get(screenId);
+      if (!existing) targetByScreen.set(screenId, window.id);
+      else if (existing !== window.id) {
+        await runCommand("xdotool", ["windowclose", window.id], signal).catch(() => Object.freeze({ ok: false, stdout: "", stderr: "" }));
+      }
+    }
+    return windows;
+  }
+
+  async function sharedWindowTitle(windowId: string, signal?: AbortSignal): Promise<string> {
+    const result = await runCommand("xdotool", ["getwindowname", windowId], signal);
+    if (result.ok && result.stdout.trim()) return sanitizeTitle(result.stdout.trim());
+    const window = (await x11ClassWindows(signal)).find((candidate) => candidate.id === windowId);
+    return sanitizeTitle(window?.title ?? "FRIDAY Browser");
+  }
+
+  async function ensureSharedWindow(screenId: string, signal?: AbortSignal): Promise<string> {
+    const geometry = outputGeometry.get(screenId);
+    if (!geometry || geometry.kind !== "agent") throw new Error(`Linux Computer Agent output is unavailable: ${screenId}`);
+    let windows = await recoverSharedWindowMappings(signal);
+    const existing = targetByScreen.get(screenId);
+    if (existing) {
+      const live = windows.find((window) => window.id === existing);
+      if (live?.desktopIndex === geometry.desktopIndex && await readSharedWindowMarker(existing, signal) === sharedWindowMarker(screenId)) return existing;
+      if (live && await readSharedWindowMarker(existing, signal) === sharedWindowMarker(screenId)) {
+        await runCommand("xdotool", ["windowclose", existing], signal);
+      }
+      targetByScreen.delete(screenId);
+      observationStateByScreen.delete(screenId);
+      nextElementIdByScreen.delete(screenId);
+    }
+    const previousDesktop = await activeX11Desktop(signal);
+    const desiredDesktop = x11DesktopIndex(screenId, outputGeometry);
+    if (previousDesktop !== desiredDesktop) await switchX11Desktop(desiredDesktop, signal);
+    const before = new Set(windows.map((window) => window.id));
+    const launchToken = `FRIDAY-${randomUUID()}`;
+    const launchPage = `data:text/html,<title>${launchToken}</title>`;
     try {
-      const names = (await listDirectory(runtime)).filter((name) => name.startsWith("sway-ipc.") && name.endsWith(".sock"));
-      if (names.length === 0) return undefined;
-      const candidates = await Promise.all(names.map(async (name) => {
-        const path = join(runtime, name);
-        try { return { path, mtime: (await stat(path)).mtimeMs }; } catch { return { path, mtime: 0 }; }
-      }));
-      return candidates.sort((a, b) => b.mtime - a.mtime)[0]?.path;
-    } catch {
-      return undefined;
+      await launchCommand(sharedBrowserBin, [...sharedBrowserArgs, "--new-window", launchPage]);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        await delay(50, signal);
+        windows = await x11ClassWindows(signal);
+        const candidates = windows.filter((window) => !before.has(window.id)
+          && /(brave|chrome|chromium)/iu.test(window.className)
+          && window.title.includes(launchToken));
+        const window = candidates[candidates.length - 1];
+        if (!window) continue;
+        if (window.desktopIndex !== desiredDesktop) {
+          const moved = await runCommand("wmctrl", ["-ir", window.id, "-t", String(desiredDesktop)], signal);
+          if (!moved.ok) throw new Error(sanitizeText(moved.stderr || "wmctrl could not place the FRIDAY browser window on its Agent desktop", 512));
+        }
+        await markSharedWindow(screenId, window.id, signal);
+        targetByScreen.set(screenId, window.id);
+        return window.id;
+      }
+      throw new Error("The normal browser did not create a new FRIDAY window on the Agent desktop");
+    } finally {
+      if (previousDesktop !== desiredDesktop) {
+        await switchX11Desktop(previousDesktop, signal).catch((error: unknown) => {
+          reportOperationalError({ component: "computer", operation: "restore Human X11 desktop after shared browser creation", error, severity: "warn" });
+        });
+      }
     }
   }
 
-  async function swayOutputs(signal?: AbortSignal): Promise<{ readonly screens: readonly ComputerScreenDescriptor[]; readonly geometry: ReadonlyMap<string, OutputGeometry> }> {
-    const socket = await discoverSwaySocket();
-    const args = [...(socket ? ["-s", socket] : []), "-t", "get_outputs", "-r"];
-    const result = await runCommand("swaymsg", args, signal);
-    if (!result.ok) throw new Error(sanitizeText(result.stderr || "swaymsg could not query outputs", 512));
-    return parseSwayOutputs(result.stdout, environment);
+  async function withActiveSharedWindow<T>(screenId: string, windowId: string, operation: (title: string) => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const desiredDesktop = x11DesktopIndex(screenId, outputGeometry);
+    const previousDesktop = await activeX11Desktop(signal);
+    if (previousDesktop !== desiredDesktop) await switchX11Desktop(desiredDesktop, signal);
+    try {
+      const activated = await runCommand("xdotool", ["windowactivate", "--sync", windowId], signal);
+      if (!activated.ok) throw new Error(sanitizeText(activated.stderr || "xdotool could not activate the FRIDAY browser window", 512));
+      const title = await sharedWindowTitle(windowId, signal);
+      return await operation(title);
+    } finally {
+      if (previousDesktop !== desiredDesktop) {
+        await switchX11Desktop(previousDesktop, signal).catch((error: unknown) => {
+          reportOperationalError({ component: "computer", operation: "restore Human X11 desktop after shared browser accessibility operation", error, severity: "warn" });
+        });
+      }
+    }
+  }
+
+  async function atspiJson<T>(args: readonly string[], signal?: AbortSignal): Promise<T> {
+    const result = await runCommand("python3", [atspiHelper, ...args], signal);
+    if (!result.ok) throw new Error(sanitizeText(result.stderr || "AT-SPI browser helper failed", 1_024));
+    try { return JSON.parse(result.stdout) as T; } catch { throw new Error("AT-SPI browser helper returned invalid JSON"); }
+  }
+
+  async function x11WindowForTarget(targetId: string, signal?: AbortSignal): Promise<X11WindowRecord | undefined> {
+    const marker = `FRIDAY-X11-${randomUUID()}`;
+    const originalTitle = await evaluateValue<string>(targetId, "document.title", signal).catch((error: unknown) => {
+      reportOperationalError({ component: "computer", operation: "read X11 browser title before placement probe", error, severity: "warn" });
+      return "";
+    });
+    try {
+      await evaluateValue<unknown>(targetId, `document.title = ${JSON.stringify(marker)}`, signal);
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const result = await runCommand("wmctrl", ["-l"], signal);
+        if (result.ok) {
+          const found = parseWmctrlWindows(result.stdout).find((window) => window.title.includes(marker));
+          if (found) return found;
+        }
+        await delay(25, signal);
+      }
+      return undefined;
+    } finally {
+      await evaluateValue<unknown>(targetId, `document.title = ${JSON.stringify(originalTitle ?? "")}`, signal).catch((error: unknown) => {
+        reportOperationalError({ component: "computer", operation: "restore X11 browser title after placement probe", error, severity: "warn" });
+      });
+    }
+  }
+
+  async function x11TargetIsOnDesktop(screenId: string, targetId: string, signal?: AbortSignal): Promise<boolean> {
+    const expected = x11DesktopIndex(screenId, outputGeometry);
+    const window = await x11WindowForTarget(targetId, signal);
+    return window?.desktopIndex === expected;
   }
 
   async function browserTargets(signal?: AbortSignal): Promise<readonly LinuxCdpTarget[]> {
     return Object.freeze((await cdp.targets(signal)).filter(pageTarget).slice(0, MAX_TABS));
   }
 
-  function browserSnapshot(targets: readonly LinuxCdpTarget[], screens: readonly ComputerScreenDescriptor[]): ComputerBrowserSupervisorSnapshot {
+  async function browserSnapshot(
+    targets: readonly LinuxCdpTarget[],
+    screens: readonly ComputerScreenDescriptor[],
+    signal?: AbortSignal,
+  ): Promise<ComputerBrowserSupervisorSnapshot> {
+    await recoverOwnedTargetMappings(targets, screens.filter((screen) => screen.kind === "agent").map((screen) => screen.id), signal);
     const screenKinds = new Map(screens.map((screen) => [screen.id, screen.kind] as const));
-    const humanScreen = screens.find((screen) => screen.kind === "human")?.id;
     const mappedTargetIds = new Set(targetByScreen.values());
+    const mediaByTarget = new Map<string, ComputerBrowserTabSnapshot["media"]>();
+    await Promise.all(targets.filter((target) => mappedTargetIds.has(target.id)).map(async (target) => {
+      const media = await optionalTargetMediaState(target.id, "read browser media state for supervisor snapshot", signal);
+      if (media) mediaByTarget.set(target.id, media);
+    }));
     const tabs: ComputerBrowserTabSnapshot[] = targets.map((target) => Object.freeze({
       id: boundedId(target.id, target.id, "Chromium target id"),
       title: sanitizeTitle(target.title),
       url: sanitizeUrl(target.url),
       active: mappedTargetIds.has(target.id),
+      ...(mediaByTarget.get(target.id) === undefined ? {} : { media: mediaByTarget.get(target.id)! }),
     }));
     const windows: ComputerBrowserWindowSnapshot[] = targets.map((target) => {
       const screenId = [...targetByScreen.entries()].find(([, targetId]) => targetId === target.id)?.[0];
       if (screenId && screenKinds.get(screenId) === "agent") {
         return Object.freeze({ id: `window:${target.id}`, owner: "friday" as const, screenId, tabIds: Object.freeze([target.id]) });
       }
-      return Object.freeze({
-        id: `window:${target.id}`,
-        owner: "human" as const,
-        ...(humanScreen === undefined ? {} : { screenId: humanScreen }),
-        tabIds: Object.freeze([target.id]),
-      });
+      return Object.freeze({ id: `window:${target.id}`, owner: "friday" as const, tabIds: Object.freeze([target.id]) });
     });
     return Object.freeze({
       running: true,
@@ -1041,6 +1308,42 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
       contextId,
       persistentProfile: true,
       windows: Object.freeze(windows),
+      tabs: Object.freeze(tabs),
+    });
+  }
+
+  async function sharedBrowserSnapshot(
+    screens: readonly ComputerScreenDescriptor[],
+    signal?: AbortSignal,
+  ): Promise<ComputerBrowserSupervisorSnapshot> {
+    const browserAvailable = await executable(sharedBrowserBin);
+    if (!browserAvailable) {
+      return Object.freeze({ running: false, profileId: browserProfileId, persistentProfile: true, windows: Object.freeze([]), tabs: Object.freeze([]) });
+    }
+    const windows = await recoverSharedWindowMappings(signal);
+    const screenKinds = new Map(screens.map((screen) => [screen.id, screen.kind] as const));
+    const browserWindows: ComputerBrowserWindowSnapshot[] = [];
+    const tabs: ComputerBrowserTabSnapshot[] = [];
+    for (const [screenId, windowId] of targetByScreen.entries()) {
+      if (screenKinds.get(screenId) !== "agent") continue;
+      const window = windows.find((candidate) => candidate.id === windowId);
+      if (!window) continue;
+      const state = observationStateByScreen.get(screenId);
+      const tabId = `x11:${windowId}`;
+      tabs.push(Object.freeze({
+        id: tabId,
+        title: sanitizeTitle(window.title),
+        url: state?.observation.url ?? "about:blank",
+        active: true,
+      }));
+      browserWindows.push(Object.freeze({ id: `window:${windowId}`, owner: "friday" as const, screenId, tabIds: Object.freeze([tabId]) }));
+    }
+    return Object.freeze({
+      running: true,
+      profileId: browserProfileId,
+      contextId,
+      persistentProfile: true,
+      windows: Object.freeze(browserWindows),
       tabs: Object.freeze(tabs),
     });
   }
@@ -1067,12 +1370,12 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
       return Object.freeze({ availability: "offline", resources: currentResources, screens: Object.freeze([]) });
     }
     let screens: readonly ComputerScreenDescriptor[] = Object.freeze([]);
-    let swayReady = false;
+    let desktopReady = false;
     try {
-      const outputs = await swayOutputs(signal);
+      const outputs = await x11Desktops(signal);
       screens = outputs.screens;
       outputGeometry = new Map(outputs.geometry);
-      swayReady = true;
+      desktopReady = true;
     } catch {
       outputGeometry = new Map();
     }
@@ -1085,13 +1388,18 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     });
     let browserReady = false;
     try {
-      const targets = await browserTargets(signal);
-      browser = browserSnapshot(targets, screens);
-      browserReady = true;
+      if (browserMode === "shared") {
+        browser = await sharedBrowserSnapshot(screens, signal);
+        browserReady = browser.running;
+      } else {
+        const targets = await browserTargets(signal);
+        browser = await browserSnapshot(targets, screens, signal);
+        browserReady = true;
+      }
     } catch { browserReady = false; }
     const hasAgentScreen = screens.some((screen) => screen.kind === "agent");
     const root = uid === 0;
-    const availability = !swayReady || root
+    const availability = !desktopReady || root
       ? "degraded" as const
       : hasAgentScreen && browserReady
         ? "online" as const
@@ -1099,37 +1407,244 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     return Object.freeze({ availability, resources: currentResources, screens, browser });
   }
 
-  async function ensureTarget(screenId: string, signal?: AbortSignal): Promise<string> {
-    const existing = targetByScreen.get(screenId);
-    if (existing) {
-      const targets = await browserTargets(signal);
-      if (targets.some((target) => target.id === existing)) return existing;
+  function targetMarker(screenId: string): string {
+    return `friday-screen:${nodeId}:${screenId}`;
+  }
+
+  function reusableLegacyTarget(target: LinuxCdpTarget): boolean {
+    return target.url === "about:blank" || /^https?:\/\//i.test(target.url);
+  }
+
+  async function targetMediaState(targetId: string, signal?: AbortSignal): Promise<ComputerBrowserTabSnapshot["media"] | undefined> {
+    const value = await evaluateValue<{
+      readonly elementCount?: unknown;
+      readonly playing?: unknown;
+      readonly paused?: unknown;
+      readonly ended?: unknown;
+      readonly currentTime?: unknown;
+      readonly duration?: unknown;
+      readonly muted?: unknown;
+      readonly volume?: unknown;
+    }>(targetId, MEDIA_STATE_EXPRESSION, signal);
+    if (!value || typeof value !== "object") return undefined;
+    const elementCount = Math.max(0, Math.min(64, Math.trunc(finiteBrowserNumber(value.elementCount) ?? 0)));
+    const currentTime = finiteBrowserNumber(value.currentTime);
+    const duration = finiteBrowserNumber(value.duration);
+    const volume = finiteBrowserNumber(value.volume);
+    return Object.freeze({
+      elementCount,
+      playing: value.playing === true,
+      paused: value.paused !== false,
+      ended: value.ended === true,
+      ...(currentTime === undefined ? {} : { currentTime: Math.max(0, currentTime) }),
+      ...(duration === undefined ? {} : { duration: Math.max(0, duration) }),
+      ...(typeof value.muted === "boolean" ? { muted: value.muted } : {}),
+      ...(volume === undefined ? {} : { volume: Math.max(0, Math.min(1, volume)) }),
+    });
+  }
+
+  async function optionalTargetMediaState(
+    targetId: string,
+    operation: string,
+    signal?: AbortSignal,
+  ): Promise<ComputerBrowserTabSnapshot["media"] | undefined> {
+    try {
+      return await targetMediaState(targetId, signal);
+    } catch (error) {
+      reportOperationalError({ component: "computer", operation, error, severity: "warn" });
+      return undefined;
+    }
+  }
+
+  async function readTargetMarker(targetId: string, signal?: AbortSignal): Promise<string | undefined> {
+    try {
+      return await evaluateValue<string>(targetId, "window.name", signal);
+    } catch (error) {
+      reportOperationalError({ component: "computer", operation: "read FRIDAY browser target ownership marker", error, severity: "warn" });
+      return undefined;
+    }
+  }
+
+  async function markOwnedTarget(screenId: string, targetId: string, signal?: AbortSignal): Promise<void> {
+    await evaluateValue<unknown>(targetId, `window.name = ${JSON.stringify(targetMarker(screenId))}`, signal);
+  }
+
+  async function closeOwnedTarget(targetId: string, signal?: AbortSignal): Promise<void> {
+    const result = await cdp.browserCommand("Target.closeTarget", { targetId }, signal);
+    if (result && typeof result === "object" && (result as { success?: unknown }).success === false) {
+      throw new Error(`Chromium refused to close stale FRIDAY target ${targetId}`);
+    }
+    for (const [screenId, mapped] of targetByScreen.entries()) {
+      if (mapped !== targetId) continue;
       targetByScreen.delete(screenId);
       observationStateByScreen.delete(screenId);
       nextElementIdByScreen.delete(screenId);
-      for (const [token, record] of visualProbeTokens.entries()) {
-        if (record.screenId === screenId) visualProbeTokens.delete(token);
+    }
+  }
+
+  async function chooseReusableTarget(targets: readonly LinuxCdpTarget[], signal?: AbortSignal): Promise<LinuxCdpTarget | undefined> {
+    if (targets.length === 0) return undefined;
+    const scored = await Promise.all(targets.map(async (target, index) => {
+      const media = await optionalTargetMediaState(target.id, "score reusable FRIDAY browser target", signal);
+      const score = media?.playing === true ? 100
+        : (media?.elementCount ?? 0) > 0 ? 70
+          : /\/watch(?:[/?#]|$)/i.test(target.url) ? 60
+            : target.url !== "about:blank" ? 40
+              : 10;
+      return { target, score, index };
+    }));
+    return scored.sort((a, b) => b.score - a.score || a.index - b.index)[0]?.target;
+  }
+
+  async function recoverOwnedTargetMappings(
+    targets: readonly LinuxCdpTarget[],
+    agentScreenIds: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const liveIds = new Set(targets.map((target) => target.id));
+    for (const [screenId, targetId] of [...targetByScreen.entries()]) {
+      if (!liveIds.has(targetId)) {
+        targetByScreen.delete(screenId);
+        observationStateByScreen.delete(screenId);
+        nextElementIdByScreen.delete(screenId);
       }
     }
+    for (const screenId of agentScreenIds) {
+      const existing = targetByScreen.get(screenId);
+      if (existing && liveIds.has(existing)) continue;
+      const marker = targetMarker(screenId);
+      const matches: LinuxCdpTarget[] = [];
+      for (const target of targets) {
+        const value = await readTargetMarker(target.id, signal);
+        if (value === marker) matches.push(target);
+      }
+      if (matches.length === 0) continue;
+      const selected = await chooseReusableTarget(matches, signal) ?? matches[0]!;
+      targetByScreen.set(screenId, selected.id);
+      for (const duplicate of matches) {
+        if (duplicate.id === selected.id) continue;
+        await closeOwnedTarget(duplicate.id, signal).catch((error: unknown) => {
+          reportOperationalError({ component: "computer", operation: "close duplicate FRIDAY browser target", error, severity: "warn" });
+        });
+      }
+    }
+  }
+
+  async function closeUnmappedLegacyTargets(
+    targets: readonly LinuxCdpTarget[],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const mapped = new Set(targetByScreen.values());
+    for (const target of targets) {
+      if (mapped.has(target.id) || !reusableLegacyTarget(target)) continue;
+      await closeOwnedTarget(target.id, signal).catch((error: unknown) => {
+        reportOperationalError({ component: "computer", operation: "close stale unmapped FRIDAY browser target", error, severity: "warn" });
+      });
+    }
+  }
+
+  async function ensureTarget(screenId: string, signal?: AbortSignal): Promise<string> {
+    let targets = await browserTargets(signal);
+    const agentScreenIds = [...outputGeometry.values()].filter((screen) => screen.kind === "agent").map((screen) => screen.id);
+    await recoverOwnedTargetMappings(targets, agentScreenIds, signal);
+    const existing = targetByScreen.get(screenId);
+    if (existing && targets.some((target) => target.id === existing)) {
+      await markOwnedTarget(screenId, existing, signal);
+      if (await x11TargetIsOnDesktop(screenId, existing, signal)) {
+        await closeUnmappedLegacyTargets(targets, signal);
+        return existing;
+      }
+      await closeOwnedTarget(existing, signal);
+      targets = await browserTargets(signal);
+    }
+    targetByScreen.delete(screenId);
+    observationStateByScreen.delete(screenId);
+    nextElementIdByScreen.delete(screenId);
+    for (const [token, record] of visualProbeTokens.entries()) {
+      if (record.screenId === screenId) visualProbeTokens.delete(token);
+    }
+
     const geometry = outputGeometry.get(screenId);
     if (!geometry || geometry.kind !== "agent") throw new Error(`Linux Computer Agent output is unavailable: ${screenId}`);
-    const result = await cdp.browserCommand("Target.createTarget", {
-      url: "about:blank",
-      newWindow: true,
-      background: false,
-      left: geometry.x,
-      top: geometry.y,
-      width: Math.max(640, geometry.width),
-      height: Math.max(480, geometry.height),
-    }, signal);
+
+    {
+      const mapped = new Set(targetByScreen.values());
+      const legacy = targets.filter((target) => !mapped.has(target.id) && reusableLegacyTarget(target));
+      const adopted = await chooseReusableTarget(legacy, signal);
+      if (adopted) {
+        targetByScreen.set(screenId, adopted.id);
+        await markOwnedTarget(screenId, adopted.id, signal);
+        if (await x11TargetIsOnDesktop(screenId, adopted.id, signal)) {
+          for (const stale of legacy) {
+            if (stale.id === adopted.id) continue;
+            await closeOwnedTarget(stale.id, signal).catch((error: unknown) => {
+              reportOperationalError({ component: "computer", operation: "close stale FRIDAY browser target", error, severity: "warn" });
+            });
+          }
+          return adopted.id;
+        }
+        await closeOwnedTarget(adopted.id, signal);
+        targets = await browserTargets(signal);
+      }
+    }
+
+    const previousDesktop = await activeX11Desktop(signal);
+    const desiredDesktop = x11DesktopIndex(screenId, outputGeometry);
+    if (previousDesktop !== desiredDesktop) await switchX11Desktop(desiredDesktop, signal);
+    let result: unknown;
+    try {
+      result = await cdp.browserCommand("Target.createTarget", {
+        url: "about:blank",
+        newWindow: true,
+        background: false,
+        left: geometry.x,
+        top: geometry.y,
+        width: Math.max(640, geometry.width),
+        height: Math.max(480, geometry.height),
+      }, signal);
+    } catch (error) {
+      if (previousDesktop !== desiredDesktop) {
+        await switchX11Desktop(previousDesktop, signal).catch((restoreError: unknown) => {
+          reportOperationalError({ component: "computer", operation: "restore Human X11 desktop after browser creation failure", error: restoreError, severity: "warn" });
+        });
+      }
+      throw error;
+    }
     if (!result || typeof result !== "object" || typeof (result as { targetId?: unknown }).targetId !== "string") {
       throw new Error("Chromium CDP did not return a target id");
     }
     const targetId = (result as { targetId: string }).targetId;
     targetByScreen.set(screenId, targetId);
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      if ((await browserTargets(signal)).some((target) => target.id === targetId)) return targetId;
+      targets = await browserTargets(signal);
+      if (targets.some((target) => target.id === targetId)) {
+        await markOwnedTarget(screenId, targetId, signal);
+        {
+          let placed = false;
+          try {
+            placed = await x11TargetIsOnDesktop(screenId, targetId, signal);
+          } finally {
+            if (previousDesktop !== desiredDesktop) {
+              await switchX11Desktop(previousDesktop, signal).catch((error: unknown) => {
+                reportOperationalError({ component: "computer", operation: "restore Human X11 desktop after FRIDAY window creation", error, severity: "warn" });
+              });
+            }
+          }
+          if (!placed) {
+            await closeOwnedTarget(targetId, signal).catch((closeError: unknown) => {
+              reportOperationalError({ component: "computer", operation: "close misplaced X11 browser target", error: closeError, severity: "warn" });
+            });
+            throw new Error(`FRIDAY browser window was not created on X11 desktop ${desiredDesktop + 1}`);
+          }
+        }
+        return targetId;
+      }
       await delay(25, signal);
+    }
+    if (previousDesktop !== desiredDesktop) {
+      await switchX11Desktop(previousDesktop, signal).catch((restoreError: unknown) => {
+        reportOperationalError({ component: "computer", operation: "restore Human X11 desktop after browser readiness timeout", error: restoreError, severity: "warn" });
+      });
     }
     throw new Error("Chromium CDP target did not become ready");
   }
@@ -1160,15 +1675,8 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     args: readonly unknown[],
     signal?: AbortSignal,
   ): Promise<T | undefined> {
-    const result = await cdp.targetCommand(targetId, "Runtime.callFunctionOn", {
-      functionDeclaration,
-      arguments: args.map((value) => ({ value })),
-      returnByValue: true,
-      awaitPromise: true,
-    }, signal);
-    const exception = cdpExceptionMessage(result);
-    if (exception) throw new Error(`browser page evaluation failed: ${sanitizeText(exception, 256)}`);
-    return cdpResultValue<T>(result);
+    const argsJson = args.map((value) => JSON.stringify(value)).join(",");
+    return evaluateValue<T>(targetId, `(${functionDeclaration})(${argsJson})`, signal);
   }
 
   async function pageUrl(targetId: string, signal?: AbortSignal): Promise<string> {
@@ -1366,6 +1874,148 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     });
   }
 
+  async function sharedStructuredObservation(
+    screenId: string,
+    observationId: string,
+    request: ComputerObservationRequest,
+    snapshot: SharedAccessibilitySnapshot,
+  ): Promise<Readonly<{
+    elements: readonly ComputerElement[];
+    records: ReadonlyMap<string, ProviderElementRecord>;
+    idsBySelector: ReadonlyMap<string, string>;
+  }>> {
+    const rawElements = Array.isArray(snapshot.elements) ? snapshot.elements as readonly SharedAccessibilityElement[] : [];
+    const previous = observationStateByScreen.get(screenId);
+    const elements: ComputerElement[] = [];
+    const records = new Map<string, ProviderElementRecord>();
+    const idsBySelector = new Map<string, string>();
+    for (const raw of rawElements.slice(0, MAX_STRUCTURED_ELEMENTS)) {
+      if (!raw || typeof raw !== "object") continue;
+      const path = typeof raw.path === "string" ? raw.path.trim().slice(0, 2_048) : "";
+      const selector = `atspi:${path}`;
+      const left = finiteBrowserNumber(raw.left);
+      const top = finiteBrowserNumber(raw.top);
+      const right = finiteBrowserNumber(raw.right);
+      const bottom = finiteBrowserNumber(raw.bottom);
+      if (left === undefined || top === undefined || right === undefined || bottom === undefined || right <= left || bottom <= top) continue;
+      const bbox = Object.freeze({ left, top, right, bottom });
+      const previousId = previous?.idsBySelector.get(selector);
+      const elementId = previousId ?? nextElementId(screenId);
+      const role = sanitizeText(typeof raw.role === "string" ? raw.role : "element", 128) || "element";
+      const isProtected = raw.protected === true || raw.challenge === true;
+      const name = sanitizeText(typeof raw.name === "string" ? raw.name : "", 1_024);
+      const context = sanitizeText(typeof raw.context === "string" ? raw.context : "", 2_048);
+      const value = isProtected ? "" : sanitizeText(typeof raw.value === "string" ? raw.value : "", 2_048);
+      const allowedActions = new Set<ComputerElementAction>(["click", "type", "toggle", "select", "expand", "scroll"]);
+      const actions: ComputerElementAction[] = [];
+      if (Array.isArray(raw.actions)) {
+        for (const candidate of raw.actions as readonly unknown[]) {
+          if (typeof candidate !== "string" || !allowedActions.has(candidate as ComputerElementAction)) continue;
+          const action = candidate as ComputerElementAction;
+          if (!actions.includes(action)) actions.push(action);
+        }
+      }
+      const visible = raw.visible === true;
+      const enabled = raw.enabled !== false;
+      const interactive = raw.interactive === true;
+      const confidence = elementConfidence({
+        visible,
+        enabled,
+        interactive,
+        ...(name ? { name } : {}),
+        ...(context ? { context } : {}),
+        bbox,
+        obscured: false,
+        actions,
+        protected: isProtected,
+      });
+      const element = Object.freeze({
+        id: elementId,
+        ref: `${observationId}:${elementId}`,
+        role,
+        ...(name ? { name } : {}),
+        ...(value ? { value } : {}),
+        bbox,
+        visible,
+        enabled,
+        focused: raw.focused === true,
+        interactive,
+        clickable: raw.clickable === true,
+        editable: raw.editable === true,
+        selectable: raw.selectable === true,
+        scrollable: raw.scrollable === true,
+        draggable: raw.draggable === true,
+        ...(typeof raw.selected === "boolean" ? { selected: raw.selected } : {}),
+        ...(typeof raw.checked === "boolean" ? { checked: raw.checked } : {}),
+        ...(typeof raw.expanded === "boolean" ? { expanded: raw.expanded } : {}),
+        ...(isProtected ? { protected: true } : {}),
+        ...(context ? { context } : {}),
+        actions: Object.freeze(isProtected ? [] : actions),
+        source: "atspi" as const,
+        confidence,
+      } satisfies ComputerElement);
+      elements.push(element);
+      records.set(elementId, Object.freeze({ element, selector, pageBbox: bbox }));
+      idsBySelector.set(selector, elementId);
+    }
+    return Object.freeze({ elements: Object.freeze(elements), records, idsBySelector });
+  }
+
+  async function observeSharedScreen(
+    screenId: string,
+    signal?: AbortSignal,
+    rawRequest?: ComputerObservationRequest,
+  ): Promise<ComputerObservation> {
+    const windowId = await ensureSharedWindow(screenId, signal);
+    const request = providerObservationRequest(rawRequest);
+    const nearSelector = resolveNearSelector(screenId, request.near);
+    const nearPath = nearSelector?.startsWith("atspi:") ? nearSelector.slice("atspi:".length) : undefined;
+    const requestKey = JSON.stringify({ scope: request.scope, query: request.query ?? "", nearSelector: nearSelector ?? "", maxElements: request.maxElements });
+    const previous = observationStateByScreen.get(screenId);
+    const observationId = `obs-${++observationSequence}`;
+    const snapshot = await withActiveSharedWindow(screenId, windowId, async (title) => atspiJson<SharedAccessibilitySnapshot>([
+      "snapshot", "--active", "--title", title,
+      "--scope", request.scope ?? "interactive",
+      "--max-elements", String(request.maxElements ?? 80),
+      ...(request.query ? ["--query", request.query] : []),
+      ...(nearPath !== undefined ? ["--near", nearPath] : []),
+    ], signal), signal);
+    const structured = await sharedStructuredObservation(screenId, observationId, request, snapshot);
+    const currentTitle = sanitizeTitle(typeof snapshot.frameTitle === "string" ? snapshot.frameTitle : await sharedWindowTitle(windowId, signal));
+    const currentUrl = typeof snapshot.url === "string" && snapshot.url.trim()
+      ? sanitizeUrl(snapshot.url)
+      : previous?.observation.url ?? "about:blank";
+    const tabs = Object.freeze([Object.freeze({ id: `x11:${windowId}`, title: currentTitle, url: currentUrl, active: true })]);
+    const summary = sanitizeText(structured.elements.map((element) => `${element.role} ${element.name ?? ""} ${element.context ?? ""}`).join(" | "), MAX_DOM_SUMMARY);
+    const delta = observationDelta(previous, requestKey, structured.elements, structured.records);
+    const observation = Object.freeze({
+      observedAt: now().toISOString(),
+      screenId,
+      observationId,
+      safety: Object.freeze({
+        protectedInputOmitted: true as const,
+        keystrokesOmitted: true as const,
+        captchaOmitted: true as const,
+        sensitiveScreenshotOmitted: true as const,
+      }),
+      url: currentUrl,
+      ...(summary ? { accessibilitySummary: summary } : {}),
+      tabs,
+      elements: structured.elements,
+      ...(delta === undefined ? {} : { delta }),
+      processes: lastProcesses,
+    } satisfies ComputerObservation);
+    observationStateByScreen.set(screenId, Object.freeze({
+      observationId,
+      requestKey,
+      request,
+      elementsById: structured.records,
+      idsBySelector: structured.idsBySelector,
+      observation,
+    }));
+    return observation;
+  }
+
   function observationDelta(
     previous: ScreenObservationState | undefined,
     requestKey: string,
@@ -1403,6 +2053,7 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     rawRequest?: ComputerObservationRequest,
   ): Promise<ComputerObservation> {
     signal?.throwIfAborted();
+    if (browserMode === "shared") return observeSharedScreen(screenId, signal, rawRequest);
     const targetId = await ensureTarget(screenId, signal);
     const request = providerObservationRequest(rawRequest);
     const nearSelector = resolveNearSelector(screenId, request.near);
@@ -1415,18 +2066,20 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     const previous = observationStateByScreen.get(screenId);
     const observationId = `obs-${++observationSequence}`;
     const [rawSummary, rawUrl, targets, structured] = await Promise.all([
-      rawRequest === undefined ? evaluateValue<string>(targetId, DOM_SUMMARY_EXPRESSION, signal) : Promise.resolve(undefined),
+      evaluateValue<string>(targetId, DOM_SUMMARY_EXPRESSION, signal),
       pageUrl(targetId, signal),
       browserTargets(signal),
       structuredObservation(screenId, targetId, observationId, request, nearSelector, signal),
     ]);
     const target = targets.find((candidate) => candidate.id === targetId);
     const currentUrl = rawUrl || target?.url || "about:blank";
+    const media = target ? await optionalTargetMediaState(targetId, "read browser media state for observation", signal) : undefined;
     const tabs = target ? Object.freeze([Object.freeze({
       id: target.id,
       title: sanitizeTitle(target.title),
       url: sanitizeUrl(target.url),
       active: true,
+      ...(media === undefined ? {} : { media }),
     })]) : Object.freeze([]);
     const delta = observationDelta(previous, requestKey, structured.elements, structured.records);
     const observation = Object.freeze({
@@ -1527,6 +2180,7 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     confidence: number,
     highImpactEligible: boolean,
     probeToken: string | undefined,
+    mode: "cdp" | "accessibility" = "cdp",
   ): ComputerBrowserActionResult | undefined {
     const highImpact = highImpactEligible && HIGH_IMPACT_ACTION.test(`${resolved.record.element.name ?? ""} ${resolved.record.element.context ?? ""}`);
     const lowConfidence = confidence < ACTION_CONFIDENCE_THRESHOLD;
@@ -1539,7 +2193,7 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
       return undefined;
     }
     return Object.freeze({
-      mode: "cdp" as const,
+      mode,
       performed: false,
       confidence,
       visualProbeRequired: Object.freeze({
@@ -1551,9 +2205,118 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     });
   }
 
+  function xdotoolKeyName(key: string): string {
+    const normalized = key.trim();
+    if (!normalized || normalized.length > 64 || /[\0\r\n]/u.test(normalized)) throw new Error("browser key is invalid");
+    const aliases: Record<string, string> = {
+      enter: "Return", numpadenter: "KP_Enter", space: "space", spacebar: "space", escape: "Escape", esc: "Escape",
+      tab: "Tab", backspace: "BackSpace", delete: "Delete", arrowup: "Up", arrowdown: "Down", arrowleft: "Left", arrowright: "Right",
+      home: "Home", end: "End", pageup: "Page_Up", pagedown: "Page_Down",
+    };
+    const lower = normalized.toLowerCase();
+    const mapped = aliases[lower];
+    if (mapped) return mapped;
+    if (/^[A-Za-z0-9]$/u.test(normalized)) return normalized;
+    if (/^(F(?:[1-9]|1[0-2]))$/iu.test(normalized)) return normalized.toUpperCase();
+    throw new Error(`browser key is not supported in shared mode: ${normalized}`);
+  }
+
+  async function runSharedBrowserAction(request: ComputerBrowserActionRequest): Promise<ComputerBrowserActionResult> {
+    if (!request.automationOrder.includes("accessibility")) throw new Error("Linux shared-browser mode requires accessibility automation");
+    const windowId = await ensureSharedWindow(request.screenId, request.signal);
+    const beforeState = observationStateByScreen.get(request.screenId);
+    const beforeUrl = beforeState?.observation.url ?? "about:blank";
+    const action = request.action;
+    let actionConfidence: number | undefined;
+    if (action.kind === "navigate") {
+      const url = safeNavigationUrl(action.url);
+      await withActiveSharedWindow(request.screenId, windowId, async () => {
+        for (const [command, args] of [
+          ["xdotool", ["key", "--clearmodifiers", "ctrl+l"]],
+          ["xdotool", ["type", "--clearmodifiers", "--delay", "1", "--", url]],
+          ["xdotool", ["key", "--clearmodifiers", "Return"]],
+        ] as const) {
+          const result = await runCommand(command, args, request.signal);
+          if (!result.ok) throw new Error(sanitizeText(result.stderr || `xdotool failed during ${action.kind}`, 512));
+        }
+      }, request.signal);
+      await delay(BROWSER_INPUT_SETTLE_MS, request.signal);
+    } else if (action.kind === "click" || action.kind === "type") {
+      const semantic = currentSemanticRecord(request.screenId, action.target);
+      if (!semantic) throw new Error("shared-browser actions require a current semantic element ref");
+      if (semantic.record.element.protected) throw new Error("protected browser target requires human takeover");
+      if (!semantic.record.selector.startsWith("atspi:")) throw new Error("shared-browser semantic target is invalid");
+      if (!semantic.record.element.actions.includes(action.kind)) throw new Error(`semantic target does not support ${action.kind}: ${action.target}`);
+      if (action.kind === "type" && action.sensitive === true) throw new Error("protected browser input requires human takeover");
+      actionConfidence = semantic.record.element.confidence;
+      const gated = gatedSemanticAction(request.screenId, semantic, actionConfidence, action.kind === "click", action.visualProbeToken, "accessibility");
+      if (gated) return gated;
+      const path = semantic.record.selector.slice("atspi:".length);
+      await withActiveSharedWindow(request.screenId, windowId, async (title) => {
+        await atspiJson(["action", "--active", "--title", title, "--path", path, "--kind", action.kind, ...(action.kind === "type" ? ["--text", action.text] : [])], request.signal);
+      }, request.signal);
+      await delay(BROWSER_INPUT_SETTLE_MS, request.signal);
+    } else if (action.kind === "press") {
+      if (action.target) {
+        const semantic = currentSemanticRecord(request.screenId, action.target);
+        if (!semantic) throw new Error("shared-browser press targets require a current semantic element ref");
+        if (semantic.record.element.protected) throw new Error("protected browser target requires human takeover");
+        actionConfidence = semantic.record.element.confidence;
+        const activationKey = /^(enter|numpadenter|space|spacebar)$/i.test(action.key.trim());
+        const gated = gatedSemanticAction(request.screenId, semantic, actionConfidence, activationKey, action.visualProbeToken, "accessibility");
+        if (gated) return gated;
+        if (!semantic.record.selector.startsWith("atspi:")) throw new Error("shared-browser semantic target is invalid");
+        const path = semantic.record.selector.slice("atspi:".length);
+        await withActiveSharedWindow(request.screenId, windowId, async (title) => {
+          await atspiJson(["action", "--active", "--title", title, "--path", path, "--kind", "focus"], request.signal);
+          const keyResult = await runCommand("xdotool", ["key", "--clearmodifiers", xdotoolKeyName(action.key)], request.signal);
+          if (!keyResult.ok) throw new Error(sanitizeText(keyResult.stderr || "xdotool could not send browser key", 512));
+        }, request.signal);
+      } else {
+        await withActiveSharedWindow(request.screenId, windowId, async () => {
+          const keyResult = await runCommand("xdotool", ["key", "--clearmodifiers", xdotoolKeyName(action.key)], request.signal);
+          if (!keyResult.ok) throw new Error(sanitizeText(keyResult.stderr || "xdotool could not send browser key", 512));
+        }, request.signal);
+      }
+      await delay(BROWSER_INPUT_SETTLE_MS, request.signal);
+    } else if (action.kind === "scroll") {
+      if (action.target) {
+        const semantic = currentSemanticRecord(request.screenId, action.target);
+        if (!semantic) throw new Error("shared-browser scroll targets require a current semantic element ref");
+        if (semantic.record.element.protected) throw new Error("protected browser target requires human takeover");
+        actionConfidence = semantic.record.element.confidence;
+        const gated = gatedSemanticAction(request.screenId, semantic, actionConfidence, false, action.visualProbeToken, "accessibility");
+        if (gated) return gated;
+      }
+      await withActiveSharedWindow(request.screenId, windowId, async () => {
+        const vertical = Math.max(-10, Math.min(10, Math.round(action.deltaY / 100)));
+        const horizontal = Math.max(-10, Math.min(10, Math.round((action.deltaX ?? 0) / 100)));
+        const clicks: string[] = [];
+        for (let index = 0; index < Math.abs(vertical); index += 1) clicks.push(vertical > 0 ? "5" : "4");
+        for (let index = 0; index < Math.abs(horizontal); index += 1) clicks.push(horizontal > 0 ? "7" : "6");
+        for (const button of clicks) {
+          const result = await runCommand("xdotool", ["click", button], request.signal);
+          if (!result.ok) throw new Error(sanitizeText(result.stderr || "xdotool could not scroll browser window", 512));
+        }
+      }, request.signal);
+      await delay(BROWSER_INPUT_SETTLE_MS, request.signal);
+    }
+    const observation = await observeSharedScreen(request.screenId, request.signal, beforeState?.request);
+    const delta = observation.delta;
+    const structuralChange = Boolean(delta && (delta.added.length > 0 || delta.updated.length > 0 || delta.removedIds.length > 0));
+    return Object.freeze({
+      mode: "accessibility" as const,
+      performed: true,
+      ...(actionConfidence === undefined ? {} : { confidence: actionConfidence }),
+      verification: Object.freeze({ structuralChange, urlChanged: beforeUrl !== observation.url }),
+      observation,
+    });
+  }
+
   async function runBrowserAction(request: ComputerBrowserActionRequest): Promise<ComputerBrowserActionResult> {
     request.signal?.throwIfAborted();
-    if (!request.automationOrder.includes("cdp")) throw new Error("Linux Sway provider requires CDP automation");
+    if (browserMode === "shared") return runSharedBrowserAction(request);
+    if (!request.automationOrder.includes("cdp")) throw new Error("Linux X11 provider requires CDP automation");
     const targetId = await ensureTarget(request.screenId, request.signal);
     const beforeState = observationStateByScreen.get(request.screenId);
     const beforeUrl = beforeState?.observation.url ?? await pageUrl(targetId, request.signal);
@@ -1664,8 +2427,74 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     });
   }
 
+  function boxesIntersect(left: ComputerBoundingBox, right: ComputerBoundingBox): boolean {
+    return left.left < right.right && left.right > right.left && left.top < right.bottom && left.bottom > right.top;
+  }
+
+  async function sharedVisualProbe(request: ComputerVisualProbeRequest): Promise<ComputerVisualProbeResult> {
+    if (request.return === "image") throw new Error("shared-browser mode does not capture screenshots; use a text probe or Human takeover");
+    let state = observationStateByScreen.get(request.screenId);
+    if (!state) {
+      await observeSharedScreen(request.screenId, request.signal, providerObservationRequest(undefined));
+      state = observationStateByScreen.get(request.screenId);
+    }
+    if (!state) throw new Error("Computer visual probe could not establish an observation");
+    let sourceBox: ComputerBoundingBox;
+    let ref: string | undefined;
+    let confidence = 1;
+    if (request.ref !== undefined) {
+      const semantic = currentSemanticRecord(request.screenId, request.ref);
+      if (!semantic?.record.element.bbox) throw new Error("Computer visual probe ref must be a current semantic element ref with geometry");
+      if (semantic.record.element.protected) throw new Error("protected or challenge visual region requires human takeover");
+      sourceBox = semantic.record.element.bbox;
+      ref = request.ref;
+      confidence = semantic.record.element.confidence;
+    } else if (request.bbox !== undefined) {
+      sourceBox = request.bbox;
+    } else {
+      throw new Error("Computer visual probe requires ref or bbox");
+    }
+    const geometry = outputGeometry.get(request.screenId);
+    const width = Math.max(1, geometry?.width ?? 1_280);
+    const height = Math.max(1, geometry?.height ?? 720);
+    const fullWindow = request.size === "window" || request.size === "full";
+    const crop = fullWindow
+      ? Object.freeze({ left: 0, top: 0, right: width, bottom: height })
+      : clampProbeBox(sourceBox, width, height, request.includeContext === false ? 8 : 32);
+    const records = [...state.elementsById.values()];
+    if (records.some((record) => record.element.protected === true && record.element.bbox && boxesIntersect(crop, record.element.bbox))) {
+      throw new Error("protected or challenge visual region requires human takeover");
+    }
+    const visibleText = Object.freeze(records
+      .filter((record) => record.element.bbox && boxesIntersect(crop, record.element.bbox) && record.element.protected !== true)
+      .flatMap((record) => [record.element.name, record.element.value, record.element.context])
+      .filter((value): value is string => typeof value === "string" && Boolean(value.trim()))
+      .map((value) => sanitizeText(value, 1_024))
+      .filter(Boolean)
+      .slice(0, MAX_VISUAL_TEXT_ITEMS));
+    let probeToken: string | undefined;
+    if (ref) {
+      pruneVisualProbeTokens();
+      probeToken = `probe-${randomUUID()}`;
+      visualProbeTokens.set(probeToken, Object.freeze({ screenId: request.screenId, ref, expiresAt: Date.now() + VISUAL_PROBE_TOKEN_TTL_MS }));
+    }
+    return Object.freeze({
+      observationId: state.observationId,
+      safety: Object.freeze({ protectedRegionOmitted: true as const, challengeRegionOmitted: true as const }),
+      ...(ref === undefined ? {} : { ref }),
+      bbox: crop,
+      width: Math.max(1, crop.right - crop.left),
+      height: Math.max(1, crop.bottom - crop.top),
+      targetMatch: true,
+      confidence,
+      visibleText,
+      ...(probeToken === undefined ? {} : { probeToken }),
+    });
+  }
+
   async function visualProbe(request: ComputerVisualProbeRequest): Promise<ComputerVisualProbeResult> {
     request.signal?.throwIfAborted();
+    if (browserMode === "shared") return sharedVisualProbe(request);
     const targetId = await ensureTarget(request.screenId, request.signal);
     let state = observationStateByScreen.get(request.screenId);
     if (!state) {
@@ -1761,27 +2590,86 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     });
   }
 
+  async function sharedScreenSupport(signal?: AbortSignal): Promise<import("../contract.js").ComputerSharedScreenSupport> {
+    if (platform !== "linux") return Object.freeze({ level: "unsupported", backend: "unsupported", desktopEnvironment: "unknown", sessionType: "unknown", canCreateWorkspace: false, canPlaceViewer: false, canSwitchWorkspace: false, viewOnly: false, missing: Object.freeze([]), reason: `X11 Computer cannot run on ${platform}` });
+    const sessionType = (environment.XDG_SESSION_TYPE?.trim().toLowerCase() || environment.FRIDAY_COMPUTER_HOST_XDG_SESSION_TYPE?.trim().toLowerCase()) === "x11" ? "x11" as const : "unknown" as const;
+    const desktopEnvironment = environment.XDG_CURRENT_DESKTOP?.trim() || environment.FRIDAY_COMPUTER_HOST_XDG_CURRENT_DESKTOP?.trim() || "unknown";
+    const missing: string[] = [];
+    if (sessionType !== "x11") missing.push("X11 session");
+    if (!(await executable("wmctrl"))) missing.push("wmctrl");
+    if (browserMode === "shared") {
+      if (!(await executable("xdotool"))) missing.push("xdotool");
+      if (!(await executable("xprop"))) missing.push("xprop");
+      if (!(await executable("python3"))) missing.push("python3");
+      if (!(await executable(sharedBrowserBin))) missing.push(`browser:${sharedBrowserBin}`);
+      try { await access(atspiHelper, fsConstants.R_OK); } catch { missing.push("FRIDAY AT-SPI helper"); }
+    }
+    try { await x11Desktops(signal); } catch (error) { missing.push(sanitizeText(error instanceof Error ? error.message : String(error), 160)); }
+    if (missing.length > 0) return Object.freeze({ level: "unsupported", backend: "unsupported", desktopEnvironment, sessionType, canCreateWorkspace: false, canPlaceViewer: false, canSwitchWorkspace: false, viewOnly: false, missing: Object.freeze(missing), reason: `Native FRIDAY virtual desktops are unavailable: ${missing.join(", ")}` });
+    return Object.freeze({ level: "full", backend: "x11-ewmh", desktopEnvironment, sessionType: "x11", canCreateWorkspace: true, canPlaceViewer: true, canSwitchWorkspace: true, viewOnly: false, missing: Object.freeze([]), reason: "FRIDAY controls a real browser window directly on a host X11 virtual desktop; no Sway, VNC, or KWin script is used" });
+  }
+
+  async function openSharedScreen(request: Parameters<NonNullable<ComputerNodeAdapter["openSharedScreen"]>>[0]) {
+    request.signal?.throwIfAborted();
+    const support = await sharedScreenSupport(request.signal);
+    if (support.level !== "full") throw new Error(support.reason);
+    const desktops = await x11Desktops(request.signal);
+    outputGeometry = new Map(desktops.geometry);
+    const geometry = outputGeometry.get(request.screenId);
+    if (!geometry || geometry.kind !== "agent") throw new Error(`X11 Agent desktop is unavailable: ${request.screenId}`);
+    const targetId = browserMode === "shared"
+      ? await ensureSharedWindow(request.screenId, request.signal)
+      : await ensureTarget(request.screenId, request.signal);
+    return Object.freeze({ nodeId, screenId: request.screenId, workspaceName: request.name?.trim() || `FRIDAY Desktop ${x11DesktopIndex(request.screenId, outputGeometry) + 1}`, backend: "x11-ewmh" as const, viewOnly: false, viewerId: `native-browser:${targetId}` });
+  }
+
+  async function closeSharedScreens(signal?: AbortSignal): Promise<number> {
+    let closed = 0;
+    for (const [screenId, targetId] of [...targetByScreen.entries()]) {
+      if (browserMode === "shared") {
+        const marker = await readSharedWindowMarker(targetId, signal);
+        if (marker !== sharedWindowMarker(screenId)) {
+          targetByScreen.delete(screenId);
+          continue;
+        }
+        const result = await runCommand("xdotool", ["windowclose", targetId], signal);
+        if (!result.ok) throw new Error(sanitizeText(result.stderr || "xdotool could not close the FRIDAY browser window", 512));
+        targetByScreen.delete(screenId);
+        observationStateByScreen.delete(screenId);
+        nextElementIdByScreen.delete(screenId);
+      } else {
+        await closeOwnedTarget(targetId, signal);
+      }
+      closed += 1;
+    }
+    return closed;
+  }
+
   async function doctor(signal?: AbortSignal): Promise<readonly string[]> {
     const issues: string[] = [];
-    if (platform !== "linux") return Object.freeze([`Linux Sway provider cannot run on ${platform}`]);
+    if (platform !== "linux") return Object.freeze([`Linux Computer provider cannot run on ${platform}`]);
     if (uid === 0) issues.push("Agent Computer must run as an unprivileged user, not root");
-    for (const command of ["sway", "swaymsg", "chromium"]) {
-      if (!(await executable(command))) {
-        if (command === "chromium" && await executable("chromium-browser")) continue;
-        issues.push(`${command} is not installed or not executable`);
+    if (!(await executable("wmctrl"))) issues.push("wmctrl is not installed or not executable");
+    if (browserMode === "shared") {
+      if (!(await executable("xdotool"))) issues.push("xdotool is not installed or not executable");
+      if (!(await executable("xprop"))) issues.push("xprop is not installed or not executable");
+      if (!(await executable("python3"))) issues.push("python3 is not installed or not executable");
+      if (!(await executable(sharedBrowserBin))) issues.push(`Configured browser is unavailable: ${sharedBrowserBin}`);
+      try { await access(atspiHelper, fsConstants.R_OK); } catch { issues.push("Bundled AT-SPI browser helper is unavailable"); }
+      if (await executable("python3")) {
+        const probe = await runCommand("python3", ["-c", "import pyatspi"], signal);
+        if (!probe.ok) issues.push("python3-pyatspi is unavailable; run `friday setup computer`");
       }
     }
     try {
-      const outputs = await swayOutputs(signal);
-      if (!outputs.screens.some((screen) => screen.kind === "agent")) issues.push("Sway has no headless Agent output");
-      if ((environment.FRIDAY_COMPUTER_SESSION_MODE?.trim() || "managed") !== "compatibility"
-        && !outputs.screens.some((screen) => screen.kind === "human")) {
-        issues.push("managed Sway session has no physical Human output");
-      }
+      const outputs = await x11Desktops(signal);
+      if (!outputs.screens.some((screen) => screen.kind === "agent")) issues.push("No FRIDAY X11 Agent virtual desktop is configured");
     } catch (error) {
-      issues.push(`Sway session is unavailable: ${sanitizeText(error instanceof Error ? error.message : String(error), 256)}`);
+      issues.push(`X11 desktop is unavailable: ${sanitizeText(error instanceof Error ? error.message : String(error), 256)}`);
     }
-    try { await browserTargets(signal); } catch { issues.push("Chromium CDP browser supervisor is unavailable on loopback"); }
+    if (browserMode === "managed-cdp") {
+      try { await browserTargets(signal); } catch { issues.push("FRIDAY managed browser CDP fallback is unavailable on loopback"); }
+    }
     return Object.freeze(issues.slice(0, 32));
   }
 
@@ -1796,20 +2684,20 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
 
   return Object.freeze({
     descriptor: Object.freeze({
-      id: boundedId(environment.FRIDAY_COMPUTER_NODE_ID, DEFAULT_NODE_ID, "FRIDAY_COMPUTER_NODE_ID"),
+      id: nodeId,
       label: boundedLabel(environment.FRIDAY_COMPUTER_NODE_LABEL, DEFAULT_NODE_LABEL),
       platform: "linux" as const,
       capabilities: Object.freeze({
         executionOperations,
         browser: true,
         playwright: false,
-        accessibility: false,
-        cdp: true,
+        accessibility: browserMode === "shared",
+        cdp: browserMode === "managed-cdp",
         visualControl: false,
-        screenCapture: true,
+        screenCapture: browserMode === "managed-cdp",
         rawInput: false,
         virtualDisplays: true,
-        managedLifecycle: true,
+        managedLifecycle: browserMode === "managed-cdp",
       }),
       admission: Object.freeze({
         minAvailableMemoryMb: positiveInteger(environment.FRIDAY_COMPUTER_MIN_AVAILABLE_MEMORY_MB, 1_024, 1_048_576),
@@ -1825,6 +2713,9 @@ export function createLinuxSwayComputerAdapter(options: LinuxSwayComputerAdapter
     visualProbe,
     ...(options.runTool === undefined ? {} : { runTool: runExistingTool }),
     ...(options.cleanupRunProcesses === undefined ? {} : { cleanupRunProcesses: cleanupExistingRun }),
+    sharedScreenSupport,
+    openSharedScreen,
+    closeSharedScreens,
     doctor,
     restart: (signal?: AbortSignal) => lifecycle("restart", signal),
     update: (signal?: AbortSignal) => lifecycle("update", signal),

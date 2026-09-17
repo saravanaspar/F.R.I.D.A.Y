@@ -115,6 +115,7 @@ describe("diagnostics", () => {
         supportsOAuth: () => false,
         typicallyNeedsApiKey: () => false,
         getApiKey: async () => undefined,
+        listAvailableModelIds: async () => [],
         requestApiKeyCapture: async () => ({ id: "unused" }),
         captureApiKey: async () => ({ id: "unused" }),
         captureOAuth: async () => ({ id: "unused" }),

@@ -3,6 +3,7 @@ import { defineCapability } from "../capabilities/protocol.js";
 
 export type RoutingDestinationKind = "session" | "transient" | "scheduler" | "system";
 export type RoutingExecutionProfile = "agent" | "utility" | "scheduler" | "system";
+export type RoutingCapabilityProfile = "none" | "computer" | "general";
 
 export interface RoutingPrincipal {
   readonly authority: "local" | "channel";
@@ -14,7 +15,6 @@ export interface RoutingPrincipal {
   /** Host-owned internal Conversation id for shared routing/session continuity. */
   readonly sharedConversationId?: string | undefined;
 }
-
 export interface RoutingAttachment {
   readonly kind: "image" | "audio" | "video" | "document" | "sticker" | "other";
   readonly mimeType?: string | undefined;
@@ -29,7 +29,6 @@ export interface RoutingMessage {
   readonly attachments?: readonly RoutingAttachment[] | undefined;
   readonly timestamp: number;
 }
-
 export interface RoutingDestination {
   readonly kind: RoutingDestinationKind;
   readonly id: string;
@@ -37,6 +36,12 @@ export interface RoutingDestination {
 
 export interface RoutingExecution {
   readonly profile: RoutingExecutionProfile;
+  /**
+   * Host-bounded capability surface for the selected execution path.
+   * Optional for durable/backward compatibility; missing values are treated as
+   * `general` by Agent execution so older admitted work never loses tools.
+   */
+  readonly capabilityProfile?: RoutingCapabilityProfile | undefined;
 }
 
 export interface RoutingDecision {
@@ -50,7 +55,6 @@ export interface RoutedMessage {
   readonly message: RoutingMessage;
   readonly decision: RoutingDecision;
 }
-
 export interface RoutingOptions {
   readonly signal?: AbortSignal | undefined;
 }
@@ -59,9 +63,13 @@ export type RoutingListener = (routed: RoutedMessage) => void | Promise<void>;
 
 export interface RoutingService {
   route(message: RoutingMessage, options?: RoutingOptions): Promise<RoutingDecision>;
+  /**
+   * Route a bounded burst from one continuity scope with a single classifier request.
+   * Each returned decision is independently host-validated and ordered like input.
+   */
+  routeBatch?(messages: readonly RoutingMessage[], options?: RoutingOptions): Promise<readonly RoutingDecision[]>;
   subscribe(listener: RoutingListener): () => void;
   recentContext(principal: RoutingPrincipal): readonly RoutingMessage[];
 }
-
 export const ROUTING_CAPABILITY: Capability<RoutingService> =
   defineCapability<RoutingService>("routing");

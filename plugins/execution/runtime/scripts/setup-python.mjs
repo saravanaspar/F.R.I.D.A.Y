@@ -10,6 +10,7 @@ const python = process.platform === "win32" ? join(venv, "Scripts", "python.exe"
 mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
 if (process.platform !== "win32") chmodSync(runtimeRoot, 0o700);
 const PYTHON_PACKAGES = ["ipykernel==6.30.1", "dill==0.4.0"];
+const HEALTH_CHECK = "import importlib.metadata as m, sys; assert sys.version_info[:2] == (3, 11); assert m.version('ipykernel') == '6.30.1'; assert m.version('dill') == '0.4.0'";
 
 function probe(command, args = ["--version"]) {
   const result = spawnSync(command, args, { stdio: "ignore", timeout: 5000 });
@@ -32,6 +33,11 @@ function fallbackPython() {
     }
   }
   throw new Error("Python 3.11 is required when uv is unavailable");
+}
+
+if (existsSync(python) && probe(python, ["-c", HEALTH_CHECK])) {
+  console.log(`[execution] ready: ${python}`);
+  process.exit(0);
 }
 
 console.log("[execution] provisioning Python 3.11 kernel environment");

@@ -65,6 +65,8 @@ function safeGlob(value, label) {
 
 function manifestFiles(root) {
   const files = [];
+  const rootManifest = resolve(root, BINARY_ASSET_MANIFEST);
+  if (existsSync(rootManifest) && lstatSync(rootManifest).isFile()) files.push(BINARY_ASSET_MANIFEST);
   const visit = (directory) => {
     for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       if (entry.name === "node_modules" || entry.name === "dist" || entry.name === "build" || entry.name === ".git") continue;

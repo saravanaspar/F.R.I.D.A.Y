@@ -5,6 +5,20 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export type RuntimePermissionMode = "ask" | "auto" | "full";
 export type HostPrivilegeMode = "broker" | "none";
+export type RuntimeComputerBrowserMode = "shared" | "managed-cdp";
+
+export interface RuntimeComputerSettings {
+  readonly provider: "linux-x11";
+  readonly sessionMode: "native-x11";
+  readonly browserMode: RuntimeComputerBrowserMode;
+  readonly browserBin: string;
+  readonly browserArgs?: readonly string[] | undefined;
+  readonly agentScreens: number;
+  readonly x11AgentDesktops: readonly number[];
+  readonly cdpUrl?: string | undefined;
+  readonly cdpPort?: number | undefined;
+  readonly browserProfileDir?: string | undefined;
+}
 
 export interface RuntimeSettings {
   /** Main reasoning model. Optional during router-only bootstrap mode. */
@@ -22,6 +36,8 @@ export interface RuntimeSettings {
   readonly workspaceRoot?: string | undefined;
   /** Optional canonical checkout FRIDAY may modify for self-improvement. */
   readonly selfRepository?: string | undefined;
+  /** Optional local Computer setup owned by the installed FRIDAY binary. */
+  readonly computer?: RuntimeComputerSettings | undefined;
 }
 
 export interface RuntimeSettingsPatch {
@@ -34,6 +50,7 @@ export interface RuntimeSettingsPatch {
   readonly timezone?: string | undefined;
   readonly workspaceRoot?: string | undefined;
   readonly selfRepository?: string | null | undefined;
+  readonly computer?: RuntimeComputerSettings | null | undefined;
 }
 
 const RUNTIME_ENV_FILE = "runtime.env";
@@ -47,9 +64,20 @@ export const RUNTIME_ENV_KEYS = Object.freeze([
   "FRIDAY_TIMEZONE",
   "FRIDAY_WORKSPACE",
   "FRIDAY_SELF_REPOSITORY",
+  "FRIDAY_COMPUTER_PROVIDER",
+  "FRIDAY_COMPUTER_SESSION_MODE",
+  "FRIDAY_COMPUTER_BROWSER_MODE",
+  "FRIDAY_COMPUTER_BROWSER_BIN",
+  "FRIDAY_COMPUTER_BROWSER_ARGS",
+  "FRIDAY_COMPUTER_AGENT_SCREENS",
+  "FRIDAY_COMPUTER_X11_AGENT_DESKTOPS",
+  "FRIDAY_COMPUTER_CDP_URL",
+  "FRIDAY_COMPUTER_CDP_PORT",
+  "FRIDAY_COMPUTER_BROWSER_PROFILE_DIR",
 ] as const);
 
 type SupportedKey = (typeof RUNTIME_ENV_KEYS)[number];
+const COMPUTER_RUNTIME_ENV_KEYS = new Set<SupportedKey>(RUNTIME_ENV_KEYS.filter((key) => key.startsWith("FRIDAY_COMPUTER_")));
 
 function nonEmpty(value: string | undefined, label: string, maximum = 256): string {
   const normalized = value?.trim() ?? "";
@@ -99,6 +127,120 @@ export function normalizeSelfRepository(value: string | undefined): string | und
     throw new Error("self-improvement repository path is invalid");
   }
   return resolve(normalized);
+}
+
+function normalizeComputerBrowserMode(value: string | undefined): RuntimeComputerBrowserMode {
+  const normalized = value?.trim().toLowerCase() || "shared";
+  if (normalized === "shared" || normalized === "managed-cdp") return normalized;
+  throw new Error("computer browser mode must be shared or managed-cdp");
+}
+
+function normalizeBrowserArgs(value: readonly string[] | undefined): readonly string[] | undefined {
+  if (value === undefined || value.length === 0) return undefined;
+  if (value.length > 16) throw new Error("computer browser arguments exceed 16 entries");
+  return Object.freeze(value.map((entry, index) => nonEmpty(entry, `computer browser argument ${index + 1}`, 512)));
+}
+
+function parseBrowserArgs(value: string | undefined): readonly string[] | undefined {
+  const normalized = value?.trim();
+  if (!normalized) return undefined;
+  let parsed: unknown;
+  try { parsed = JSON.parse(normalized); } catch { throw new Error("FRIDAY_COMPUTER_BROWSER_ARGS must be a JSON string array"); }
+  if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
+    throw new Error("FRIDAY_COMPUTER_BROWSER_ARGS must be a JSON string array");
+  }
+  return normalizeBrowserArgs(parsed as string[]);
+}
+
+function normalizePositiveInteger(value: number, label: string, maximum: number): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) throw new Error(`${label} must be between 1 and ${maximum}`);
+  return value;
+}
+
+function normalizeDesktopIndexes(values: readonly number[]): readonly number[] {
+  if (values.length < 1 || values.length > 8) throw new Error("computer X11 desktop indexes must contain between 1 and 8 entries");
+  const normalized = values.map((value) => {
+    if (!Number.isSafeInteger(value) || value < 0 || value > 255) throw new Error("computer X11 desktop indexes must be zero-based integers");
+    return value;
+  });
+  if (new Set(normalized).size !== normalized.length) throw new Error("computer X11 desktop indexes must be unique");
+  return Object.freeze(normalized);
+}
+
+function normalizeComputerSettings(settings: RuntimeComputerSettings | undefined): RuntimeComputerSettings | undefined {
+  if (settings === undefined) return undefined;
+  if (settings.provider !== "linux-x11") throw new Error("computer provider must be linux-x11");
+  if (settings.sessionMode !== "native-x11") throw new Error("computer session mode must be native-x11");
+  const browserMode = normalizeComputerBrowserMode(settings.browserMode);
+  const browserBin = nonEmpty(settings.browserBin, "computer browser executable", 1024);
+  const browserArgs = normalizeBrowserArgs(settings.browserArgs);
+  const agentScreens = normalizePositiveInteger(settings.agentScreens, "computer agent screens", 8);
+  const x11AgentDesktops = normalizeDesktopIndexes(settings.x11AgentDesktops);
+  if (x11AgentDesktops.length !== agentScreens) throw new Error("computer X11 desktop count must match agentScreens");
+  let cdpUrl: string | undefined;
+  let cdpPort: number | undefined;
+  let browserProfileDir: string | undefined;
+  if (browserMode === "managed-cdp") {
+    cdpUrl = nonEmpty(settings.cdpUrl, "computer CDP URL", 2048);
+    let url: URL;
+    try { url = new URL(cdpUrl); } catch { throw new Error("computer CDP URL is invalid"); }
+    if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname)) {
+      throw new Error("computer CDP URL must use loopback HTTP");
+    }
+    cdpPort = normalizePositiveInteger(settings.cdpPort ?? Number(url.port || 80), "computer CDP port", 65_535);
+    browserProfileDir = resolve(nonEmpty(settings.browserProfileDir, "computer managed browser profile directory", 4096));
+  }
+  return Object.freeze({
+    provider: "linux-x11" as const,
+    sessionMode: "native-x11" as const,
+    browserMode,
+    browserBin,
+    ...(browserArgs === undefined ? {} : { browserArgs }),
+    agentScreens,
+    x11AgentDesktops,
+    ...(cdpUrl === undefined ? {} : { cdpUrl }),
+    ...(cdpPort === undefined ? {} : { cdpPort }),
+    ...(browserProfileDir === undefined ? {} : { browserProfileDir }),
+  });
+}
+
+function computerSettingsFromParsed(parsed: Partial<Record<SupportedKey, string>>): RuntimeComputerSettings | undefined {
+  const provider = parsed.FRIDAY_COMPUTER_PROVIDER?.trim();
+  const related = [
+    parsed.FRIDAY_COMPUTER_SESSION_MODE,
+    parsed.FRIDAY_COMPUTER_BROWSER_MODE,
+    parsed.FRIDAY_COMPUTER_BROWSER_BIN,
+    parsed.FRIDAY_COMPUTER_BROWSER_ARGS,
+    parsed.FRIDAY_COMPUTER_AGENT_SCREENS,
+    parsed.FRIDAY_COMPUTER_X11_AGENT_DESKTOPS,
+    parsed.FRIDAY_COMPUTER_CDP_URL,
+    parsed.FRIDAY_COMPUTER_CDP_PORT,
+    parsed.FRIDAY_COMPUTER_BROWSER_PROFILE_DIR,
+  ];
+  if (!provider && related.every((value) => !value?.trim())) return undefined;
+  if (provider !== "linux-x11") throw new Error("FRIDAY_COMPUTER_PROVIDER must be linux-x11");
+  if (parsed.FRIDAY_COMPUTER_SESSION_MODE?.trim() !== "native-x11") throw new Error("FRIDAY_COMPUTER_SESSION_MODE must be native-x11");
+  const browserMode = normalizeComputerBrowserMode(parsed.FRIDAY_COMPUTER_BROWSER_MODE);
+  const agentScreens = normalizePositiveInteger(Number(parsed.FRIDAY_COMPUTER_AGENT_SCREENS), "FRIDAY_COMPUTER_AGENT_SCREENS", 8);
+  const x11AgentDesktops = normalizeDesktopIndexes((parsed.FRIDAY_COMPUTER_X11_AGENT_DESKTOPS ?? "")
+    .split(",")
+    .filter(Boolean)
+    .map((value) => Number(value)));
+  const browserArgs = parseBrowserArgs(parsed.FRIDAY_COMPUTER_BROWSER_ARGS);
+  return normalizeComputerSettings({
+    provider: "linux-x11",
+    sessionMode: "native-x11",
+    browserMode,
+    browserBin: nonEmpty(parsed.FRIDAY_COMPUTER_BROWSER_BIN, "FRIDAY_COMPUTER_BROWSER_BIN", 1024),
+    ...(browserArgs === undefined ? {} : { browserArgs }),
+    agentScreens,
+    x11AgentDesktops,
+    ...(browserMode === "managed-cdp" ? {
+      cdpUrl: parsed.FRIDAY_COMPUTER_CDP_URL,
+      cdpPort: Number(parsed.FRIDAY_COMPUTER_CDP_PORT),
+      browserProfileDir: parsed.FRIDAY_COMPUTER_BROWSER_PROFILE_DIR,
+    } : {}),
+  });
 }
 
 export function getFridayHome(environment: NodeJS.ProcessEnv = process.env): string {
@@ -242,6 +384,7 @@ function settingsFromParsed(parsed: Partial<Record<SupportedKey, string>>, home:
   const routingModelId = explicitRoutingModelId || modelId;
   if (!routingProvider || !routingModelId) return undefined;
 
+  const computer = computerSettingsFromParsed(parsed);
   return Object.freeze({
     ...(provider && modelId
       ? { modelProvider: nonEmpty(provider, "model provider"), modelId: nonEmpty(modelId, "model id") }
@@ -255,6 +398,7 @@ function settingsFromParsed(parsed: Partial<Record<SupportedKey, string>>, home:
     ...(normalizeSelfRepository(parsed.FRIDAY_SELF_REPOSITORY) === undefined
       ? {}
       : { selfRepository: normalizeSelfRepository(parsed.FRIDAY_SELF_REPOSITORY) }),
+    ...(computer === undefined ? {} : { computer }),
   });
 }
 
@@ -271,7 +415,14 @@ export async function loadRuntimeEnvironment(
   const parsed = await readParsedRuntimeEnvironment(home);
   // Validate pair invariants even when explicit process environment overrides the stored values.
   settingsFromParsed(parsed, resolve(home));
+  const hasPersistedComputer = Boolean(parsed.FRIDAY_COMPUTER_PROVIDER?.trim());
   for (const key of RUNTIME_ENV_KEYS) {
+    if (hasPersistedComputer && COMPUTER_RUNTIME_ENV_KEYS.has(key)) {
+      delete environment[key];
+      const value = parsed[key];
+      if (value) environment[key] = value;
+      continue;
+    }
     if (environment[key]?.trim()) continue;
     const value = parsed[key];
     if (value) environment[key] = value;
@@ -294,6 +445,7 @@ function normalizeSettings(settings: RuntimeSettings, home = getFridayHome()): R
   if (!routingProvider || !routingModelId) {
     throw new Error("FRIDAY requires a routing model; configure routingProvider/routingModelId or a main model");
   }
+  const computer = normalizeComputerSettings(settings.computer);
   return Object.freeze({
     ...(mainProvider && mainModelId
       ? { modelProvider: nonEmpty(mainProvider, "model provider"), modelId: nonEmpty(mainModelId, "model id") }
@@ -307,11 +459,13 @@ function normalizeSettings(settings: RuntimeSettings, home = getFridayHome()): R
     ...(normalizeSelfRepository(settings.selfRepository) === undefined
       ? {}
       : { selfRepository: normalizeSelfRepository(settings.selfRepository) }),
+    ...(computer === undefined ? {} : { computer }),
   });
 }
 
 export function serializeRuntimeSettings(settings: RuntimeSettings, home = getFridayHome()): string {
   const normalized = normalizeSettings(settings, home);
+  const computer = normalized.computer;
   return [
     "# FRIDAY non-secret runtime defaults. Secrets belong in Vault.",
     ...(normalized.modelProvider && normalized.modelId
@@ -327,6 +481,22 @@ export function serializeRuntimeSettings(settings: RuntimeSettings, home = getFr
     `FRIDAY_TIMEZONE=${encodeValue(normalized.timezone)}`,
     `FRIDAY_WORKSPACE=${encodeValue(normalized.workspaceRoot!)}`,
     ...(normalized.selfRepository ? [`FRIDAY_SELF_REPOSITORY=${encodeValue(normalized.selfRepository)}`] : []),
+    ...(computer ? [
+      `FRIDAY_COMPUTER_PROVIDER=${encodeValue(computer.provider)}`,
+      `FRIDAY_COMPUTER_SESSION_MODE=${encodeValue(computer.sessionMode)}`,
+      `FRIDAY_COMPUTER_BROWSER_MODE=${encodeValue(computer.browserMode)}`,
+      `FRIDAY_COMPUTER_BROWSER_BIN=${encodeValue(computer.browserBin)}`,
+      ...(computer.browserArgs && computer.browserArgs.length > 0
+        ? [`FRIDAY_COMPUTER_BROWSER_ARGS=${encodeValue(JSON.stringify(computer.browserArgs))}`]
+        : []),
+      `FRIDAY_COMPUTER_AGENT_SCREENS=${encodeValue(String(computer.agentScreens))}`,
+      `FRIDAY_COMPUTER_X11_AGENT_DESKTOPS=${encodeValue(computer.x11AgentDesktops.join(","))}`,
+      ...(computer.browserMode === "managed-cdp" ? [
+        `FRIDAY_COMPUTER_CDP_URL=${encodeValue(computer.cdpUrl!)}`,
+        `FRIDAY_COMPUTER_CDP_PORT=${encodeValue(String(computer.cdpPort!))}`,
+        `FRIDAY_COMPUTER_BROWSER_PROFILE_DIR=${encodeValue(computer.browserProfileDir!)}`,
+      ] : []),
+    ] : []),
     "",
   ].join("\n");
 }
@@ -376,6 +546,7 @@ export async function updateRuntimeSettings(
   const routingProvider = clearRouting ? undefined : (patch.routingProvider ?? current.routingProvider);
   const routingModelId = clearRouting ? undefined : (patch.routingModelId ?? current.routingModelId);
   const selfRepository = patch.selfRepository === null ? undefined : (patch.selfRepository ?? current.selfRepository);
+  const computer = patch.computer === null ? undefined : (patch.computer ?? current.computer);
   const next = normalizeSettings({
     ...(modelProvider && modelId ? { modelProvider, modelId } : {}),
     ...(routingProvider && routingModelId ? { routingProvider, routingModelId } : {}),
@@ -384,6 +555,7 @@ export async function updateRuntimeSettings(
     timezone: normalizeRuntimeTimezone(patch.timezone ?? current.timezone),
     workspaceRoot: normalizeRuntimeWorkspace(patch.workspaceRoot ?? current.workspaceRoot, home),
     ...(selfRepository === undefined ? {} : { selfRepository }),
+    ...(computer === undefined ? {} : { computer }),
   }, home);
   await saveRuntimeSettings(next, home);
   return next;

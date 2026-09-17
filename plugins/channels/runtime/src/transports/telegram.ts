@@ -3,6 +3,7 @@ import type {
   ChannelAttachment,
   ChannelChatType,
   ChannelInboundHandler,
+  ChannelOutboundAudio,
   ChannelPrincipal,
   ChannelSendResult,
   ChannelProtectedAction,
@@ -19,6 +20,8 @@ export interface TelegramChannelConfig extends ChannelAccessPolicy {
   readonly pollTimeoutSeconds?: number | undefined;
   readonly requireMention?: boolean | undefined;
   readonly mentionPatterns?: readonly string[] | undefined;
+  /** Persisted integration boundary. Provider messages older than this are intentionally ignored. */
+  readonly activatedAt?: number | undefined;
 }
 
 interface TelegramApiResponse<T> {
@@ -138,6 +141,8 @@ export class TelegramChannelTransport implements ChannelTransport {
         }
       });
     } catch (error) {
+      this.#controller?.abort();
+      this.#controller = undefined;
       reportOperationalError({ component: "channels.telegram", operation: "start transport", error });
       this.#state = "error";
       this.#detail = "Telegram startup failed";
@@ -181,6 +186,32 @@ export class TelegramChannelTransport implements ChannelTransport {
       accountId: this.accountId,
       conversationId: target.conversationId,
       messageIds: Object.freeze(ids),
+    });
+  }
+
+  async sendAudio(target: ChannelTarget, audio: ChannelOutboundAudio): Promise<ChannelSendResult> {
+    // Telegram's native voice-note surface expects OGG/Opus. MP3/M4A output
+    // from common TTS providers is sent as normal playable audio instead of
+    // relying on provider-side format coercion.
+    const prefersVoice = audio.voiceNote === true && (audio.mimeType === "audio/ogg" || audio.mimeType === "audio/opus");
+    const method = prefersVoice ? "sendVoice" : "sendAudio";
+    const field = prefersVoice ? "voice" : "audio";
+    const extension = audio.mimeType === "audio/mpeg" ? "mp3"
+      : audio.mimeType === "audio/mp4" ? "m4a"
+        : audio.mimeType === "audio/ogg" ? "ogg"
+          : audio.mimeType === "audio/opus" ? "opus"
+            : audio.mimeType === "audio/wav" || audio.mimeType === "audio/x-wav" ? "wav"
+              : "audio";
+    const form = new FormData();
+    form.set("chat_id", target.conversationId);
+    if (target.threadId !== undefined) form.set("message_thread_id", String(Number(target.threadId) || target.threadId));
+    form.set(field, new Blob([Uint8Array.from(audio.bytes)], { type: audio.mimeType }), audio.fileName ?? `friday-voice.${extension}`);
+    const result = await this.#requestMultipart<{ message_id: number }>(method, form);
+    return Object.freeze({
+      channel: this.channel,
+      accountId: this.accountId,
+      conversationId: target.conversationId,
+      messageIds: Object.freeze([String(result.message_id)]),
     });
   }
 
@@ -253,6 +284,13 @@ export class TelegramChannelTransport implements ChannelTransport {
 
   async #handleMessage(message: TelegramMessage): Promise<void> {
     if (!this.#handler) return;
+    const activatedAt = this.#config.activatedAt;
+    if (activatedAt !== undefined && Number.isFinite(activatedAt)) {
+      // Telegram message dates have one-second precision. Round the host boundary
+      // down so a message created during the activation second is not lost.
+      const activationSecond = Math.floor(activatedAt / 1_000) * 1_000;
+      if (message.date * 1_000 < activationSecond) return;
+    }
     const threadId = message.message_thread_id === undefined ? undefined : String(message.message_thread_id);
     const sender = message.from;
     const senderChat = message.sender_chat;
@@ -309,6 +347,22 @@ export class TelegramChannelTransport implements ChannelTransport {
     const accepted = result?.classification === (match ? "approval-resolved" : "prompt-resolved");
     const acknowledgement = !accepted ? "This action is no longer valid." : match ? (match[2] === "approve" ? "Approved" : "Denied") : "Answer recorded";
     await this.#request("answerCallbackQuery", { callback_query_id: callback.id, text: acknowledgement }).catch((error: unknown) => { reportOperationalError({ component: "channels.telegram", operation: "acknowledge protected callback", error, severity: "warn" }); });
+    if (accepted && message) await this.#removeProtectedMessage(message);
+  }
+
+  async #removeProtectedMessage(message: TelegramMessage): Promise<void> {
+    const target = { chat_id: message.chat.id, message_id: message.message_id };
+    try {
+      await this.#request("deleteMessage", target);
+    } catch (error) {
+      // Some chats do not grant the bot permission to delete messages. Removing
+      // the keyboard still prevents a resolved approval from being pressed a
+      // second time and leaves a useful audit trail in the conversation.
+      reportOperationalError({ component: "channels.telegram", operation: "delete resolved protected message", error, severity: "warn" });
+      await this.#request("editMessageReplyMarkup", { ...target, reply_markup: { inline_keyboard: [] } }).catch((fallbackError: unknown) => {
+        reportOperationalError({ component: "channels.telegram", operation: "remove resolved protected message controls", error: fallbackError, severity: "warn" });
+      });
+    }
   }
 
   #isMentioned(text: string): boolean {
@@ -374,6 +428,33 @@ export class TelegramChannelTransport implements ChannelTransport {
           body: JSON.stringify(body),
           ...(signal === undefined ? {} : { signal }),
         }, method === "getUpdates" ? 60_000 : 15_000);
+        const payload = await response.json() as TelegramApiResponse<T>;
+        if (!response.ok || payload.ok !== true || payload.result === undefined) {
+          failed = true;
+          failure = new Error(`Telegram API returned HTTP ${response.status}`);
+          return;
+        }
+        result = payload.result;
+      } catch (error) {
+        failed = true;
+        failure = error;
+      }
+    });
+    if (failed || result === undefined) throw new Error(`Telegram ${method} request failed`, { cause: failure });
+    return result;
+  }
+
+  async #requestMultipart<T>(method: string, body: FormData): Promise<T> {
+    let result: T | undefined;
+    let failed = false;
+    let failure: unknown;
+    await this.#secrets.consume(this.#config.credentialRef, async (secret) => {
+      const token = Buffer.from(secret).toString("utf8");
+      try {
+        const response = await fetchWithTimeout(fetch, `https://api.telegram.org/bot${token}/${method}`, {
+          method: "POST",
+          body,
+        }, 30_000);
         const payload = await response.json() as TelegramApiResponse<T>;
         if (!response.ok || payload.ok !== true || payload.result === undefined) {
           failed = true;

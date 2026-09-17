@@ -11,6 +11,7 @@
 export { anthropicOAuthProvider, loginAnthropic, refreshAnthropicToken } from "./anthropic.js";
 // GitHub Copilot
 export {
+	discoverGitHubCopilotModelIds,
 	getGitHubCopilotBaseUrl,
 	githubCopilotOAuthProvider,
 	loginGitHubCopilot,
@@ -18,7 +19,12 @@ export {
 	refreshGitHubCopilotToken,
 } from "./github-copilot.js";
 // OpenAI Codex (ChatGPT OAuth)
-export { loginOpenAICodex, openaiCodexOAuthProvider, refreshOpenAICodexToken } from "./openai-codex.js";
+export {
+	discoverOpenAICodexModelIds,
+	loginOpenAICodex,
+	openaiCodexOAuthProvider,
+	refreshOpenAICodexToken,
+} from "./openai-codex.js";
 
 export * from "./types.js";
 

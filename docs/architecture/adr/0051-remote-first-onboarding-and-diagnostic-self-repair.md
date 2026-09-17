@@ -25,7 +25,7 @@ The existing terminal onboarding remains a supported surface. First-run `friday 
 - **Quick** performs only the mandatory local block and then hands optional onboarding to the paired trusted channel.
 - **Custom** performs the same mandatory block first, then offers the existing terminal setup areas as optional/skippable steps.
 
-The mandatory block is never remote-skippable: routing model/credential, at least one paired trusted operator channel, and host privilege policy.
+The mandatory block is never remote-skippable: routing provider/credential/model, at least one paired trusted operator channel, and host privilege policy. For supported API-key providers, local setup captures or reuses the credential before model selection, fetches the provider's credential-visible model ids, and offers only the intersection with FRIDAY's runtime descriptor catalog.
 
 ### Router-only bootstrap is a first-class runtime state
 
@@ -39,7 +39,7 @@ Agent permission (`ask|auto|full`) and host privilege (`broker|none`) are separa
 
 ### Remote onboarding reuses owning plugin actions
 
-Remote onboarding is persistent state, not a parallel command framework. `onboarding.continue` reports pending steps and routes the operator to typed actions owned by Runtime Settings, Channels, Voice, Execution, Sandbox, MCP and Skills, with Host Privileges used only for narrowly allowlisted sudo operations. Main-model setup has a conversational typed action that prompts for provider/model and uses protected API-key capture or supported OAuth/device-code flows when required. Successful optional setup actions advance onboarding state themselves. Channel credentials use protected capture directly into Vault. Adding a configured channel does not automatically trust a new sender; trust remains a separate Permissions operation.
+Remote onboarding is persistent state, not a parallel command framework. `onboarding.continue` reports pending steps and routes the operator to typed actions owned by Runtime Settings, Channels, Voice, Execution, Sandbox, MCP and Skills, with Host Privileges used only for narrowly allowlisted sudo operations. Main-model setup has a conversational typed action that chooses the provider, establishes protected API-key or supported OAuth/device-code authentication when required, then performs credential-scoped live discovery before model choice when that provider supports it. Only live ids with FRIDAY runtime descriptors are selectable. Successful optional setup actions advance onboarding state themselves. Channel credentials use protected capture directly into Vault. Adding a configured channel does not automatically trust a new sender; trust remains a separate Permissions operation.
 
 ### Doctor is one canonical collector; diagnostics add bounded FRIDAY-owned evidence
 

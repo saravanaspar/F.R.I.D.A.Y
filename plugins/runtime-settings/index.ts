@@ -105,8 +105,8 @@ function permissionMode(input: Readonly<SystemJsonObject>): RuntimePermissionMod
 function assertKnownModel(model: ModelService, provider: string, modelId: string, label: string): void {
   const knownProvider = model.getProviders().find((candidate) => candidate === provider);
   if (!knownProvider) throw new Error(`Unknown ${label} provider: ${provider}`);
-  if (!model.getModels(knownProvider).some((candidate) => candidate.id === modelId)) {
-    throw new Error(`Unknown ${label} model: ${provider}/${modelId}`);
+  if (!model.getModel(knownProvider as never, modelId as never)) {
+    throw new Error(`Unable to create ${label} runtime descriptor: ${provider}/${modelId}`);
   }
 }
 
@@ -554,7 +554,7 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
     ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
       id: "onboarding.main-model.setup",
       label: "Configure main reasoning model",
-      description: "Interactively configure the optional main reasoning model from the originating trusted channel. Missing provider/model fields use protected prompts; API-key and supported OAuth providers persist credentials directly into Vault before settings are published.",
+      description: "Interactively configure the optional main reasoning model from the originating trusted channel. Provider authentication is established first when needed; providers with live discovery then expose only credential-visible FRIDAY-compatible models before settings are published.",
       parameters: Object.freeze({
         type: "object",
         properties: {
@@ -596,30 +596,6 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
         const knownProvider = model.getProviders().find((candidate) => candidate === provider);
         if (!knownProvider) throw new Error(`Unknown main model provider: ${provider}`);
 
-        let modelId = optionalString(input, "modelId", 160);
-        if (!modelId) {
-          const available = model.getModels(knownProvider)
-            .slice()
-            .sort((left, right) => Number(Boolean(right.featured)) - Number(Boolean(left.featured)) || String(left.id).localeCompare(String(right.id)));
-          if (available.length === 0) throw new Error(`No models are registered for provider ${provider}`);
-          modelId = (await channels.requestPrompt({
-            principal,
-            title: "Main reasoning model",
-            message: `Choose a model from ${provider}.`,
-            notes: `Known model ids: ${available.slice(0, 20).map((entry) => String(entry.id)).join(", ").slice(0, 1_800)}`,
-            options: available.slice(0, 5).map((entry) => ({
-              label: String(entry.name || entry.id),
-              value: String(entry.id),
-              ...(entry.featured ? { description: "featured" } : {}),
-            })),
-            allowCustom: true,
-            placeholder: "model id",
-            maxLength: 160,
-            ...(context.jobId === undefined ? {} : { jobId: context.jobId }),
-          })).trim();
-        }
-        assertKnownModel(model, provider, modelId, "main");
-
         const persistCredential = optionalBoolean(input, "persistCredential") ?? true;
         if (!credentials) throw new Error("Model credential service is unavailable");
         if (persistCredential && !credentials.has(provider)) {
@@ -656,6 +632,41 @@ export function createRuntimeSettingsPlugin(options: RuntimeSettingsPluginOption
             await credentials.captureOAuth({ principal, provider, ...(context.signal === undefined ? {} : { signal: context.signal }) });
           }
         }
+
+        const availableIds = await credentials.listAvailableModelIds(provider, {
+          ...(context.signal === undefined ? {} : { signal: context.signal }),
+        });
+        const liveAvailableIds = new Set(availableIds.map((id) => id.trim()).filter(Boolean));
+        const available = [...liveAvailableIds]
+          .map((id) => model.getModel(knownProvider as never, id as never))
+          .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined)
+          .sort((left, right) => model.compareDiscoveredModelIds(provider, String(left.id), String(right.id)));
+        if (available.length === 0) throw new Error(`${provider} exposes no executable models to the configured credential`);
+
+        let modelId = optionalString(input, "modelId", 160);
+        if (modelId && !liveAvailableIds.has(modelId)) {
+          throw new Error(`${provider}/${modelId} is not available to the configured credential`);
+        }
+        if (!modelId) {
+          modelId = (await channels.requestPrompt({
+            principal,
+            title: "Main reasoning model",
+            message: `Choose a model returned by the authenticated ${provider} account.`,
+            notes: `Live model ids: ${available.slice(0, 20).map((entry) => String(entry.id)).join(", ").slice(0, 1_800)}`,
+            options: available.slice(0, 5).map((entry) => ({
+              label: String(entry.name || entry.id),
+              value: String(entry.id),
+            })),
+            allowCustom: false,
+            placeholder: "model id",
+            maxLength: 160,
+            ...(context.jobId === undefined ? {} : { jobId: context.jobId }),
+          })).trim();
+        }
+        if (!liveAvailableIds.has(modelId)) {
+          throw new Error(`${provider}/${modelId} is not available to the configured credential`);
+        }
+        assertKnownModel(model, provider, modelId, "main");
 
         const restart = optionalBoolean(input, "restart") ?? true;
         const previousOnboarding = await service.onboarding();

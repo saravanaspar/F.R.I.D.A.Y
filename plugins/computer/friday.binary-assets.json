@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "assets": [
+    {
+      "source": "runtime/atspi_browser.py",
+      "target": "computer/atspi_browser.py",
+      "role": "computer-atspi-helper"
+    }
+  ]
+}

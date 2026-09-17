@@ -13,9 +13,20 @@ const RUNTIME_ENV_KEYS = Object.freeze([
   "FRIDAY_TIMEZONE",
   "FRIDAY_WORKSPACE",
   "FRIDAY_SELF_REPOSITORY",
+  "FRIDAY_COMPUTER_PROVIDER",
+  "FRIDAY_COMPUTER_SESSION_MODE",
+  "FRIDAY_COMPUTER_BROWSER_MODE",
+  "FRIDAY_COMPUTER_BROWSER_BIN",
+  "FRIDAY_COMPUTER_BROWSER_ARGS",
+  "FRIDAY_COMPUTER_AGENT_SCREENS",
+  "FRIDAY_COMPUTER_X11_AGENT_DESKTOPS",
+  "FRIDAY_COMPUTER_CDP_URL",
+  "FRIDAY_COMPUTER_CDP_PORT",
+  "FRIDAY_COMPUTER_BROWSER_PROFILE_DIR",
 ] as const);
 
 type SupportedKey = (typeof RUNTIME_ENV_KEYS)[number];
+const COMPUTER_RUNTIME_ENV_KEYS = new Set<SupportedKey>(RUNTIME_ENV_KEYS.filter((key) => key.startsWith("FRIDAY_COMPUTER_")));
 
 function nonEmpty(value: string | undefined, label: string, maximum = 256): string {
   const normalized = value?.trim() ?? "";
@@ -156,6 +167,50 @@ function validateRuntimeEnvironment(parsed: Partial<Record<SupportedKey, string>
   if (selfRepository && (selfRepository.length > 4_096 || /[\r\n\0]/.test(selfRepository))) {
     throw new Error("self-improvement repository path is invalid");
   }
+
+  const computerProvider = parsed.FRIDAY_COMPUTER_PROVIDER?.trim();
+  const computerRelated = [
+    parsed.FRIDAY_COMPUTER_SESSION_MODE,
+    parsed.FRIDAY_COMPUTER_BROWSER_MODE,
+    parsed.FRIDAY_COMPUTER_BROWSER_BIN,
+    parsed.FRIDAY_COMPUTER_BROWSER_ARGS,
+    parsed.FRIDAY_COMPUTER_AGENT_SCREENS,
+    parsed.FRIDAY_COMPUTER_X11_AGENT_DESKTOPS,
+    parsed.FRIDAY_COMPUTER_CDP_URL,
+    parsed.FRIDAY_COMPUTER_CDP_PORT,
+    parsed.FRIDAY_COMPUTER_BROWSER_PROFILE_DIR,
+  ];
+  if (computerProvider || computerRelated.some((value) => value?.trim())) {
+    if (computerProvider !== "linux-x11") throw new Error("FRIDAY_COMPUTER_PROVIDER must be linux-x11");
+    if (parsed.FRIDAY_COMPUTER_SESSION_MODE?.trim() !== "native-x11") throw new Error("FRIDAY_COMPUTER_SESSION_MODE must be native-x11");
+    const browserMode = parsed.FRIDAY_COMPUTER_BROWSER_MODE?.trim() || "shared";
+    if (browserMode !== "shared" && browserMode !== "managed-cdp") throw new Error("FRIDAY_COMPUTER_BROWSER_MODE must be shared or managed-cdp");
+    nonEmpty(parsed.FRIDAY_COMPUTER_BROWSER_BIN, "FRIDAY_COMPUTER_BROWSER_BIN", 1024);
+    const browserArgs = parsed.FRIDAY_COMPUTER_BROWSER_ARGS?.trim();
+    if (browserArgs) {
+      let decoded: unknown;
+      try { decoded = JSON.parse(browserArgs); } catch { throw new Error("FRIDAY_COMPUTER_BROWSER_ARGS must be a JSON string array"); }
+      if (!Array.isArray(decoded) || decoded.length > 16 || decoded.some((entry) => typeof entry !== "string" || !entry.trim() || entry.length > 512 || /[\r\n\0]/.test(entry))) {
+        throw new Error("FRIDAY_COMPUTER_BROWSER_ARGS must be a bounded JSON string array");
+      }
+    }
+    const screenCount = Number(parsed.FRIDAY_COMPUTER_AGENT_SCREENS);
+    if (!Number.isSafeInteger(screenCount) || screenCount < 1 || screenCount > 8) throw new Error("FRIDAY_COMPUTER_AGENT_SCREENS must be between 1 and 8");
+    const desktopIndexes = (parsed.FRIDAY_COMPUTER_X11_AGENT_DESKTOPS ?? "").split(",").filter(Boolean).map(Number);
+    if (desktopIndexes.length !== screenCount || new Set(desktopIndexes).size !== desktopIndexes.length
+      || desktopIndexes.some((value) => !Number.isSafeInteger(value) || value < 0 || value > 255)) {
+      throw new Error("FRIDAY_COMPUTER_X11_AGENT_DESKTOPS must contain one unique zero-based index per Agent screen");
+    }
+    if (browserMode === "managed-cdp") {
+      const cdpUrl = nonEmpty(parsed.FRIDAY_COMPUTER_CDP_URL, "FRIDAY_COMPUTER_CDP_URL", 2048);
+      let url: URL;
+      try { url = new URL(cdpUrl); } catch { throw new Error("FRIDAY_COMPUTER_CDP_URL is invalid"); }
+      if (url.protocol !== "http:" || !["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname)) throw new Error("FRIDAY_COMPUTER_CDP_URL must use loopback HTTP");
+      const cdpPort = Number(parsed.FRIDAY_COMPUTER_CDP_PORT);
+      if (!Number.isSafeInteger(cdpPort) || cdpPort < 1 || cdpPort > 65_535) throw new Error("FRIDAY_COMPUTER_CDP_PORT is invalid");
+      nonEmpty(parsed.FRIDAY_COMPUTER_BROWSER_PROFILE_DIR, "FRIDAY_COMPUTER_BROWSER_PROFILE_DIR", 4096);
+    }
+  }
 }
 
 async function readRuntimeEnvironment(home: string): Promise<Partial<Record<SupportedKey, string>>> {
@@ -191,7 +246,14 @@ export async function loadRuntimeEnvironment(
   const environment = options.environment ?? process.env;
   const home = options.home ?? getFridayHome(environment);
   const parsed = await readRuntimeEnvironment(home);
+  const hasPersistedComputer = Boolean(parsed.FRIDAY_COMPUTER_PROVIDER?.trim());
   for (const key of RUNTIME_ENV_KEYS) {
+    if (hasPersistedComputer && COMPUTER_RUNTIME_ENV_KEYS.has(key)) {
+      delete environment[key];
+      const value = parsed[key];
+      if (value) environment[key] = value;
+      continue;
+    }
     if (environment[key]?.trim()) continue;
     const value = parsed[key];
     if (value) environment[key] = value;

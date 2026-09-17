@@ -1057,6 +1057,33 @@ export class ChannelHub {
     }
   }
 
+  async sendAudio(target: ChannelTarget, audio: import("./types.js").ChannelOutboundAudio): Promise<ChannelSendResult> {
+    if (!(audio.bytes instanceof Uint8Array) || audio.bytes.byteLength < 1) throw new Error("audio bytes must be non-empty");
+    if (audio.bytes.byteLength > 20 * 1024 * 1024) throw new Error("audio exceeds the 20 MiB outbound limit");
+    const mimeType = audio.mimeType.trim().toLowerCase();
+    if (!/^audio\/[a-z0-9.+-]+$/.test(mimeType)) throw new Error("audio mimeType must be a valid audio/* MIME type");
+    const fileName = audio.fileName?.trim();
+    if (fileName && (fileName.length > 160 || /[\\/\0\r\n]/.test(fileName))) throw new Error("audio fileName is invalid");
+    const transport = this.#transports.get(targetKey(target));
+    if (!transport) throw new Error(`No channel transport registered for ${target.channel}/${target.accountId}`);
+    if (!transport.sendAudio) throw new Error(`Channel transport ${target.channel}/${target.accountId} does not support outbound audio`);
+    const observation = this.#observations.get(targetKey(target))!;
+    try {
+      const result = await transport.sendAudio(target, Object.freeze({
+        bytes: new Uint8Array(audio.bytes),
+        mimeType,
+        ...(fileName ? { fileName } : {}),
+        ...(audio.voiceNote === undefined ? {} : { voiceNote: audio.voiceNote }),
+      }));
+      observation.lastOutboundAt = new Date(this.#now()).toISOString();
+      observation.outboundDegraded = false;
+      return result;
+    } catch (error) {
+      this.#recordFailure(observation, "outbound", error);
+      throw error;
+    }
+  }
+
   #recordFailure(observation: TransportObservation, direction: "inbound" | "outbound", error: unknown): void {
     observation.lastFailureAt = new Date(this.#now()).toISOString();
     if (direction === "inbound") {

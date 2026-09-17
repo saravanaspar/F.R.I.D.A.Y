@@ -115,6 +115,48 @@ describe("friday doctor", () => {
     expect(credential?.detail).toBe(modelOAuthCredentialVaultRef("anthropic"));
   });
 
+  it("uses persisted binary-owned Computer settings instead of stale shell Computer variables", async () => {
+    const home = await temp("friday-doctor-computer-env-home-");
+    const workspace = await temp("friday-doctor-computer-env-workspace-");
+    await saveRuntimeSettings({
+      routingProvider: "openai",
+      routingModelId: "router",
+      permissionMode: "ask",
+      hostPrivilegeMode: "none",
+      timezone: "UTC",
+      workspaceRoot: workspace,
+      computer: {
+        provider: "linux-x11",
+        sessionMode: "native-x11",
+        browserMode: "shared",
+        browserBin: "brave-browser-stable",
+        agentScreens: 1,
+        x11AgentDesktops: [1],
+      },
+    }, home);
+
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      FRIDAY_HOME: home,
+      FRIDAY_COMPUTER_PROVIDER: "linux-x11",
+      FRIDAY_COMPUTER_SESSION_MODE: "native-x11",
+      FRIDAY_COMPUTER_BROWSER_MODE: "managed-cdp",
+      FRIDAY_COMPUTER_BROWSER_BIN: "chromium",
+      FRIDAY_COMPUTER_AGENT_SCREENS: "1",
+      FRIDAY_COMPUTER_X11_AGENT_DESKTOPS: "2",
+      FRIDAY_COMPUTER_CDP_URL: "http://127.0.0.1:9222/",
+      FRIDAY_COMPUTER_CDP_PORT: "9222",
+      FRIDAY_COMPUTER_BROWSER_PROFILE_DIR: "/tmp/stale-friday-profile",
+    };
+
+    const checks = await collectDoctorChecks(environment);
+    const computer = checks.find((entry) => entry.id === "computer-linux");
+
+    expect(computer?.detail).toContain("provider=linux-x11");
+    expect(computer?.detail).not.toContain("Configured FRIDAY X11 desktop 3 does not exist");
+    expect(computer?.detail).not.toContain("managed browser CDP fallback");
+  });
+
   it("fails health when first-run configuration is missing and gives one-line fixes", async () => {
     const home = await temp("friday-doctor-empty-home-");
     const environment = { ...process.env, FRIDAY_HOME: home };
