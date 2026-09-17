@@ -53,6 +53,10 @@ The retry behavior is integrated at F.R.I.D.A.Y's model-request boundary so succ
 
 Relevant documentation: `docs/architecture/adr/0043-donor-model-runtime-cache-and-telemetry.md` and `docs/architecture/adr/0044-detached-session-jobs-and-model-retry.md`.
 
+## Community contributions
+
+- **Anthony Tshali (`@luviumcapital`)** — identified and fixed Linux Computer CDP execution-context failures, dropped post-action `domSummary` observations, and related conformance issues in PR #36. The applicable fixes were carried forward into the Linux/X11 implementation in PR #37.
+
 ## Other donor/reference projects
 
 Some architecture research also compared behavior with projects such as Goose and Codex where documented in ADR-0043. Those references were used selectively for design comparison and telemetry/cache semantics; the ADR records whether a behavior was kept, adapted, or only compared.
