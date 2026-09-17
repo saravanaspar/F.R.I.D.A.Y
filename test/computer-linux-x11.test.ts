@@ -421,7 +421,7 @@ describe("native Linux/X11 Computer provider", () => {
       query: "Add",
       maxElements: 10,
     });
-    expect(first.domSummary).toBeUndefined();
+    expect(first.domSummary).toContain("Visible dashboard");
     expect(first.observationId).toBe("obs-1");
     expect(first.elements).toHaveLength(1);
     expect(first.elements?.[0]).toMatchObject({
@@ -438,6 +438,7 @@ describe("native Linux/X11 Computer provider", () => {
       query: "Add",
       maxElements: 10,
     });
+    expect(second.domSummary).toContain("Visible dashboard");
     expect(second.observationId).toBe("obs-2");
     expect(second.elements?.[0]).toMatchObject({ id: "e1", ref: "obs-2:e1" });
     expect(second.delta).toMatchObject({ baseObservationId: "obs-1", retained: 1, added: [], updated: [], removedIds: [] });
@@ -640,11 +641,11 @@ describe("native Linux/X11 Computer provider", () => {
         params: expect.objectContaining({ type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }),
       }),
     ]));
-    const selectorCalls = cdp.calls.filter((call) => call.method === "Runtime.callFunctionOn");
-    expect(selectorCalls.some((call) => String(call.params?.functionDeclaration ?? "").includes("#safe-input"))).toBe(false);
-    expect(selectorCalls.some((call) => String(call.params?.functionDeclaration ?? "").includes("#safe-button"))).toBe(false);
-    expect(selectorCalls.some((call) => (call.params?.arguments as readonly { value?: unknown }[] | undefined)?.some((argument) => argument.value === "#safe-input"))).toBe(true);
-    expect(cdp.calls.some((call) => call.method === "Runtime.evaluate" && String(call.params?.expression ?? "").includes("el.click()"))).toBe(false);
+    expect(cdp.calls.some((call) => call.method === "Runtime.callFunctionOn")).toBe(false);
+    const selectorEvaluations = cdp.calls.filter((call) => call.method === "Runtime.evaluate");
+    expect(selectorEvaluations.some((call) => String(call.params?.expression ?? "").includes("#safe-input"))).toBe(true);
+    expect(selectorEvaluations.some((call) => String(call.params?.expression ?? "").includes("#safe-button"))).toBe(true);
+    expect(selectorEvaluations.some((call) => String(call.params?.expression ?? "").includes("el.click()"))).toBe(false);
   });
 
   it("rejects protected click targets discovered from the live DOM before dispatching mouse input", async () => {
