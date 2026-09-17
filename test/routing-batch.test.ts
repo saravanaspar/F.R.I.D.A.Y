@@ -26,7 +26,39 @@ function utilityDecision(messageId: string, capabilityProfile: "none" | "compute
   };
 }
 
+function schedulerDecision(messageId: string) {
+  return {
+    messageId,
+    destination: { kind: "scheduler", id: "scheduler" },
+    execution: { profile: "scheduler", capabilityProfile: "none" },
+    confidence: 0.99,
+  };
+}
+
 describe("routing batch classifier", () => {
+  it("sends standalone greetings through the batch model router", async () => {
+    const classify = vi.fn(async ({ userPrompt }: { userPrompt: string }) => {
+      const payload = JSON.parse(userPrompt) as { messages: Array<{ id: string; text: string }> };
+      expect(payload.messages).toEqual([{ id: "hello", text: "hi friday", timestamp: expect.any(Number), attachments: [] }]);
+      return { decisions: [utilityDecision("hello", "none")] };
+    });
+    const routing = createRoutingService({
+      classify,
+      sessions: async () => Object.freeze([]),
+      memory: async () => Object.freeze([]),
+    });
+
+    const decisions = await routing.routeBatch([message("hello", "hi friday")]);
+
+    expect(classify).toHaveBeenCalledTimes(1);
+    expect(decisions).toEqual([{
+      messageId: "hello",
+      destination: { kind: "transient", id: "transient:utility" },
+      execution: { profile: "utility", capabilityProfile: "none" },
+      confidence: 0.99,
+    }]);
+  });
+
   it("routes a one-off Computer request as utility+computer instead of stripping its tools", async () => {
     const classify = vi.fn(async () => utilityDecision("m1", "computer"));
     const routing = createRoutingService({
@@ -79,8 +111,8 @@ describe("routing batch classifier", () => {
     expect(routing.recentContext(inputs[0]!.principal).map((entry) => entry.id)).toEqual(["m1", "m2", "m3"]);
   });
 
-  it("routes live Computer/media status deterministically without taking a new control path", async () => {
-    const classify = vi.fn(async () => utilityDecision("unused"));
+  it("routes live Computer/media status through the semantic model router", async () => {
+    const classify = vi.fn(async () => utilityDecision("unused", "computer"));
     const routing = createRoutingService({
       classify,
       sessions: async () => Object.freeze([]),
@@ -90,22 +122,22 @@ describe("routing batch classifier", () => {
     const decision = await routing.route(message("status", "is the song playing?"));
     const pageDecision = await routing.route(message("page-status", "what page is open?"));
 
-    expect(classify).not.toHaveBeenCalled();
+    expect(classify).toHaveBeenCalledTimes(2);
     expect(decision).toEqual({
       messageId: "status",
       destination: { kind: "transient", id: "transient:utility" },
       execution: { profile: "utility", capabilityProfile: "computer" },
-      confidence: 1,
+      confidence: 0.99,
     });
     expect(pageDecision).toEqual({
       messageId: "page-status",
       destination: { kind: "transient", id: "transient:utility" },
       execution: { profile: "utility", capabilityProfile: "computer" },
-      confidence: 1,
+      confidence: 0.99,
     });
   });
 
-  it("routes FRIDAY-owned Computer cleanup deterministically without spending a classifier request", async () => {
+  it("routes FRIDAY-owned Computer cleanup through the semantic model router", async () => {
     const classify = vi.fn(async () => utilityDecision("unused"));
     const routing = createRoutingService({
       classify,
@@ -115,20 +147,20 @@ describe("routing batch classifier", () => {
 
     const decision = await routing.route(message("cleanup", "can u kill any active computer/headless uses"));
 
-    expect(classify).not.toHaveBeenCalled();
+    expect(classify).toHaveBeenCalledTimes(1);
     expect(decision).toEqual({
       messageId: "cleanup",
       destination: { kind: "transient", id: "transient:utility" },
       execution: { profile: "utility", capabilityProfile: "none" },
-      confidence: 1,
+      confidence: 0.99,
     });
   });
 
-  it("extracts Computer cleanup items from a mixed routing batch", async () => {
+  it("sends Computer cleanup items with the complete mixed batch to the model router", async () => {
     const classify = vi.fn(async ({ userPrompt }: { userPrompt: string }) => {
       const payload = JSON.parse(userPrompt) as { messages: Array<{ id: string }> };
-      expect(payload.messages.map((entry) => entry.id)).toEqual(["m2"]);
-      return { decisions: [utilityDecision("m2")] };
+      expect(payload.messages.map((entry) => entry.id)).toEqual(["m1", "m2"]);
+      return { decisions: [utilityDecision("m1"), utilityDecision("m2")] };
     });
     const routing = createRoutingService({
       classify,
@@ -146,7 +178,7 @@ describe("routing batch classifier", () => {
       messageId: "m1",
       destination: { kind: "transient", id: "transient:utility" },
       execution: { profile: "utility", capabilityProfile: "none" },
-      confidence: 1,
+      confidence: 0.99,
     });
     expect(decisions[1]?.messageId).toBe("m2");
   });
@@ -163,11 +195,11 @@ describe("routing batch classifier", () => {
     expect(classify).toHaveBeenCalledTimes(1);
   });
 
-  it("extracts live Computer status questions from a mixed routing batch", async () => {
+  it("sends live Computer status questions with the complete mixed batch to the model router", async () => {
     const classify = vi.fn(async ({ userPrompt }: { userPrompt: string }) => {
       const payload = JSON.parse(userPrompt) as { messages: Array<{ id: string }> };
-      expect(payload.messages.map((entry) => entry.id)).toEqual(["m2"]);
-      return { decisions: [utilityDecision("m2")] };
+      expect(payload.messages.map((entry) => entry.id)).toEqual(["m1", "m2"]);
+      return { decisions: [utilityDecision("m1", "computer"), utilityDecision("m2")] };
     });
     const routing = createRoutingService({
       classify,
@@ -185,16 +217,16 @@ describe("routing batch classifier", () => {
       messageId: "m1",
       destination: { kind: "transient", id: "transient:utility" },
       execution: { profile: "utility", capabilityProfile: "computer" },
-      confidence: 1,
+      confidence: 0.99,
     });
     expect(decisions[1]?.messageId).toBe("m2");
   });
 
-  it("keeps deterministic scheduler items host-owned and excludes them from the classifier batch", async () => {
+  it("sends scheduler intent with the complete mixed batch to the model router", async () => {
     const classify = vi.fn(async ({ userPrompt }: { userPrompt: string }) => {
       const payload = JSON.parse(userPrompt) as { messages: Array<{ id: string }> };
-      expect(payload.messages.map((entry) => entry.id)).toEqual(["m2"]);
-      return { decisions: [utilityDecision("m2")] };
+      expect(payload.messages.map((entry) => entry.id)).toEqual(["m1", "m2"]);
+      return { decisions: [schedulerDecision("m1"), utilityDecision("m2")] };
     });
     const routing = createRoutingService({
       classify,

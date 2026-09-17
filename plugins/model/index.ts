@@ -64,6 +64,8 @@ const modelPlugin: FridayPlugin = definePlugin({ id: "model", requires: [SESSION
     getProviders: model.getProviders,
     supportsLiveModelDiscovery: model.supportsLiveModelDiscovery,
     discoverAvailableModelIds: model.discoverAvailableModelIds,
+    getDiscoveredModelPricingTier: model.getDiscoveredModelPricingTier,
+    compareDiscoveredModelIds: model.compareDiscoveredModelIds,
     complete: model.complete,
     completeSimple: model.completeSimple,
     stream: model.stream,

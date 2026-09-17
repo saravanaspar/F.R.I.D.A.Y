@@ -151,6 +151,7 @@ function createClassifier(models: ModelService, credentials: () => ModelCredenti
         {
           temperature: 0,
           maxTokens: maxTokens ?? 384,
+          reasoning: "off",
           ...(apiKey === undefined ? {} : { apiKey }),
           ...(signal === undefined ? {} : { signal }),
         },

@@ -6,7 +6,7 @@ import { PluginTestHost } from "./helpers/plugin-host.js";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { collectContributions, definePlugin, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import { createVaultPlugin } from "../plugins/vault/index.js";
-import { createChannelsPlugin } from "../plugins/channels/index.js";
+import { createChannelsPlugin, createSpeakReplyAgentTool } from "../plugins/channels/index.js";
 import { readSavedChannels } from "../plugins/channels/config.js";
 import { CHANNELS_CAPABILITY } from "../plugins/channels/contract.js";
 import { CHANNELS_TRUSTED_CAPABILITY } from "../plugins/channels/trusted-contract.js";
@@ -22,6 +22,7 @@ import type { InboundTurn } from "../plugins/turn-loop/contract.js";
 import { TURN_INGRESS_HOOK } from "../plugins/turn-loop/contract.js";
 import { SYSTEM_ACTION_CONTRIBUTION } from "../plugins/system/contract.js";
 import { getPermissionsStateDir, loadTrustedIdentities } from "../plugins/permissions/identity-store.js";
+import type { VoiceService } from "../plugins/voice/contract.js";
 
 const dirs: string[] = [];
 const originalFridayHome = process.env.FRIDAY_HOME;
@@ -98,6 +99,62 @@ function channelTurnForSystem(): InboundTurn {
 }
 
 describe("channels plugin", () => {
+  it("bridges generic Voice synthesis to only the originating trusted channel", async () => {
+    const sent: Array<{ target: unknown; audio: unknown }> = [];
+    const voice = {
+      status: () => ({
+        sttConfigured: false,
+        ttsConfigured: true,
+        sttCredentialConfigured: false,
+        ttsCredentialConfigured: true,
+        ttsProvider: "openai",
+        ttsModel: "gpt-4o-mini-tts",
+      }),
+      synthesize: async () => Object.freeze([Object.freeze({
+        bytes: Uint8Array.from([9, 8, 7]),
+        mimeType: "audio/mpeg",
+        provider: "openai" as const,
+        model: "gpt-4o-mini-tts",
+        voice: "alloy",
+      })]),
+    } satisfies Pick<VoiceService, "status" | "synthesize">;
+    const tool = createSpeakReplyAgentTool({
+      voice: () => voice,
+      sendAudio: async (target, audio) => {
+        sent.push({ target, audio });
+        return { channel: target.channel, accountId: target.accountId, conversationId: target.conversationId, messageIds: ["voice-99"] };
+      },
+    });
+
+    const result = await tool.execute({ text: "Hello from FRIDAY", voiceNote: true }, undefined, {
+      cwd: process.cwd(),
+      sessionId: "session-voice",
+      turn: {
+        id: "turn-voice",
+        text: "reply with voice",
+        timestamp: Date.now(),
+        principal: { authority: "channel", channel: "telegram", accountId: "default", conversationId: "chat-123", senderId: "operator", threadId: "7" },
+        reply: async () => undefined,
+      },
+    } as never);
+
+    expect(result.output).toEqual({ sent: true, chunks: 1, messageIds: ["voice-99"] });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.target).toEqual({ channel: "telegram", accountId: "default", conversationId: "chat-123", threadId: "7" });
+    expect(sent[0]?.audio).toMatchObject({ mimeType: "audio/mpeg", voiceNote: true, fileName: "friday-voice-1.mp3" });
+
+    await expect(tool.execute({ text: "hello" }, undefined, {
+      cwd: process.cwd(),
+      sessionId: "session-local",
+      turn: {
+        id: "turn-local",
+        text: "reply with voice",
+        timestamp: Date.now(),
+        principal: { authority: "local", userId: "operator" },
+        reply: async () => undefined,
+      },
+    } as never)).rejects.toThrow(/originating channel/);
+  });
   it("does not register a CLI channel or expose local conversational ingestion", async () => {
     await activate();
     const safe = requireCapability(CHANNELS_CAPABILITY);

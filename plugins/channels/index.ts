@@ -10,9 +10,16 @@ import {
   type JsonValue,
 } from "../scheduler/contract.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION, type SystemActionExecutionContext, type SystemJsonObject } from "../system/contract.js";
-import { AGENT_TOOL_CONTRIBUTION, TURN_INGRESS_HOOK, type AgentExtensionJsonValue } from "../turn-loop/contract.js";
+import {
+  AGENT_TOOL_CONTRIBUTION,
+  TURN_INGRESS_HOOK,
+  type AgentExtensionJsonValue,
+  type AgentToolContribution,
+  type AgentToolExecutionContext,
+} from "../turn-loop/contract.js";
 import { VAULT_CAPABILITY } from "../vault/contract.js";
 import { VAULT_TRUSTED_CAPABILITY } from "../vault/trusted-contract.js";
+import { VOICE_CAPABILITY, type VoiceService } from "../voice/contract.js";
 import {
   isLifecycleRestartEnvironment,
   LIFECYCLE_HANDOFF_CONTRIBUTION,
@@ -333,6 +340,73 @@ function systemOptionalString(input: Readonly<SystemJsonObject>, name: string, m
   return normalized;
 }
 
+function voiceAudioExtension(mimeType: string): string {
+  if (mimeType === "audio/mpeg") return "mp3";
+  if (mimeType === "audio/ogg") return "ogg";
+  if (mimeType === "audio/mp4") return "m4a";
+  return "wav";
+}
+
+export function createSpeakReplyAgentTool(deps: Readonly<{
+  voice(): Pick<VoiceService, "status" | "synthesize"> | undefined;
+  sendAudio: ChannelsTrustedService["sendAudio"];
+}>): AgentToolContribution {
+  return Object.freeze({
+    id: "voice.speak",
+    sourcePluginId: "channels",
+    name: "speak_reply",
+    label: "Speak reply",
+    description: "Synthesize speech with the configured Voice capability and send it as playable audio to the current originating trusted channel. The destination is host-bound to the current conversation. Use when the user explicitly asks for a spoken/voice reply or when verifying TTS end to end.",
+    parameters: Object.freeze({
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Text to speak back to the current conversation" },
+        voiceNote: { type: "boolean", description: "Prefer the provider's native voice-note surface when the generated audio format supports it" },
+      },
+      required: ["text"],
+      additionalProperties: false,
+    }),
+    async execute(
+      input: Readonly<Record<string, AgentExtensionJsonValue>>,
+      signal?: AbortSignal,
+      context?: AgentToolExecutionContext,
+    ) {
+      signal?.throwIfAborted();
+      const turn = context?.turn;
+      if (!turn || turn.principal.authority !== "channel") throw new Error("speak_reply requires an originating channel conversation");
+      const text = typeof input.text === "string" ? input.text.trim() : "";
+      if (!text || text.length > 8_000 || /\0/.test(text)) throw new Error("text must contain 1 to 8000 characters");
+      const voiceNote = input.voiceNote === undefined ? true : input.voiceNote;
+      if (typeof voiceNote !== "boolean") throw new Error("voiceNote must be a boolean");
+      const voice = deps.voice();
+      if (!voice) throw new Error("Voice capability is unavailable");
+      const status = voice.status();
+      if (!status.ttsConfigured) throw new Error("Voice TTS is not configured");
+      if (!status.ttsCredentialConfigured) throw new Error(`Voice TTS credential for ${status.ttsProvider ?? "configured provider"} is missing`);
+      const chunks = await voice.synthesize(text, { signal });
+      if (chunks.length === 0) throw new Error("Voice synthesis produced no audio");
+      const messageIds: string[] = [];
+      for (let index = 0; index < chunks.length; index += 1) {
+        signal?.throwIfAborted();
+        const chunk = chunks[index]!;
+        const result = await deps.sendAudio({
+          channel: turn.principal.channel,
+          accountId: turn.principal.accountId,
+          conversationId: turn.principal.conversationId,
+          ...(turn.principal.threadId === undefined ? {} : { threadId: turn.principal.threadId }),
+        }, {
+          bytes: chunk.bytes,
+          mimeType: chunk.mimeType,
+          fileName: `friday-voice-${index + 1}.${voiceAudioExtension(chunk.mimeType)}`,
+          voiceNote,
+        });
+        messageIds.push(...result.messageIds);
+      }
+      return { output: { sent: true, chunks: chunks.length, messageIds } };
+    },
+  });
+}
+
 function systemOptionalBoolean(input: Readonly<SystemJsonObject>, name: string): boolean | undefined {
   const value = input[name];
   if (value === undefined) return undefined;
@@ -396,7 +470,7 @@ function channelCredentialSpec(id: ConfigurableChannelId, credential: string): C
 }
 
 export function createChannelsPlugin(options: ChannelsPluginOptions = {}): FridayPlugin {
-  return definePlugin({ id: "channels", requires: [EVENTS_CAPABILITY, VAULT_CAPABILITY, VAULT_TRUSTED_CAPABILITY], optional: [ROUTING_CAPABILITY], provides: [CHANNELS_CAPABILITY, CHANNELS_TRUSTED_CAPABILITY] }, async (ctx) => {
+  return definePlugin({ id: "channels", requires: [EVENTS_CAPABILITY, VAULT_CAPABILITY, VAULT_TRUSTED_CAPABILITY], optional: [ROUTING_CAPABILITY, VOICE_CAPABILITY], provides: [CHANNELS_CAPABILITY, CHANNELS_TRUSTED_CAPABILITY] }, async (ctx) => {
     const events = ctx.services.require(EVENTS_CAPABILITY);
     const vault = ctx.services.require(VAULT_CAPABILITY);
     const trustedVault = ctx.services.require(VAULT_TRUSTED_CAPABILITY);
@@ -842,6 +916,7 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
       start: () => hub.startAll(),
       stop: () => hub.stopAll(),
       send: (target: Parameters<ChannelsTrustedService["send"]>[0], text: string) => hub.send(target, text),
+      sendAudio: (target: Parameters<ChannelsTrustedService["sendAudio"]>[0], audio: Parameters<ChannelsTrustedService["sendAudio"]>[1]) => hub.sendAudio(target, audio),
       fetchAttachment: (target: Parameters<ChannelsTrustedService["fetchAttachment"]>[0], attachment: Parameters<ChannelsTrustedService["fetchAttachment"]>[1], maxBytes?: number) => hub.fetchAttachment(target, attachment as never, maxBytes),
       requestCredentialCapture: (request: Parameters<ChannelsTrustedService["requestCredentialCapture"]>[0]) => hub.requestCredentialCapture(request),
       waitForCredentialCapture: (requestId: string) => hub.waitForCredentialCapture(requestId),
@@ -855,6 +930,11 @@ export function createChannelsPlugin(options: ChannelsPluginOptions = {}): Frida
       pendingPrompts: () => hub.pendingPrompts(),
       watchCancellation: (request: Parameters<ChannelsTrustedService["watchCancellation"]>[0]) => hub.watchCancellation(request),
     });
+
+    ctx.contribute(AGENT_TOOL_CONTRIBUTION, createSpeakReplyAgentTool({
+      voice: () => ctx.services.optional(VOICE_CAPABILITY),
+      sendAudio: trusted.sendAudio,
+    }));
 
     ctx.contribute(AGENT_TOOL_CONTRIBUTION, {
       sourcePluginId: "channels",

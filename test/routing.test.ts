@@ -56,6 +56,63 @@ function validTransientDecision() {
 }
 
 describe("routing plugin", () => {
+  it("sends standalone greetings through the semantic model router", async () => {
+    let classifierCalls = 0;
+    let sessionCalls = 0;
+    let memoryCalls = 0;
+    const requests: RoutingClassifierRequest[] = [];
+    const routing = createRoutingService({
+      classify: async (request) => {
+        classifierCalls += 1;
+        requests.push(request);
+        return {
+          destination: { kind: "transient", id: "transient:utility" },
+          execution: { profile: "utility", capabilityProfile: "none" },
+          confidence: 0.99,
+        };
+      },
+      sessions: async () => {
+        sessionCalls += 1;
+        return [];
+      },
+      memory: async () => {
+        memoryCalls += 1;
+        return [];
+      },
+    });
+
+    await expect(routing.route(message("m1", "hi friday"))).resolves.toEqual({
+      messageId: "m1",
+      destination: { kind: "transient", id: "transient:utility" },
+      execution: { profile: "utility", capabilityProfile: "none" },
+      confidence: 0.99,
+    });
+    expect(classifierCalls).toBe(1);
+    expect(sessionCalls).toBe(1);
+    expect(memoryCalls).toBe(1);
+    expect(requests[0]?.systemPrompt).toContain("semantic routing authority for normal human-language messages");
+    expect(requests[0]?.systemPrompt).toContain('A greeting such as "hi friday" must be transient:utility');
+    expect(JSON.parse(requests[0]!.userPrompt).message.text).toBe("hi friday");
+  });
+
+  it("does not treat a greeting-prefixed task as a standalone greeting", async () => {
+    let classifierCalls = 0;
+    const routing = createRoutingService({
+      classify: async () => {
+        classifierCalls += 1;
+        return validSessionDecision();
+      },
+      sessions: async () => [projectSession],
+      memory: async () => [],
+    });
+
+    await expect(routing.route(message("m1", "hi friday, continue PSCLS"))).resolves.toMatchObject({
+      destination: { kind: "session", id: "session:pscls" },
+      execution: { profile: "agent" },
+    });
+    expect(classifierCalls).toBe(1);
+  });
+
   it("uses one disposable classifier call with bounded read-only context and host destinations", async () => {
     const requests: RoutingClassifierRequest[] = [];
     const published: unknown[] = [];
@@ -80,7 +137,7 @@ describe("routing plugin", () => {
     expect(requests[0]?.systemPrompt).toContain("Your only job is to choose WHERE");
     expect(requests[0]?.systemPrompt).toContain("Never invent a destination id");
     expect(requests[0]?.systemPrompt).toContain("Classify by ownership, not by apparent difficulty");
-    expect(requests[0]?.systemPrompt).toContain("Everything else is ordinary user work and must go to an agent destination");
+    expect(requests[0]?.systemPrompt).toContain("Everything else is ordinary user work and must go to either transient:utility or a supplied session destination");
     expect(requests[0]?.systemPrompt).toContain("transient:utility destination is still an Agent/main-reasoning-model execution path");
     expect(requests[0]?.systemPrompt).toContain("Never treat it as permission for the routing model to answer");
     const payload = JSON.parse(requests[0]!.userPrompt) as Record<string, any>;
@@ -251,11 +308,18 @@ describe("routing plugin", () => {
     expect(routing.recentContext(message("x", "", "shared-chat", "bob").principal)).toHaveLength(1);
   });
 
-  it("routes concrete commitments and explicit reminders to scheduler without spending a classifier call", async () => {
+  it("lets the semantic model router classify concrete commitments and explicit reminders", async () => {
     let classifierCalls = 0;
     let sessionSearches = 0;
     const routing = createRoutingService({
-      classify: async () => { classifierCalls += 1; return validTransientDecision(); },
+      classify: async () => {
+        classifierCalls += 1;
+        return {
+          destination: { kind: "scheduler", id: "scheduler" },
+          execution: { profile: "scheduler", capabilityProfile: "none" },
+          confidence: 0.96,
+        };
+      },
       sessions: async () => { sessionSearches += 1; return []; },
       memory: async () => [],
     });
@@ -263,13 +327,13 @@ describe("routing plugin", () => {
     await expect(routing.route(message("m40", "We have a meeting at 5:30 today with KKK client."))).resolves.toMatchObject({
       destination: { kind: "scheduler", id: "scheduler" },
       execution: { profile: "scheduler" },
-      confidence: 1,
+      confidence: 0.96,
     });
     await expect(routing.route(message("m41", "Remind me tomorrow at 9am to send the contract."))).resolves.toMatchObject({
       destination: { kind: "scheduler", id: "scheduler" },
     });
-    expect(classifierCalls).toBe(0);
-    expect(sessionSearches).toBe(0);
+    expect(classifierCalls).toBe(2);
+    expect(sessionSearches).toBe(2);
   });
 
   it("leaves reminder requests with incomplete timing to the semantic router for clarification", async () => {
@@ -298,7 +362,7 @@ describe("routing plugin", () => {
     expect(classifierCalls).toBe(1);
   });
 
-  it("does not misroute informational time questions through the deterministic reminder fast path", async () => {
+  it("sends informational time questions through the semantic router", async () => {
     let classifierCalls = 0;
     const routing = createRoutingService({
       classify: async () => { classifierCalls += 1; return validTransientDecision(); },

@@ -6,7 +6,7 @@ import { modelCredentialVaultRef, modelOAuthCredentialVaultRef, modelProviderTyp
 import { collectDoctorChecks as collectCanonicalDoctorChecks, type DoctorSources } from "../plugins/host-doctor/collector.js";
 import { hasFridayPrivilegedHelper } from "../plugins/host-privileges/privileged.js";
 import type { DoctorCheck, DoctorLevel, DoctorRepairId, DoctorSection } from "../plugins/host-doctor/contract.js";
-import { getFridayHome, readRuntimeSettings } from "../plugins/runtime-settings/runtime-env.js";
+import { getFridayHome, loadRuntimeEnvironment, readRuntimeSettings } from "../plugins/runtime-settings/runtime-env.js";
 import { selectSandboxProvider } from "../plugins/sandbox/providers/index.js";
 import { inspectConfiguredComputerProvider } from "../plugins/computer/providers/index.js";
 import { voiceCredentialVaultRef } from "../plugins/voice/credential-ref.js";
@@ -81,10 +81,16 @@ const CLI_DOCTOR_SOURCES: DoctorSources = Object.freeze({
   computer: (environment: NodeJS.ProcessEnv) => inspectConfiguredComputerProvider(environment),
 });
 
-export function collectDoctorChecks(environment: NodeJS.ProcessEnv = process.env): Promise<readonly DoctorCheck[]> {
-  return collectCanonicalDoctorChecks(environment, {
+export async function collectDoctorChecks(environment: NodeJS.ProcessEnv = process.env): Promise<readonly DoctorCheck[]> {
+  // Doctor must inspect the same binary-owned runtime configuration that the
+  // long-running FRIDAY process will use. Desktop shells can retain stale
+  // FRIDAY_COMPUTER_* values across a rerunnable `friday setup computer`; the
+  // runtime loader intentionally replaces those Computer keys with runtime.env.
+  const effectiveEnvironment: NodeJS.ProcessEnv = { ...environment };
+  await loadRuntimeEnvironment({ environment: effectiveEnvironment });
+  return collectCanonicalDoctorChecks(effectiveEnvironment, {
     ...CLI_DOCTOR_SOURCES,
-    memory: async () => memoryEmbeddingHealth(environment),
+    memory: async () => memoryEmbeddingHealth(effectiveEnvironment),
   });
 }
 

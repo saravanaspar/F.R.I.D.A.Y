@@ -63,6 +63,7 @@ async function assemble(
         supportsOAuth: () => false,
         typicallyNeedsApiKey: () => true,
         getApiKey: async () => undefined,
+        listAvailableModelIds: async () => ["live-test-model"],
         requestApiKeyCapture: async ({ provider }: { provider: string }) => { remote.captures.push(provider); return { id: "capture-1" }; },
         captureApiKey: async ({ provider }: { provider: string }) => { remote.captures.push(provider); return { id: "capture-1" }; },
         captureOAuth: async ({ provider }: { provider: string }) => { remote.captures.push(`oauth:${provider}`); return { id: "oauth-capture-1" }; },
@@ -106,8 +107,8 @@ describe("runtime settings", () => {
     const remote = { promptAnswers: [] as string[], captures: [] as string[] };
     await assemble(home, async () => ({ phase: "accepted", requestId: "unused" }), () => undefined, async () => undefined, remote);
     const model = requireCapability(MODEL_CAPABILITY);
-    const provider = String(model.getProviders()[0]!);
-    const descriptor = model.getModels(provider as never)[0]!;
+    const provider = "openai";
+    const descriptor = model.getModel(provider as never, "live-test-model" as never)!;
     const modelId = String(descriptor.id);
     remote.promptAnswers.push(provider, modelId);
     await saveRuntimeSettings({
@@ -192,8 +193,8 @@ describe("runtime settings", () => {
     await friday.activatePlugin(modelPlugin, { defer: true });
     await friday.completePluginBootstrap();
     const model = requireCapability(MODEL_CAPABILITY);
-    const provider = model.getProviders()[0]!;
-    const descriptor = model.getModels(provider as never)[0]!;
+    const provider = "openai";
+    const descriptor = model.getModel(provider as never, "runtime-test-model" as never)!;
     await friday.dispose();
     uninstallCapabilityRegistry();
     await saveRuntimeSettings({ modelProvider: String(descriptor.provider), modelId: String(descriptor.id), permissionMode: "ask", timezone: "UTC" }, home);
@@ -223,8 +224,8 @@ describe("runtime settings", () => {
     await friday.activatePlugin(modelPlugin, { defer: true });
     await friday.completePluginBootstrap();
     const model = requireCapability(MODEL_CAPABILITY);
-    const provider = model.getProviders()[0]!;
-    const descriptor = model.getModels(provider as never)[0]!;
+    const provider = "openai";
+    const descriptor = model.getModel(provider as never, "runtime-test-model" as never)!;
     await friday.dispose();
     uninstallCapabilityRegistry();
     await saveRuntimeSettings({ modelProvider: String(descriptor.provider), modelId: String(descriptor.id), permissionMode: "ask", timezone: "UTC" }, home);
@@ -269,8 +270,8 @@ describe("runtime settings", () => {
     await friday.activatePlugin(modelPlugin, { defer: true });
     await friday.completePluginBootstrap();
     const model = requireCapability(MODEL_CAPABILITY);
-    const provider = model.getProviders()[0]!;
-    const descriptor = model.getModels(provider as never)[0]!;
+    const provider = "openai";
+    const descriptor = model.getModel(provider as never, "runtime-test-model" as never)!;
     await friday.dispose();
     uninstallCapabilityRegistry();
     await saveRuntimeSettings({ modelProvider: String(descriptor.provider), modelId: String(descriptor.id), permissionMode: "ask", timezone: "UTC" }, home);

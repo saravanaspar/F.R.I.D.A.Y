@@ -3,4 +3,5 @@ export {
   hasFridayPrivilegedHelper,
   installFridayPrivilegeBroker,
   installVoiceHostDependencies,
+  installComputerHostDependencies,
 } from "../plugins/host-privileges/privileged.js";

@@ -13,6 +13,8 @@ export interface ModelService {
   readonly getProviders: ModelRuntime["getProviders"];
   readonly supportsLiveModelDiscovery: ModelRuntime["supportsLiveModelDiscovery"];
   readonly discoverAvailableModelIds: ModelRuntime["discoverAvailableModelIds"];
+  readonly getDiscoveredModelPricingTier: ModelRuntime["getDiscoveredModelPricingTier"];
+  readonly compareDiscoveredModelIds: ModelRuntime["compareDiscoveredModelIds"];
   readonly complete: ModelRuntime["complete"];
   readonly completeSimple: ModelRuntime["completeSimple"];
   readonly stream: ModelRuntime["stream"];

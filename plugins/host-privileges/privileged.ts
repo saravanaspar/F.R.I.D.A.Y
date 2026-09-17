@@ -32,6 +32,15 @@ case "\${1:-}" in
     apt-get update
     exec apt-get install -y --no-install-recommends build-essential cmake curl git ffmpeg python3 python3-venv ca-certificates
     ;;
+  computer-deps)
+    if [ ! -e /etc/debian_version ]; then
+      echo "friday-privileged: computer-deps currently supports Debian/Ubuntu hosts only" >&2
+      exit 64
+    fi
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    exec apt-get install -y --no-install-recommends wmctrl xdotool x11-utils at-spi2-core python3-pyatspi
+    ;;
   *)
     echo "friday-privileged: unsupported operation" >&2
     exit 64
@@ -137,7 +146,7 @@ export async function installFridayPrivilegeBroker(): Promise<void> {
   const helperSource = join(scratch, "friday-privileged");
   const sudoersSource = join(scratch, "sudoers");
   const sudoersTarget = fridaySudoersTarget(username);
-  const sudoers = `${username} ALL=(root) NOPASSWD: ${FRIDAY_PRIVILEGED_HELPER} voice-deps\n`;
+  const sudoers = `${username} ALL=(root) NOPASSWD: ${FRIDAY_PRIVILEGED_HELPER} voice-deps, ${FRIDAY_PRIVILEGED_HELPER} computer-deps\n`;
   try {
     await writeFile(helperSource, HELPER, { mode: 0o700 });
     await writeFile(sudoersSource, sudoers, { mode: 0o600 });
@@ -157,4 +166,12 @@ export async function installVoiceHostDependencies(): Promise<void> {
     throw new Error("FRIDAY privileged helper is not installed; run `friday setup privileges broker` locally first");
   }
   await run("sudo", ["-n", FRIDAY_PRIVILEGED_HELPER, "voice-deps"], false);
+}
+
+export async function installComputerHostDependencies(): Promise<void> {
+  if (process.platform !== "linux") throw new Error("Automatic host Computer dependency installation is currently supported on Linux only");
+  if (!(await hasFridayPrivilegedHelper())) {
+    throw new Error("FRIDAY privileged helper is not installed; run `friday setup privileges broker` locally first");
+  }
+  await run("sudo", ["-n", FRIDAY_PRIVILEGED_HELPER, "computer-deps"], false);
 }

@@ -3,6 +3,7 @@ import type {
   ChannelAttachment,
   ChannelChatType,
   ChannelInboundHandler,
+  ChannelOutboundAudio,
   ChannelPrincipal,
   ChannelSendResult,
   ChannelProtectedAction,
@@ -185,6 +186,32 @@ export class TelegramChannelTransport implements ChannelTransport {
       accountId: this.accountId,
       conversationId: target.conversationId,
       messageIds: Object.freeze(ids),
+    });
+  }
+
+  async sendAudio(target: ChannelTarget, audio: ChannelOutboundAudio): Promise<ChannelSendResult> {
+    // Telegram's native voice-note surface expects OGG/Opus. MP3/M4A output
+    // from common TTS providers is sent as normal playable audio instead of
+    // relying on provider-side format coercion.
+    const prefersVoice = audio.voiceNote === true && (audio.mimeType === "audio/ogg" || audio.mimeType === "audio/opus");
+    const method = prefersVoice ? "sendVoice" : "sendAudio";
+    const field = prefersVoice ? "voice" : "audio";
+    const extension = audio.mimeType === "audio/mpeg" ? "mp3"
+      : audio.mimeType === "audio/mp4" ? "m4a"
+        : audio.mimeType === "audio/ogg" ? "ogg"
+          : audio.mimeType === "audio/opus" ? "opus"
+            : audio.mimeType === "audio/wav" || audio.mimeType === "audio/x-wav" ? "wav"
+              : "audio";
+    const form = new FormData();
+    form.set("chat_id", target.conversationId);
+    if (target.threadId !== undefined) form.set("message_thread_id", String(Number(target.threadId) || target.threadId));
+    form.set(field, new Blob([Uint8Array.from(audio.bytes)], { type: audio.mimeType }), audio.fileName ?? `friday-voice.${extension}`);
+    const result = await this.#requestMultipart<{ message_id: number }>(method, form);
+    return Object.freeze({
+      channel: this.channel,
+      accountId: this.accountId,
+      conversationId: target.conversationId,
+      messageIds: Object.freeze([String(result.message_id)]),
     });
   }
 
@@ -401,6 +428,33 @@ export class TelegramChannelTransport implements ChannelTransport {
           body: JSON.stringify(body),
           ...(signal === undefined ? {} : { signal }),
         }, method === "getUpdates" ? 60_000 : 15_000);
+        const payload = await response.json() as TelegramApiResponse<T>;
+        if (!response.ok || payload.ok !== true || payload.result === undefined) {
+          failed = true;
+          failure = new Error(`Telegram API returned HTTP ${response.status}`);
+          return;
+        }
+        result = payload.result;
+      } catch (error) {
+        failed = true;
+        failure = error;
+      }
+    });
+    if (failed || result === undefined) throw new Error(`Telegram ${method} request failed`, { cause: failure });
+    return result;
+  }
+
+  async #requestMultipart<T>(method: string, body: FormData): Promise<T> {
+    let result: T | undefined;
+    let failed = false;
+    let failure: unknown;
+    await this.#secrets.consume(this.#config.credentialRef, async (secret) => {
+      const token = Buffer.from(secret).toString("utf8");
+      try {
+        const response = await fetchWithTimeout(fetch, `https://api.telegram.org/bot${token}/${method}`, {
+          method: "POST",
+          body,
+        }, 30_000);
         const payload = await response.json() as TelegramApiResponse<T>;
         if (!response.ok || payload.ok !== true || payload.result === undefined) {
           failed = true;

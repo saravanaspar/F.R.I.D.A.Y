@@ -152,6 +152,7 @@ describe("voice plugin", () => {
         supportsOAuth: () => false,
         typicallyNeedsApiKey: () => true,
         getApiKey: async () => "OPENAI_SECRET_SENTINEL",
+        listAvailableModelIds: async () => [],
         requestApiKeyCapture: async () => ({ id: "unused" }),
         captureApiKey: async () => ({ id: "unused" }),
         captureOAuth: async () => ({ id: "unused" }),

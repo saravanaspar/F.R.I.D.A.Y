@@ -1,3 +1,5 @@
+import { registerDiscoveredModelIds } from "./models.js";
+
 const DISCOVERY_TIMEOUT_MS = 12_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_PAGES = 8;
@@ -22,6 +24,15 @@ export class ProviderModelDiscoveryError extends Error {
 }
 
 type JsonRecord = Record<string, unknown>;
+
+export type DiscoveredModelPricingTier = "free" | "paid" | "unknown";
+
+const DISCOVERED_MODEL_PRICING = new Map<string, Map<string, DiscoveredModelPricingTier>>();
+const PRICING_TIER_RANK: Readonly<Record<DiscoveredModelPricingTier, number>> = Object.freeze({
+  free: 0,
+  paid: 1,
+  unknown: 2,
+});
 
 function objectRecord(value: unknown): JsonRecord | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -165,15 +176,94 @@ async function requestJson(
   }
 }
 
-function addId(ids: Set<string>, raw: unknown, stripGooglePrefix = false): void {
+function normalizeModelId(raw: unknown, stripGooglePrefix = false): string | undefined {
   const value = boundedString(raw, 256);
-  if (!value || ids.size >= MAX_MODEL_IDS) return;
+  if (!value) return undefined;
   const id = stripGooglePrefix && value.startsWith("models/") ? value.slice("models/".length) : value;
-  if (id) ids.add(id);
+  return id || undefined;
+}
+
+function nonNegativePrice(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? value : undefined;
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function pricingTierFromModel(model: JsonRecord | undefined, id: string): DiscoveredModelPricingTier {
+  const pricing = objectRecord(model?.pricing);
+  if (pricing) {
+    const prices = Object.values(pricing)
+      .map(nonNegativePrice)
+      .filter((value): value is number => value !== undefined);
+    if (prices.some((value) => value > 0)) return "paid";
+    if (prices.length > 0) return "free";
+  }
+  // Some providers encode an explicitly free variant in the live model id.
+  // This is provider-returned metadata, not a bundled FRIDAY model list.
+  return id.endsWith(":free") ? "free" : "unknown";
+}
+
+function mergePricingTier(
+  current: DiscoveredModelPricingTier | undefined,
+  next: DiscoveredModelPricingTier,
+): DiscoveredModelPricingTier {
+  if (current === undefined || current === "unknown") return next;
+  if (next === "unknown") return current;
+  // If duplicate provider records disagree, avoid incorrectly advertising a paid
+  // route as free.
+  return current === "paid" || next === "paid" ? "paid" : "free";
+}
+
+function addDiscoveredModel(
+  models: Map<string, DiscoveredModelPricingTier>,
+  rawId: unknown,
+  rawModel?: JsonRecord,
+  stripGooglePrefix = false,
+): void {
+  const id = normalizeModelId(rawId, stripGooglePrefix);
+  if (!id || (!models.has(id) && models.size >= MAX_MODEL_IDS)) return;
+  const tier = pricingTierFromModel(rawModel, id);
+  models.set(id, mergePricingTier(models.get(id), tier));
+}
+
+function finalizeDiscoveredModels(
+  providerInput: string,
+  models: Map<string, DiscoveredModelPricingTier>,
+): readonly string[] {
+  const provider = providerInput.trim().toLowerCase();
+  const ordered = [...models.keys()].sort((left, right) => {
+    const leftTier = models.get(left) ?? "unknown";
+    const rightTier = models.get(right) ?? "unknown";
+    return PRICING_TIER_RANK[leftTier] - PRICING_TIER_RANK[rightTier] || left.localeCompare(right);
+  });
+  DISCOVERED_MODEL_PRICING.set(provider, new Map(ordered.map((id) => [id, models.get(id) ?? "unknown"])));
+  return Object.freeze(ordered);
+}
+
+export function getDiscoveredModelPricingTier(
+  providerInput: string,
+  modelIdInput: string,
+): DiscoveredModelPricingTier {
+  const provider = providerInput.trim().toLowerCase();
+  const modelId = modelIdInput.trim();
+  if (!modelId) return "unknown";
+  return DISCOVERED_MODEL_PRICING.get(provider)?.get(modelId)
+    ?? (modelId.endsWith(":free") ? "free" : "unknown");
+}
+
+export function compareDiscoveredModelIds(
+  providerInput: string,
+  leftId: string,
+  rightId: string,
+): number {
+  const leftTier = getDiscoveredModelPricingTier(providerInput, leftId);
+  const rightTier = getDiscoveredModelPricingTier(providerInput, rightId);
+  return PRICING_TIER_RANK[leftTier] - PRICING_TIER_RANK[rightTier] || leftId.localeCompare(rightId);
 }
 
 async function discoverGoogle(apiKey: string, options: ProviderModelDiscoveryOptions): Promise<readonly string[]> {
-  const ids = new Set<string>();
+  const modelsById = new Map<string, DiscoveredModelPricingTier>();
   let pageToken: string | undefined;
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const url = new URL("https://generativelanguage.googleapis.com/v1beta/models");
@@ -188,29 +278,38 @@ async function discoverGoogle(apiKey: string, options: ProviderModelDiscoveryOpt
         ? model.supportedGenerationMethods.filter((entry): entry is string => typeof entry === "string")
         : [];
       if (methods.length > 0 && !methods.includes("generateContent")) continue;
-      addId(ids, model.name, true);
+      addDiscoveredModel(modelsById, model.name, model, true);
     }
     const next = boundedString(payload?.nextPageToken, 2_048);
-    if (!next) return Object.freeze([...ids]);
+    if (!next) return finalizeDiscoveredModels("google", modelsById);
     pageToken = next;
   }
   throw new ProviderModelDiscoveryError("google", `google model discovery exceeded ${MAX_PAGES} pages`);
 }
 
 async function discoverAnthropic(apiKey: string, options: ProviderModelDiscoveryOptions): Promise<readonly string[]> {
-  const ids = new Set<string>();
+  const modelsById = new Map<string, DiscoveredModelPricingTier>();
   let afterId: string | undefined;
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const url = new URL("https://api.anthropic.com/v1/models");
     url.searchParams.set("limit", "1000");
     if (afterId) url.searchParams.set("after_id", afterId);
-    const payload = objectRecord(await requestJson("anthropic", url, {
+    const oauth = apiKey.includes("sk-ant-oat");
+    const payload = objectRecord(await requestJson("anthropic", url, oauth ? {
+      authorization: `Bearer ${apiKey}`,
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "oauth-2025-04-20",
+      "x-app": "cli",
+    } : {
       "x-api-key": apiKey,
       "anthropic-version": "2023-06-01",
     }, options));
     const data = Array.isArray(payload?.data) ? payload.data : [];
-    for (const raw of data) addId(ids, objectRecord(raw)?.id);
-    if (payload?.has_more !== true) return Object.freeze([...ids]);
+    for (const raw of data) {
+      const model = objectRecord(raw);
+      if (model) addDiscoveredModel(modelsById, model.id, model);
+    }
+    if (payload?.has_more !== true) return finalizeDiscoveredModels("anthropic", modelsById);
     const next = boundedString(payload?.last_id, 256);
     if (!next || next === afterId) {
       throw new ProviderModelDiscoveryError("anthropic", "anthropic model discovery returned an invalid pagination cursor");
@@ -225,6 +324,8 @@ const OPENAI_STYLE_MODEL_ENDPOINTS: Readonly<Record<string, string>> = Object.fr
   deepseek: "https://api.deepseek.com/models",
   groq: "https://api.groq.com/openai/v1/models",
   mistral: "https://api.mistral.ai/v1/models",
+  nvidia: "https://integrate.api.nvidia.com/v1/models",
+  openrouter: "https://openrouter.ai/api/v1/models",
 });
 
 async function discoverOpenAiStyle(
@@ -237,9 +338,12 @@ async function discoverOpenAiStyle(
   const payload = await requestJson(provider, new URL(endpoint), { authorization: `Bearer ${apiKey}` }, options);
   const record = objectRecord(payload);
   const data = Array.isArray(record?.data) ? record.data : Array.isArray(payload) ? payload : [];
-  const ids = new Set<string>();
-  for (const raw of data) addId(ids, objectRecord(raw)?.id);
-  return Object.freeze([...ids]);
+  const modelsById = new Map<string, DiscoveredModelPricingTier>();
+  for (const raw of data) {
+    const model = objectRecord(raw);
+    if (model) addDiscoveredModel(modelsById, model.id, model);
+  }
+  return finalizeDiscoveredModels(provider, modelsById);
 }
 
 
@@ -251,16 +355,16 @@ async function discoverXai(apiKey: string, options: ProviderModelDiscoveryOption
     options,
   ));
   const models = Array.isArray(payload?.models) ? payload.models : [];
-  const ids = new Set<string>();
+  const modelsById = new Map<string, DiscoveredModelPricingTier>();
   for (const raw of models) {
     const model = objectRecord(raw);
     if (!model) continue;
-    addId(ids, model.id);
+    addDiscoveredModel(modelsById, model.id, model);
     if (Array.isArray(model.aliases)) {
-      for (const alias of model.aliases) addId(ids, alias);
+      for (const alias of model.aliases) addDiscoveredModel(modelsById, alias, model);
     }
   }
-  return Object.freeze([...ids]);
+  return finalizeDiscoveredModels("xai", modelsById);
 }
 
 const LIVE_DISCOVERY_PROVIDERS = Object.freeze(new Set([
@@ -271,6 +375,8 @@ const LIVE_DISCOVERY_PROVIDERS = Object.freeze(new Set([
   "xai",
   "groq",
   "mistral",
+  "nvidia",
+  "openrouter",
 ]));
 
 export function supportsLiveModelDiscovery(providerInput: string): boolean {
@@ -279,8 +385,8 @@ export function supportsLiveModelDiscovery(providerInput: string): boolean {
 
 /**
  * Ask the provider for the models currently visible to one credential.
- * This is intentionally availability-only; FRIDAY still intersects the result
- * with its generated model catalog before a model can be selected or executed.
+ * Provider responses are the source of truth for model ids; discovered ids are
+ * registered immediately so runtime execution does not depend on a shipped list.
  */
 export async function discoverAvailableModelIds(
   providerInput: string,
@@ -289,11 +395,17 @@ export async function discoverAvailableModelIds(
 ): Promise<readonly string[]> {
   const provider = providerInput.trim().toLowerCase();
   if (!supportsLiveModelDiscovery(provider)) {
-    throw new Error(`Live model discovery is not supported for provider ${provider || "(empty)"}`);
+    throw new Error(`Live model discovery is not supported for provider ${provider || "(empty)"}; FRIDAY does not fall back to a hardcoded model list`);
   }
   const apiKey = validateApiKey(apiKeyInput);
-  if (provider === "google") return discoverGoogle(apiKey, options);
-  if (provider === "anthropic") return discoverAnthropic(apiKey, options);
-  if (provider === "xai") return discoverXai(apiKey, options);
-  return discoverOpenAiStyle(provider, apiKey, options);
+  DISCOVERED_MODEL_PRICING.delete(provider);
+  const ids = provider === "google"
+    ? await discoverGoogle(apiKey, options)
+    : provider === "anthropic"
+      ? await discoverAnthropic(apiKey, options)
+      : provider === "xai"
+        ? await discoverXai(apiKey, options)
+        : await discoverOpenAiStyle(provider, apiKey, options);
+  registerDiscoveredModelIds(provider, ids);
+  return ids;
 }

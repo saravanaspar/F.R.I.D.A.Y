@@ -1033,6 +1033,74 @@ function secretConsumer(values: Readonly<Record<string, string>>) {
   };
 }
 
+describe("trusted outbound audio", () => {
+  it("routes bounded audio only through transports that explicitly support it", async () => {
+    const hub = new ChannelHub({ credentialVault: new FakeVault() });
+    const seen: Uint8Array[] = [];
+    const transport: ChannelTransport = {
+      channel: "telegram",
+      accountId: "default",
+      start: async () => undefined,
+      stop: async () => undefined,
+      status: () => ({ channel: "telegram", accountId: "default", state: "running" }),
+      send: async (target) => ({ channel: "telegram", accountId: "default", conversationId: target.conversationId, messageIds: ["text"] }),
+      sendAudio: async (target, audio) => {
+        seen.push(audio.bytes);
+        return { channel: "telegram", accountId: "default", conversationId: target.conversationId, messageIds: ["voice-1"] };
+      },
+    };
+    hub.registerTransport(transport);
+    const source = Uint8Array.from([1, 2, 3]);
+    await expect(hub.sendAudio({ channel: "telegram", accountId: "default", conversationId: "chat-1" }, { bytes: source, mimeType: "audio/mpeg", voiceNote: true }))
+      .resolves.toMatchObject({ messageIds: ["voice-1"] });
+    expect(seen[0]).toEqual(source);
+    expect(seen[0]).not.toBe(source);
+    await expect(hub.sendAudio({ channel: "telegram", accountId: "default", conversationId: "chat-1" }, { bytes: new Uint8Array(), mimeType: "audio/mpeg" }))
+      .rejects.toThrow(/non-empty/);
+  });
+
+  it("sends synthesized MP3 through Telegram's playable audio endpoint with multipart bytes", async () => {
+    const telegramFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toMatch(/\/sendAudio$/);
+      expect(init?.body).toBeInstanceOf(FormData);
+      const body = init?.body as FormData;
+      expect(body.get("chat_id")).toBe("chat-voice");
+      expect(body.get("message_thread_id")).toBe("42");
+      const audio = body.get("audio");
+      expect(audio).toBeInstanceOf(Blob);
+      expect((audio as Blob).type).toBe("audio/mpeg");
+      expect(Array.from(new Uint8Array(await (audio as Blob).arrayBuffer()))).toEqual([10, 20, 30]);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 77 } }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", telegramFetch);
+    const telegram = new TelegramChannelTransport({ credentialRef: "vault://telegram/voice" }, secretConsumer({ "vault://telegram/voice": "telegram-token" }));
+    await expect(telegram.sendAudio({ channel: "telegram", accountId: "default", conversationId: "chat-voice", threadId: "42" }, {
+      bytes: Uint8Array.from([10, 20, 30]),
+      mimeType: "audio/mpeg",
+      fileName: "reply.mp3",
+      voiceNote: true,
+    })).resolves.toMatchObject({ messageIds: ["77"] });
+  });
+
+  it("uses Telegram's native voice-note endpoint only for OGG/Opus audio", async () => {
+    const telegramFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toMatch(/\/sendVoice$/);
+      const body = init?.body as FormData;
+      const voice = body.get("voice");
+      expect(voice).toBeInstanceOf(Blob);
+      expect((voice as Blob).type).toBe("audio/ogg");
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 78 } }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", telegramFetch);
+    const telegram = new TelegramChannelTransport({ credentialRef: "vault://telegram/voice-ogg" }, secretConsumer({ "vault://telegram/voice-ogg": "telegram-token" }));
+    await expect(telegram.sendAudio({ channel: "telegram", accountId: "default", conversationId: "chat-voice" }, {
+      bytes: Uint8Array.from([1, 2, 3]),
+      mimeType: "audio/ogg",
+      voiceNote: true,
+    })).resolves.toMatchObject({ messageIds: ["78"] });
+  });
+});
+
 describe("native protected-action payloads", () => {
   it("emits opaque callback payloads for Telegram, Discord, and Slack", async () => {
     const action = { requestId: "123e4567-e89b-12d3-a456-426614174000", approveLabel: "Approve", denyLabel: "Deny" };

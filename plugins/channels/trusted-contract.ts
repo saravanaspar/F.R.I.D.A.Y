@@ -3,6 +3,7 @@ import { defineCapability } from "../capabilities/protocol.js";
 import type {
   ChannelSendResult,
   ChannelTarget,
+  ChannelOutboundAudio,
   CredentialCaptureRequest,
   CredentialCaptureCompletion,
   PendingCredentialCapture,
@@ -18,6 +19,7 @@ export interface ChannelsTrustedService {
   start(): Promise<void>;
   stop(): Promise<void>;
   send(target: ChannelTarget, text: string): Promise<ChannelSendResult>;
+  sendAudio(target: ChannelTarget, audio: ChannelOutboundAudio): Promise<ChannelSendResult>;
   fetchAttachment(
     target: Pick<ChannelTarget, "channel" | "accountId">,
     attachment: import("@friday/channels").ChannelAttachment,

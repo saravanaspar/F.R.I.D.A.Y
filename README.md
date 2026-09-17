@@ -198,6 +198,8 @@ friday setup execution-python
 friday setup self-repository /path/to/F.R.I.D.A.Y
 friday setup whatsapp
 friday setup voice
+friday setup computer
+friday setup service
 friday setup privileges broker
 friday setup privileges none
 friday setup --help
@@ -216,6 +218,8 @@ The core assistant does not silently install privileged host software. Enable on
 | Self-improvement from source | Git + npm + a clean F.R.I.D.A.Y checkout | Save the canonical checkout with `friday setup self-repository /path/to/F.R.I.D.A.Y`. Release-binary self-improvement builds, verifies, stages, and hands off to a new host-native binary before activation. |
 | WhatsApp bridge | npm/Node tooling | Provision bridge dependencies with `friday setup whatsapp`. |
 | Voice | Provider API access | Configure and preflight STT/TTS with `friday setup voice`. OpenAI reuses the canonical model-provider Vault credential; Deepgram and ElevenLabs keys are stored in Voice-owned Vault refs. |
+| Linux Computer | X11 desktop; Brave/Chrome/Chromium | Configure with `friday setup computer`. The default opens FRIDAY-owned windows in the normal browser profile so existing logins are shared; the installed binary checks/provisions the fixed approved host dependencies when broker mode is enabled. |
+| Always-on user service | systemd user manager | Install/update the bundled unit with `friday setup service`; no source-tree `cp` step is required. |
 
 Run `friday doctor` at any time for a sectioned installation, configuration, security, tooling, and recovery report. Every actionable warning/error includes a one-line repair guide. Doctor is non-interactive by default, does not make outbound network calls, and never reads plaintext Vault secrets. Use `friday doctor --fix` only when you want guided, confirmed repairs for deterministic fixes, or `friday doctor --json` for machine-readable diagnostics.
 
@@ -335,15 +339,15 @@ Catchable fatal failures are secret-redacted and synchronously recorded under:
 
 A hard `SIGKILL`, some OOM kills, or total host failure can still prevent application-level logging, so supervisor/system logs remain important. Setup commands also append bounded redacted outcome records to `~/.friday/logs/setup.ndjson`. From a trusted channel, `run doctor` / diagnostic review can inspect FRIDAY-owned status, operational failures, failed spans, crashes and setup outcomes. It deliberately does not read arbitrary host logs or Vault secret values. With a configured main reasoning model, an operator may explicitly approve diagnostic self-repair; the existing isolated candidate/evaluation/promotion/handoff gates remain mandatory.
 
-For always-on Linux installations, an example systemd user unit is included:
+For always-on Linux installations, the release binary owns deployment of its bundled systemd user unit:
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp deploy/systemd/friday.service ~/.config/systemd/user/friday.service
-systemctl --user daemon-reload
-systemctl --user enable --now friday
+friday setup service
+systemctl --user status friday.service --no-pager
 journalctl --user -u friday -f
 ```
+
+No source checkout, `cp deploy/...`, or setup shell script is required for a release install.
 
 See [`docs/operations/ALWAYS_ON.md`](docs/operations/ALWAYS_ON.md) for the supported process lifecycle and restart model.
 

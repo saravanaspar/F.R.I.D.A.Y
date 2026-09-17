@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import * as modelRuntime from "@friday/model";
 import { describe, expect, it } from "vitest";
 import { PluginTestHost } from "./helpers/plugin-host.js";
@@ -36,7 +37,14 @@ describe("model plugin", () => {
     expect(typeof service.supportsLiveModelDiscovery).toBe("function");
     expect(typeof service.discoverAvailableModelIds).toBe("function");
     expect(service.getProviders()).toContain("deepseek");
-    expect(service.getModels("deepseek").length).toBeGreaterThan(0);
+    expect(service.getModels("deepseek" as never)).toEqual([]);
+    const liveOnly = service.getModel("deepseek" as never, "provider-returned-test-model" as never);
+    expect(liveOnly).toMatchObject({
+      provider: "deepseek",
+      id: "provider-returned-test-model",
+      api: "openai-completions",
+      baseUrl: "https://api.deepseek.com",
+    });
     expect((service as unknown as { registerModel?: unknown }).registerModel).toBeUndefined();
 
     const registry = requireCapability(MODEL_REGISTRY_CAPABILITY);
@@ -46,6 +54,189 @@ describe("model plugin", () => {
     uninstallCapabilityRegistry();
   });
 
+
+  it("materializes arbitrary NVIDIA model ids from the provider transport profile instead of a bundled catalog", async () => {
+    expect(modelRuntime.getProviders()).toContain("nvidia");
+
+    const model = modelRuntime.getModel("nvidia", "live-model-returned-by-provider");
+    expect(model).toMatchObject({
+      id: "live-model-returned-by-provider",
+      name: "live-model-returned-by-provider",
+      provider: "nvidia",
+      api: "openai-completions",
+      baseUrl: "https://integrate.api.nvidia.com/v1",
+      reasoning: false,
+      input: ["text"],
+    });
+
+    const previous = process.env.NVIDIA_API_KEY;
+    process.env.NVIDIA_API_KEY = "nvapi-test-key";
+    try {
+      expect(modelRuntime.getEnvApiKey("nvidia")).toBe("nvapi-test-key");
+    } finally {
+      if (previous === undefined) delete process.env.NVIDIA_API_KEY;
+      else process.env.NVIDIA_API_KEY = previous;
+    }
+  });
+
+  it("discovers NVIDIA API Catalog models visible to the supplied credential", async () => {
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      expect(String(input)).toBe("https://integrate.api.nvidia.com/v1/models");
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer nvidia-test-key");
+      return new Response(JSON.stringify({
+        data: [
+          { id: "meta/llama-3.2-11b-vision-instruct" },
+          { id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" },
+          { id: "nvidia/nemotron-3-super-120b-a12b" },
+        ],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    await expect(modelRuntime.discoverAvailableModelIds("nvidia", "nvidia-test-key", { fetchImpl }))
+      .resolves.toEqual([
+        "meta/llama-3.2-11b-vision-instruct",
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+        "nvidia/nemotron-3-super-120b-a12b",
+      ]);
+  });
+
+  it("discovers OpenRouter models with the provider API key", async () => {
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      expect(String(input)).toBe("https://openrouter.ai/api/v1/models");
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer openrouter-test-key");
+      return new Response(JSON.stringify({
+        data: [
+          { id: "openai/gpt-5.6-sol", pricing: { prompt: "0.00001", completion: "0.00002" } },
+          { id: "stealth/union-alpha", pricing: { prompt: "0", completion: "0", request: "0" } },
+          { id: "anthropic/claude-sonnet-5" },
+          { id: "meta/free-variant:free" },
+        ],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    expect(modelRuntime.supportsLiveModelDiscovery("openrouter")).toBe(true);
+    await expect(modelRuntime.discoverAvailableModelIds("openrouter", "openrouter-test-key", { fetchImpl }))
+      .resolves.toEqual([
+        "meta/free-variant:free",
+        "stealth/union-alpha",
+        "openai/gpt-5.6-sol",
+        "anthropic/claude-sonnet-5",
+      ]);
+    expect(modelRuntime.getDiscoveredModelPricingTier("openrouter", "stealth/union-alpha")).toBe("free");
+    expect(modelRuntime.getDiscoveredModelPricingTier("openrouter", "openai/gpt-5.6-sol")).toBe("paid");
+    expect(modelRuntime.getDiscoveredModelPricingTier("openrouter", "anthropic/claude-sonnet-5")).toBe("unknown");
+    expect(modelRuntime.compareDiscoveredModelIds("openrouter", "stealth/union-alpha", "openai/gpt-5.6-sol")).toBeLessThan(0);
+  });
+
+  it("uses bearer OAuth headers when discovering Anthropic models with a Claude OAuth token", async () => {
+    const fetchImpl: typeof globalThis.fetch = async (input, init) => {
+      expect(String(input)).toContain("https://api.anthropic.com/v1/models");
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBe("Bearer sk-ant-oat-test-token");
+      expect(headers.get("x-api-key")).toBeNull();
+      expect(headers.get("anthropic-beta")).toContain("oauth-2025-04-20");
+      return new Response(JSON.stringify({
+        data: [{ id: "claude-sonnet-5" }],
+        has_more: false,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    await expect(modelRuntime.discoverAvailableModelIds("anthropic", "sk-ant-oat-test-token", { fetchImpl }))
+      .resolves.toEqual(["claude-sonnet-5"]);
+  });
+
+  it("maps NVIDIA NIM reasoning and token options onto its OpenAI-compatible request", async () => {
+    const requestBodies: Record<string, unknown>[] = [];
+    const server = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        requestBodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
+        response.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        });
+        response.end([
+          'data: {"id":"chatcmpl-nvidia","object":"chat.completion.chunk","created":1,"model":"test-nvidia","choices":[{"index":0,"delta":{"role":"assistant","content":"OK"},"finish_reason":null}]}',
+          '',
+          'data: {"id":"chatcmpl-nvidia","object":"chat.completion.chunk","created":1,"model":"test-nvidia","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+          '',
+          'data: [DONE]',
+          '',
+        ].join("\n"));
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server did not bind a TCP port");
+    try {
+      const descriptor: modelRuntime.Model<"openai-completions"> = {
+        id: "test-nvidia",
+        name: "Test NVIDIA",
+        api: "openai-completions",
+        provider: "nvidia",
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 4096,
+        maxTokens: 1024,
+      };
+      const thinkingResponse = await modelRuntime.completeSimple(
+        descriptor,
+        {
+          systemPrompt: "Return concise output.",
+          messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
+        },
+        { apiKey: "nvidia-test-key", maxTokens: 128, temperature: 0, reasoning: "high" },
+      );
+      const instructResponse = await modelRuntime.completeSimple(
+        descriptor,
+        {
+          systemPrompt: "Return concise output.",
+          messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
+        },
+        { apiKey: "nvidia-test-key", maxTokens: 64, temperature: 0, reasoning: "off" },
+      );
+      const providerDefaultResponse = await modelRuntime.completeSimple(
+        descriptor,
+        {
+          systemPrompt: "Return concise output.",
+          messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
+        },
+        { apiKey: "nvidia-test-key", maxTokens: 32, temperature: 0 },
+      );
+
+      expect(thinkingResponse.stopReason).toBe("stop");
+      expect(instructResponse.stopReason).toBe("stop");
+      expect(providerDefaultResponse.stopReason).toBe("stop");
+      expect(requestBodies).toHaveLength(3);
+      expect(requestBodies[0]).toMatchObject({
+        model: "test-nvidia",
+        max_tokens: 128,
+        chat_template_kwargs: { enable_thinking: true },
+      });
+      expect(requestBodies[0]).not.toHaveProperty("max_completion_tokens");
+      expect(requestBodies[0]).not.toHaveProperty("store");
+      expect(requestBodies[0]).not.toHaveProperty("stream_options");
+      expect(requestBodies[1]).toMatchObject({
+        model: "test-nvidia",
+        max_tokens: 64,
+        chat_template_kwargs: { enable_thinking: false },
+      });
+      expect(requestBodies[2]).toMatchObject({
+        model: "test-nvidia",
+        max_tokens: 32,
+      });
+      expect(requestBodies[2]).not.toHaveProperty("chat_template_kwargs");
+      const messages = requestBodies[0]?.messages as Array<{ role?: string }> | undefined;
+      expect(messages?.[0]?.role).toBe("system");
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
 
   it("discovers only Google generateContent models visible to the supplied credential across pages", async () => {
     const requests: Array<{ url: string; key: string | null }> = [];

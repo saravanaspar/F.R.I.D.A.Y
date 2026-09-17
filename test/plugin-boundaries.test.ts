@@ -205,6 +205,7 @@ describe("plugin boundaries", () => {
     const voice = await readFile(resolve("plugins/voice/index.ts"), "utf8");
     expect(voice).toContain("ARTIFACT_INPUT_ENRICHMENT_CONTRIBUTION");
     expect(voice).toContain("VOICE_CAPABILITY");
+    expect(voice).not.toContain("AGENT_TOOL_CONTRIBUTION");
     expect(voice).not.toMatch(/(?:from|import\()\s*["']\.\.\/channels\//);
     expect(voice).not.toMatch(/(?:from|import\()\s*["']\.\.\/turn-loop\//);
 
@@ -213,6 +214,8 @@ describe("plugin boundaries", () => {
 
     const channels = await readFile(resolve("plugins/channels/index.ts"), "utf8");
     const turnLoop = await readFile(resolve("plugins/turn-loop/index.ts"), "utf8");
+    expect(channels).toContain("VOICE_CAPABILITY");
+    expect(channels).toContain("createSpeakReplyAgentTool");
     expect(channels).not.toMatch(/(?:openai|deepgram|elevenlabs).*transcri/i);
     expect(turnLoop).not.toMatch(/(?:openai|deepgram|elevenlabs).*transcri/i);
   });
@@ -1059,6 +1062,7 @@ describe("plugin boundaries", () => {
     expect(hostPrivilegesManifest.provides.map((capability) => capability.id)).toEqual(["host-privileges"]);
     const privileged = await readFile(resolve("plugins/host-privileges/privileged.ts"), "utf8");
     expect(privileged).toContain('"voice-deps"');
+    expect(privileged).toContain("computer-deps");
     expect(privileged).not.toContain("NOPASSWD: ALL");
     expect(privileged).not.toContain("sudo -S");
 

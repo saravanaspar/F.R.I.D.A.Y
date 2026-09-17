@@ -122,7 +122,7 @@ async function runHelper(
         env: { ...process.env },
         interactive: input !== undefined,
       })
-    : { command: execution.defaultKernelPythonPath(), args, cwd, env: { ...process.env } };
+    : { command: "python3", args, cwd, env: { ...process.env } };
   const result = await execution.execCommand(context.command, [...context.args], context.cwd, {
     env: context.env,
     replaceEnv: true,

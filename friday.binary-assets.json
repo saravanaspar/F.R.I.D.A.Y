@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "assets": [
+    {
+      "source": "deploy/systemd/friday.service",
+      "target": "systemd/friday.service",
+      "role": "friday-user-service"
+    },
+    {
+      "source": "deploy/systemd/friday-computer-browser.service",
+      "target": "systemd/friday-computer-browser.service",
+      "role": "computer-browser-service"
+    }
+  ]
+}

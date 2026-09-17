@@ -25,56 +25,14 @@ afterEach(async () => {
 });
 
 describe("native Linux Computer deployment", () => {
-  it("installs real X11 virtual-desktop control, selects the default Brave browser, and purges the retired hidden-compositor deployment", async () => {
-    const root = await temp("friday-linux-x11-setup-");
-    const home = join(root, "home");
-    const bin = join(root, "bin");
-    const systemctlLog = join(root, "systemctl.log");
-    const desktopCount = join(root, "desktop-count");
-    await mkdir(home, { recursive: true });
-    await mkdir(bin, { recursive: true });
-    await writeFile(desktopCount, "1\n");
-
-    await stub(bin, "systemctl", 'printf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n');
-    await stub(bin, "curl");
-    await stub(bin, "xdg-settings", 'printf "com.brave.Browser.desktop\\n"\n');
-    await stub(bin, "brave-browser-stable");
-    await stub(bin, "sleep");
-    await stub(bin, "wmctrl", `if [ "$1" = "-n" ]; then printf "%s\\n" "$2" > "$DESKTOP_COUNT"; exit 0; fi\nif [ "$1" = "-d" ]; then count=$(cat "$DESKTOP_COUNT"); i=0; while [ "$i" -lt "$count" ]; do mark=-; [ "$i" -eq 0 ] && mark='*'; printf "%s %s DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 Desktop %s\\n" "$i" "$mark" "$((i + 1))"; i=$((i + 1)); done; exit 0; fi\nexit 1\n`);
-
-    const result = await execFileAsync("sh", ["scripts/setup-linux-computer.sh", "native"], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        HOME: home,
-        FRIDAY_HOME: join(home, ".friday"),
-        PATH: `${bin}:/usr/bin:/bin`,
-        SYSTEMCTL_LOG: systemctlLog,
-        DESKTOP_COUNT: desktopCount,
-        XDG_SESSION_TYPE: "x11",
-        XDG_CURRENT_DESKTOP: "KDE",
-        DISPLAY: ":0",
-        XAUTHORITY: join(home, ".Xauthority"),
-        FRIDAY_COMPUTER_BROWSER_PROFILE_DIR: "",
-        FRIDAY_COMPUTER_BROWSER_BIN: "",
-        FRIDAY_CHROMIUM_BIN: "",
-      },
-    });
-
-    expect(result.stdout).toContain("Native X11 Computer is installed and started.");
-    expect(result.stdout).toContain("Retired hidden-compositor/viewer services and configs were removed");
-    expect(result.stdout).toContain("Sign into the FRIDAY browser profile once");
-    const environment = await readFile(join(home, ".config", "environment.d", "60-friday-computer.conf"), "utf8");
-    expect(environment).toContain("FRIDAY_COMPUTER_PROVIDER=linux-x11");
-    expect(environment).toContain("FRIDAY_COMPUTER_SESSION_MODE=native-x11");
-    expect(environment).toContain("FRIDAY_COMPUTER_X11_AGENT_DESKTOPS=1");
-    expect(environment).toContain("FRIDAY_COMPUTER_BROWSER_BIN=brave-browser-stable");
-    expect(environment).toContain(`FRIDAY_COMPUTER_BROWSER_PROFILE_DIR=${join(home, ".friday", "computer", "browser-profile")}`);
-
-    const calls = await readFile(systemctlLog, "utf8");
-    expect(calls).toContain("--user disable --now friday-computer-headless.service");
-    expect(calls).toContain("--user enable --now friday-computer-browser.service");
-    await expect(readFile(join(home, ".config", "systemd", "user", "friday-computer-headless.service"), "utf8")).rejects.toThrow();
+  it("keeps the source-tree shell helper as a thin compatibility wrapper around the installed binary setup", async () => {
+    const script = await readFile("scripts/setup-linux-computer.sh", "utf8");
+    expect(script).toContain('exec friday setup computer "$mode" "$screens"');
+    expect(script).toContain('npm run --silent friday -- setup computer "$mode" "$screens"');
+    expect(script).not.toContain("browser-profile");
+    expect(script).not.toContain("environment.d");
+    expect(script).not.toContain("cp deploy/systemd");
+    expect(script).not.toContain("apt-get");
   });
 
   it("smokes native X11 desktop discovery and waits for loopback CDP readiness", async () => {
@@ -82,7 +40,7 @@ describe("native Linux Computer deployment", () => {
     const bin = join(root, "bin");
     const curlCountFile = join(root, "curl-count");
     await mkdir(bin, { recursive: true });
-    await stub(bin, "systemctl", 'if [ "$1" = "--user" ] && [ "$2" = "show-environment" ]; then printf "FRIDAY_COMPUTER_PROVIDER=linux-x11\\nFRIDAY_COMPUTER_X11_AGENT_DESKTOPS=1\\nFRIDAY_COMPUTER_CDP_URL=http://127.0.0.1:9222/\\nXDG_SESSION_TYPE=x11\\n"; fi\n');
+    await stub(bin, "systemctl", 'if [ "$1" = "--user" ] && [ "$2" = "show-environment" ]; then printf "FRIDAY_COMPUTER_PROVIDER=linux-x11\\nFRIDAY_COMPUTER_BROWSER_MODE=managed-cdp\\nFRIDAY_COMPUTER_X11_AGENT_DESKTOPS=1\\nFRIDAY_COMPUTER_CDP_URL=http://127.0.0.1:9222/\\nXDG_SESSION_TYPE=x11\\n"; fi\n');
     await stub(bin, "wmctrl", 'if [ "$1" = "-d" ]; then printf "0 * DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 Desktop 1\\n1 - DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 FRIDAY\\n"; exit 0; fi\nexit 1\n');
     await stub(bin, "sleep");
     await stub(bin, "curl", 'count=0\n[ -f "$CURL_COUNT_FILE" ] && count=$(cat "$CURL_COUNT_FILE")\ncount=$((count + 1))\nprintf "%s\\n" "$count" > "$CURL_COUNT_FILE"\n[ "$count" -lt 3 ] && exit 7\nprintf "{\\"Browser\\":\\"Brave\\"}\\n"\n');
@@ -104,21 +62,46 @@ describe("native Linux Computer deployment", () => {
     expect(result.stdout).toContain("PASS: native X11 virtual desktops and loopback browser CDP are healthy.");
     expect(result.stdout).toContain("AGENT_DESKTOPS=1");
     expect(result.stdout).toContain("PRESENTATION=native-x11");
+    expect(result.stdout).toContain("BROWSER_MODE=managed-cdp");
     expect((await readFile(curlCountFile, "utf8")).trim()).toBe("3");
   });
 
-  it("fails closed on Wayland instead of installing a hidden compositor fallback", async () => {
-    const root = await temp("friday-linux-wayland-setup-");
-    const home = join(root, "home");
+  it("smokes shared-profile mode without requiring a CDP endpoint", async () => {
+    const root = await temp("friday-linux-x11-shared-smoke-");
     const bin = join(root, "bin");
-    await mkdir(home, { recursive: true });
     await mkdir(bin, { recursive: true });
-    for (const command of ["systemctl", "wmctrl", "curl", "xdg-settings"]) await stub(bin, command);
+    await stub(bin, "systemctl", 'if [ "$1" = "--user" ] && [ "$2" = "show-environment" ]; then printf "FRIDAY_COMPUTER_PROVIDER=linux-x11\\nFRIDAY_COMPUTER_BROWSER_MODE=shared\\nFRIDAY_COMPUTER_BROWSER_BIN=brave-browser-stable\\nFRIDAY_COMPUTER_X11_AGENT_DESKTOPS=1\\nXDG_SESSION_TYPE=x11\\n"; fi\n');
+    await stub(bin, "wmctrl", 'if [ "$1" = "-d" ]; then printf "0 * DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 Desktop 1\\n1 - DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 FRIDAY\\n"; exit 0; fi\nexit 1\n');
+    await stub(bin, "xdotool");
+    await stub(bin, "xprop");
+    await stub(bin, "python3");
+    await stub(bin, "brave-browser-stable");
 
-    await expect(execFileAsync("sh", ["scripts/setup-linux-computer.sh", "native"], {
+    const result = await execFileAsync("sh", ["scripts/smoke-linux-computer.sh"], {
       cwd: process.cwd(),
-      env: { ...process.env, HOME: home, PATH: `${bin}:/usr/bin:/bin`, XDG_SESSION_TYPE: "wayland", DISPLAY: ":0" },
-    })).rejects.toMatchObject({ stderr: expect.stringContaining("No hidden-compositor/viewer fallback will be installed") });
+      env: {
+        ...process.env,
+        PATH: `${bin}:/usr/bin:/bin`,
+        FRIDAY_COMPUTER_PROVIDER: "",
+        FRIDAY_COMPUTER_BROWSER_MODE: "",
+        FRIDAY_COMPUTER_BROWSER_BIN: "",
+        FRIDAY_COMPUTER_X11_AGENT_DESKTOPS: "",
+        XDG_SESSION_TYPE: "",
+      },
+    });
+
+    expect(result.stdout).toContain("PASS: native X11 virtual desktops and shared browser prerequisites are healthy.");
+    expect(result.stdout).toContain("BROWSER=brave-browser-stable");
+    expect(result.stdout).toContain("BROWSER_MODE=shared");
+    expect(result.stdout).not.toContain("CDP=");
+  });
+
+  it("does not route setup through any hidden-compositor or viewer fallback", async () => {
+    const script = await readFile("scripts/setup-linux-computer.sh", "utf8");
+    expect(script).not.toContain("sway");
+    expect(script).not.toContain("wayvnc");
+    expect(script).not.toContain("vnc");
+    expect(script).not.toContain("headless");
   });
 
   it("does not ship retired hidden-compositor/viewer runtime artifacts", async () => {
@@ -138,15 +121,18 @@ describe("native Linux Computer deployment", () => {
     expect(providerIndex).not.toContain("linux-shared-screen");
   });
 
-  it("launches the persistent browser directly on X11 without a startup viewer window", async () => {
+  it("ships managed CDP only as an explicit binary-owned fallback service", async () => {
     const unit = await readFile("deploy/systemd/friday-computer-browser.service", "utf8");
-    expect(unit).toContain("FRIDAY_COMPUTER_BROWSER_BIN");
-    expect(unit).toContain("brave-browser-stable");
-    expect(unit).toContain("google-chrome-stable");
-    expect(unit).toContain("--ozone-platform=x11");
-    expect(unit).toContain("--no-startup-window");
-    expect(unit).toContain("--remote-debugging-address=127.0.0.1");
-    expect(unit).not.toContain("--ozone-platform=wayland");
-    expect(unit).not.toContain("about:blank'");
+    expect(unit).toContain("ExecStart=/usr/bin/env friday computer-browser-supervisor");
+    expect(unit).not.toContain("FRIDAY_COMPUTER_BROWSER_BIN");
+    expect(unit).not.toContain("--user-data-dir");
+    expect(unit).not.toContain("brave-browser-stable");
+    expect(unit).not.toContain("google-chrome-stable");
+
+    const rootManifest = await readFile("friday.binary-assets.json", "utf8");
+    expect(rootManifest).toContain("deploy/systemd/friday.service");
+    expect(rootManifest).toContain("deploy/systemd/friday-computer-browser.service");
+    const computerManifest = await readFile("plugins/computer/friday.binary-assets.json", "utf8");
+    expect(computerManifest).toContain("runtime/atspi_browser.py");
   });
 });

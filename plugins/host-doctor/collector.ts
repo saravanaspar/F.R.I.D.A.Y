@@ -324,6 +324,7 @@ function configuredModelEnvKeys(provider: string, environment: NodeJS.ProcessEnv
     "vercel-ai-gateway": ["AI_GATEWAY_API_KEY"],
     zai: ["ZAI_API_KEY"],
     mistral: ["MISTRAL_API_KEY"],
+    nvidia: ["NVIDIA_API_KEY"],
     minimax: ["MINIMAX_API_KEY"],
     "minimax-cn": ["MINIMAX_CN_API_KEY"],
     moonshotai: ["MOONSHOT_API_KEY"],
@@ -494,7 +495,7 @@ async function computerCheck(environment: NodeJS.ProcessEnv, sources: DoctorSour
     const snapshot = await sources.computer(environment);
     if (!snapshot.configured) {
       return check("computer-linux", "Tooling", "info", "Agent Computer", "not configured", {
-        detail: "Run scripts/setup-linux-computer.sh native to enable the native X11 Linux provider (FRIDAY_COMPUTER_PROVIDER=linux-x11).",
+        detail: "Run `friday setup computer` to configure the native X11 Linux provider using the installed binary.",
       });
     }
     const detail = [
@@ -508,12 +509,12 @@ async function computerCheck(environment: NodeJS.ProcessEnv, sources: DoctorSour
     return check("computer-linux", "Tooling", snapshot.status === "unavailable" ? "error" : "warn", "Agent Computer",
       snapshot.status === "unavailable" ? "Linux provider unavailable" : "Linux provider needs attention", {
         detail,
-        fix: "See docs/operations/LINUX_COMPUTER.md, repair the listed host/session dependency, then rerun: friday doctor",
+        fix: "Run `friday setup computer`, repair any listed host/session dependency, then rerun: friday doctor",
       });
   } catch (error) {
     return check("computer-linux", "Tooling", "error", "Agent Computer", "Linux provider could not be inspected", {
       detail: error instanceof Error ? error.message : String(error),
-      fix: "Check FRIDAY_COMPUTER_PROVIDER and docs/operations/LINUX_COMPUTER.md, then rerun: friday doctor",
+      fix: "Run `friday setup computer`, then rerun: friday doctor",
     });
   }
 }

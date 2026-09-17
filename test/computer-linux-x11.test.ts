@@ -225,6 +225,7 @@ function adapterFixture(options: {
   readonly initialTargets?: readonly LinuxCdpTarget[];
   readonly mediaPlaying?: boolean;
   readonly mediaCurrentTime?: number;
+  readonly wmctrlWorkAreaUnavailable?: boolean;
 } = {}) {
   const cdp = fakeCdp({
     ...(options.activeProtected === undefined ? {} : { activeProtected: options.activeProtected }),
@@ -263,7 +264,7 @@ function adapterFixture(options: {
       if (args[0] === "-d") {
         return {
           ok: true,
-          stdout: `0 ${activeDesktop === 0 ? "*" : "-"} DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 Desktop 1\n1 ${activeDesktop === 1 ? "*" : "-"} DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 FRIDAY\n`,
+          stdout: `0 ${activeDesktop === 0 ? "*" : "-"} DG: 1920x1080 VP: 0,0 WA: ${options.wmctrlWorkAreaUnavailable === true ? "N/A" : "0,0 1920x1040"} Desktop 1\n1 ${activeDesktop === 1 ? "*" : "-"} DG: 1920x1080 VP: 0,0 WA: ${options.wmctrlWorkAreaUnavailable === true ? "N/A" : "0,0 1920x1040"} FRIDAY\n`,
           stderr: "",
         };
       }
@@ -315,6 +316,19 @@ describe("native Linux/X11 Computer provider", () => {
       windows: [],
     });
     expect(snapshot.resources.browserRendererCount).toBe(1);
+    await expect(adapter.doctor?.()).resolves.toEqual([]);
+  });
+
+  it("accepts KDE wmctrl desktop rows when EWMH work-area metadata is N/A", async () => {
+    const { adapter } = adapterFixture({ wmctrlWorkAreaUnavailable: true });
+
+    const snapshot = await adapter.snapshot();
+
+    expect(snapshot.availability).toBe("online");
+    expect(snapshot.screens).toEqual([
+      expect.objectContaining({ id: "DESKTOP-1", kind: "human", width: 1920, height: 1080 }),
+      expect.objectContaining({ id: "DESKTOP-2", kind: "agent", width: 1920, height: 1080 }),
+    ]);
     await expect(adapter.doctor?.()).resolves.toEqual([]);
   });
 
@@ -774,5 +788,102 @@ describe("native Linux/X11 desktop placement", () => {
     expect(new Set(calls.map((call) => call.command))).toEqual(new Set(["wmctrl"]));
     expect(calls.filter((call) => call.args[0] === "-s").map((call) => call.args[1])).toEqual(["1", "0"]);
     await expect(adapter.doctor?.()).resolves.toEqual([]);
+  });
+
+  it("opens a FRIDAY-owned window in the user's shared browser profile and never closes pre-existing Human windows", async () => {
+    let activeDesktop = 0;
+    const calls: Array<{ command: string; args: readonly string[] }> = [];
+    const launches: Array<{ command: string; args: readonly string[] }> = [];
+    const markers = new Map<string, string>();
+    const closed: string[] = [];
+    const humanWindow = { id: "0x01000001", desktop: 0, className: "brave-browser.Brave-browser", title: "Human Gmail" };
+    const fridayWindow = { id: "0x02000002", desktop: 0, className: "brave-browser.Brave-browser", title: "FRIDAY Browser" };
+    let fridayOpen = false;
+    const wmctrlWindows = () => [humanWindow, ...(fridayOpen ? [fridayWindow] : [])]
+      .filter((entry) => !closed.includes(entry.id))
+      .map((entry) => `${entry.id} ${entry.desktop} ${entry.className} host ${entry.title}`)
+      .join("\n") + "\n";
+
+    const adapter = createLinuxX11ComputerAdapter({
+      environment: {
+        HOME: "/home/friday",
+        PATH: "/usr/bin:/bin",
+        DISPLAY: ":0",
+        XDG_SESSION_TYPE: "x11",
+        XDG_CURRENT_DESKTOP: "KDE",
+        FRIDAY_COMPUTER_PROVIDER: "linux-x11",
+        FRIDAY_COMPUTER_SESSION_MODE: "native-x11",
+        FRIDAY_COMPUTER_BROWSER_MODE: "shared",
+        FRIDAY_COMPUTER_BROWSER_BIN: "brave-browser-stable",
+        FRIDAY_COMPUTER_X11_AGENT_DESKTOPS: "1",
+      },
+      platform: "linux",
+      uid: 1000,
+      executable: async () => true,
+      async launchCommand(command, args) {
+        launches.push({ command, args });
+        const launchUrl = args.at(-1) ?? "";
+        const token = launchUrl.match(/<title>(FRIDAY-[^<]+)<\/title>/u)?.[1];
+        if (token) fridayWindow.title = token;
+        fridayOpen = true;
+      },
+      async runCommand(command, args) {
+        calls.push({ command, args });
+        if (command === "wmctrl" && args[0] === "-d") {
+          return { ok: true, stdout: `0 ${activeDesktop === 0 ? "*" : "-"} DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 Desktop 1\n1 ${activeDesktop === 1 ? "*" : "-"} DG: 1920x1080 VP: 0,0 WA: 0,0 1920x1040 FRIDAY\n`, stderr: "" };
+        }
+        if (command === "wmctrl" && args[0] === "-s") { activeDesktop = Number(args[1]); return { ok: true, stdout: "", stderr: "" }; }
+        if (command === "wmctrl" && args[0] === "-ir" && args[2] === "-t") { fridayWindow.desktop = Number(args[3]); return { ok: true, stdout: "", stderr: "" }; }
+        if (command === "wmctrl" && args[0] === "-lx") return { ok: true, stdout: wmctrlWindows(), stderr: "" };
+        if (command === "xprop" && args[0] === "-id" && args.includes("-set")) {
+          markers.set(args[1]!, args.at(-1)!);
+          return { ok: true, stdout: "", stderr: "" };
+        }
+        if (command === "xprop" && args[0] === "-id") {
+          const marker = markers.get(args[1]!);
+          return marker
+            ? { ok: true, stdout: `_FRIDAY_SCREEN_ID(STRING) = "${marker}"\n`, stderr: "" }
+            : { ok: false, stdout: "", stderr: "not found" };
+        }
+        if (command === "xdotool" && args[0] === "getwindowname") {
+          return { ok: true, stdout: args[1] === fridayWindow.id ? `${fridayWindow.title}\n` : `${humanWindow.title}\n`, stderr: "" };
+        }
+        if (command === "xdotool" && args[0] === "windowactivate") return { ok: true, stdout: "", stderr: "" };
+        if (command === "xdotool" && args[0] === "windowclose") { closed.push(args[1]!); return { ok: true, stdout: "", stderr: "" }; }
+        if (command === "python3" && args[0] === "-c") return { ok: true, stdout: "", stderr: "" };
+        if (command === "python3" && args.includes("snapshot")) {
+          return { ok: true, stdout: JSON.stringify({
+            frameTitle: "FRIDAY Browser",
+            url: "https://example.com/account",
+            elements: [{ path: "0/1", role: "button", name: "Continue", context: "Example account", left: 100, top: 100, right: 220, bottom: 140, visible: true, enabled: true, interactive: true, clickable: true, actions: ["click"] }],
+          }), stderr: "" };
+        }
+        if (command === "python3" && args.includes("action")) return { ok: true, stdout: JSON.stringify({ performed: true }), stderr: "" };
+        return { ok: false, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+      },
+      async listDirectory(path) { return path === "/proc" ? [] : []; },
+      async readText(path) { if (path === "/proc/stat") return "cpu 100 0 50 850 0 0 0 0 0 0\n"; throw new Error(`unexpected read ${path}`); },
+    });
+
+    const view = await adapter.openSharedScreen?.({ screenId: "DESKTOP-2", screenLeaseId: "lease", ownerId: "owner", ownerKind: "main-agent", runId: "run", name: "FRIDAY", switchTo: false });
+    expect(view?.viewerId).toBe(`native-browser:${fridayWindow.id}`);
+    expect(activeDesktop).toBe(0);
+    expect(launches).toHaveLength(1);
+    expect(launches[0]?.command).toBe("brave-browser-stable");
+    expect(launches[0]?.args[0]).toBe("--new-window");
+    expect(launches[0]?.args[1]).toMatch(/^data:text\/html,<title>FRIDAY-[0-9a-f-]+<\/title>$/u);
+    expect(markers.get(fridayWindow.id)).toBe("friday-screen:linux-local:DESKTOP-2");
+    expect(markers.has(humanWindow.id)).toBe(false);
+    expect(fridayWindow.desktop).toBe(1);
+    expect(calls).toContainEqual({ command: "wmctrl", args: ["-ir", fridayWindow.id, "-t", "1"] });
+
+    const observation = await adapter.observeScreen("DESKTOP-2", 1, undefined, { scope: "interactive", maxElements: 10 });
+    expect(observation.elements?.[0]).toMatchObject({ role: "button", name: "Continue", source: "atspi" });
+    expect(activeDesktop).toBe(0);
+
+    await expect(adapter.closeSharedScreens?.()).resolves.toBe(1);
+    expect(closed).toEqual([fridayWindow.id]);
+    expect(closed).not.toContain(humanWindow.id);
+    expect(calls.some((call) => call.command === "xdotool" && call.args[0] === "windowclose" && call.args[1] === humanWindow.id)).toBe(false);
   });
 });

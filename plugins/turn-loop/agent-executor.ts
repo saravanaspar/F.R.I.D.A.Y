@@ -14,7 +14,8 @@ import { conversationScope, ownerScopeAllows, ownerStateRoot, principalScope, ty
 import type { PromptsService } from "../prompts/contract.js";
 import type { ProjectsService } from "../projects/contract.js";
 import type { RlmService } from "../rlm/contract.js";
-import { isComputerCleanupCommand, isComputerStatusQuery, type RoutingCapabilityProfile } from "../routing/contract.js";
+import type { RoutingCapabilityProfile } from "../routing/contract.js";
+import { isComputerCleanupCommand, isComputerStatusQuery } from "./computer-control-intent.js";
 import type { SandboxService } from "../sandbox/contract.js";
 import type { SessionResourcesService } from "../session-resources/contract.js";
 import type { SessionsService } from "../sessions/contract.js";

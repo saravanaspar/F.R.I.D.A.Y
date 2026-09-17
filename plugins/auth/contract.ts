@@ -50,6 +50,8 @@ export interface ModelCredentialService {
   /** Whether this provider normally needs an API-key style credential. */
   typicallyNeedsApiKey(provider: string): boolean;
   getApiKey(provider: string): Promise<string | undefined>;
+  /** Authenticate first, then return exactly the model ids exposed by that credential/account. */
+  listAvailableModelIds(provider: string, options?: { readonly signal?: AbortSignal | undefined }): Promise<readonly string[]>;
   requestApiKeyCapture(input: {
     readonly principal: ModelCredentialPrincipal;
     readonly provider: string;

@@ -101,6 +101,88 @@ describe("host runtime environment", () => {
     expect(environment.FRIDAY_SELF_REPOSITORY).toBe("/srv/friday-source");
   });
 
+
+  it("loads persisted shared Computer settings into the runtime process environment", async () => {
+    const home = await runtimeHome([
+      'FRIDAY_MODEL_PROVIDER="openai"',
+      'FRIDAY_MODEL_ID="gpt-5"',
+      'FRIDAY_PERMISSION_MODE="ask"',
+      'FRIDAY_TIMEZONE="UTC"',
+      'FRIDAY_COMPUTER_PROVIDER="linux-x11"',
+      'FRIDAY_COMPUTER_SESSION_MODE="native-x11"',
+      'FRIDAY_COMPUTER_BROWSER_MODE="shared"',
+      'FRIDAY_COMPUTER_BROWSER_BIN="brave-browser-stable"',
+      'FRIDAY_COMPUTER_AGENT_SCREENS="1"',
+      'FRIDAY_COMPUTER_X11_AGENT_DESKTOPS="1"',
+      "",
+    ].join("\n"));
+    const environment: NodeJS.ProcessEnv = {};
+
+    await loadRuntimeEnvironment({ home, environment });
+
+    expect(environment).toMatchObject({
+      FRIDAY_COMPUTER_PROVIDER: "linux-x11",
+      FRIDAY_COMPUTER_SESSION_MODE: "native-x11",
+      FRIDAY_COMPUTER_BROWSER_MODE: "shared",
+      FRIDAY_COMPUTER_BROWSER_BIN: "brave-browser-stable",
+      FRIDAY_COMPUTER_AGENT_SCREENS: "1",
+      FRIDAY_COMPUTER_X11_AGENT_DESKTOPS: "1",
+    });
+  });
+
+  it("makes persisted Computer settings authoritative over stale shell/systemd Computer values", async () => {
+    const home = await runtimeHome([
+      'FRIDAY_MODEL_PROVIDER="openai"',
+      'FRIDAY_MODEL_ID="gpt-5"',
+      'FRIDAY_PERMISSION_MODE="ask"',
+      'FRIDAY_TIMEZONE="UTC"',
+      'FRIDAY_COMPUTER_PROVIDER="linux-x11"',
+      'FRIDAY_COMPUTER_SESSION_MODE="native-x11"',
+      'FRIDAY_COMPUTER_BROWSER_MODE="shared"',
+      'FRIDAY_COMPUTER_BROWSER_BIN="brave-browser-stable"',
+      'FRIDAY_COMPUTER_AGENT_SCREENS="1"',
+      'FRIDAY_COMPUTER_X11_AGENT_DESKTOPS="1"',
+      "",
+    ].join("\n"));
+    const environment: NodeJS.ProcessEnv = {
+      FRIDAY_COMPUTER_PROVIDER: "linux-sway",
+      FRIDAY_COMPUTER_SESSION_MODE: "headless-sway",
+      FRIDAY_COMPUTER_BROWSER_MODE: "managed-cdp",
+      FRIDAY_COMPUTER_BROWSER_BIN: "chromium",
+      FRIDAY_COMPUTER_CDP_URL: "http://127.0.0.1:9222/",
+      FRIDAY_COMPUTER_BROWSER_PROFILE_DIR: "/tmp/stale-profile",
+    };
+
+    await loadRuntimeEnvironment({ home, environment });
+
+    expect(environment).toMatchObject({
+      FRIDAY_COMPUTER_PROVIDER: "linux-x11",
+      FRIDAY_COMPUTER_SESSION_MODE: "native-x11",
+      FRIDAY_COMPUTER_BROWSER_MODE: "shared",
+      FRIDAY_COMPUTER_BROWSER_BIN: "brave-browser-stable",
+      FRIDAY_COMPUTER_AGENT_SCREENS: "1",
+      FRIDAY_COMPUTER_X11_AGENT_DESKTOPS: "1",
+    });
+    expect(environment.FRIDAY_COMPUTER_CDP_URL).toBeUndefined();
+    expect(environment.FRIDAY_COMPUTER_BROWSER_PROFILE_DIR).toBeUndefined();
+  });
+
+  it("rejects incomplete persisted Computer settings before plugin activation", async () => {
+    const home = await runtimeHome([
+      'FRIDAY_MODEL_PROVIDER="openai"',
+      'FRIDAY_MODEL_ID="gpt-5"',
+      'FRIDAY_COMPUTER_PROVIDER="linux-x11"',
+      'FRIDAY_COMPUTER_SESSION_MODE="native-x11"',
+      'FRIDAY_COMPUTER_BROWSER_MODE="shared"',
+      'FRIDAY_COMPUTER_BROWSER_BIN="brave-browser-stable"',
+      'FRIDAY_COMPUTER_AGENT_SCREENS="1"',
+      "",
+    ].join("\n"));
+
+    await expect(loadRuntimeEnvironment({ home, environment: {} }))
+      .rejects.toThrow("FRIDAY_COMPUTER_X11_AGENT_DESKTOPS");
+  });
+
   it("rejects an invalid configured timezone before plugin activation", async () => {
     const home = await runtimeHome([
       'FRIDAY_MODEL_PROVIDER="openai"',

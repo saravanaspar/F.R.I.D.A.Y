@@ -161,7 +161,7 @@ Linux is the first-class Computer Node implementation.
 
 - KDE Plasma X11 is the primary native virtual-desktop target; other EWMH/X11 desktops are runtime-conditional.
 - KDE/GNOME Wayland are fail-closed until compositor-native providers are implemented; there is no hidden Sway/VNC fallback.
-- One dedicated persistent FRIDAY browser profile is shared by every FRIDAY desktop. The user signs in once to that profile; it is not reopened concurrently against the Human browser's live profile directory.
+- On Linux X11, the default browser mode opens FRIDAY-owned windows inside the user's normal Brave/Chrome/Chromium profile, matching the browser's normal **New Window** behavior so current logins are shared and pre-existing Human windows remain open. FRIDAY marks and cleans up only windows it created. An isolated persistent `managed-cdp` profile remains an explicit fallback rather than the default.
 - Browser CDP remains loopback-only and protected-input/secret/CAPTCHA redaction continues to fail closed.
 - Keep protected state separate from the writable workspace and do not run the Agent Computer as root.
 

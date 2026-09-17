@@ -59,6 +59,13 @@ export interface OAuthProviderInterface {
 	/** Convert credentials to API key string for the provider */
 	getApiKey(credentials: OAuthCredentials): string;
 
+	/**
+	 * Optionally discover the model ids exposed to the authenticated account.
+	 * Providers should return only provider-owned ids; FRIDAY intersects these
+	 * with its runtime model catalog before presenting them to the user.
+	 */
+	discoverModelIds?(credentials: OAuthCredentials): Promise<readonly string[]>;
+
 	/** Optional: modify models for this provider (e.g., update baseUrl) */
 	modifyModels?<T extends AuthModelDescriptor>(models: T[], credentials: OAuthCredentials): T[];
 }

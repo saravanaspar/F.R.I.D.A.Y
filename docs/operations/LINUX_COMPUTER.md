@@ -5,17 +5,18 @@ The built-in Linux visible Computer mode uses the user's **real X11 virtual desk
 ```text
 KDE/GNOME/Xfce/etc. X11 session
   Desktop 1: Human
+    existing Brave/Chrome windows stay open
   Desktop 2: FRIDAY
-    Brave/Chrome window directly on that desktop
+    a separate FRIDAY-owned window in the same normal browser profile
 ```
 
-The provider reuses the existing hardened Computer/CDP engine for semantic browser inspection, stable observation refs, bounded visual probes, protected-input refusal, media status, and browser target reuse. Only the desktop discovery/presentation layer is native X11.
+The installed `friday` binary owns provisioning. A release user does not need the source checkout or `scripts/*.sh` to configure Computer.
 
 ## Supported desktop sessions
 
 | Host session | Status | Notes |
 | --- | --- | --- |
-| KDE Plasma X11 | **Full** | Tested architecture: EWMH virtual desktops with `wmctrl`; no KWin scripting. |
+| KDE Plasma X11 | **Full architecture** | EWMH virtual desktops with `wmctrl`; no KWin scripting. Real-host verification remains required for each release candidate. |
 | GNOME Xorg/X11 | **Conditional** | Works only when the current WM accepts EWMH desktop-count/switch operations. |
 | Xfce, Cinnamon, MATE, LXQt, i3 and other EWMH X11 WMs | **Conditional** | Runtime-smoked through `wmctrl`. |
 | KDE Plasma Wayland | **Unsupported** | Needs a future KDE/Wayland-native provider. |
@@ -24,97 +25,110 @@ The provider reuses the existing hardened Computer/CDP engine for semantic brows
 
 If the session is unsupported, setup fails clearly instead of pretending that a hidden screen is a visible desktop.
 
-## Browser state
+## Browser state: shared normal profile by default
 
-FRIDAY launches the user's chosen Chromium-family browser (Brave, Chrome, or Chromium) with one **dedicated persistent FRIDAY browser profile**. The profile is shared by every FRIDAY virtual desktop and survives FRIDAY/browser restarts.
+The default mode is `shared`. FRIDAY detects Brave, Chrome, or Chromium and invokes the normal browser launcher with `--new-window`. Chromium-family browsers route that request to the existing browser process when the same normal profile is already running. The result is equivalent to the user choosing **New Window**:
 
-You sign into this FRIDAY browser profile **once**. You do not sign in again when an Agent opens another desktop or starts another task.
+- existing Human browser windows remain open;
+- the FRIDAY-created window uses the same current normal profile;
+- cookies and already-authenticated website sessions are therefore available immediately;
+- FRIDAY marks only the window it created with an X11 ownership property;
+- restart/cleanup closes only windows carrying FRIDAY's exact ownership marker;
+- FRIDAY never broad-kills the user's browser to obtain control.
 
-The profile is deliberately separate from an already-running Human Chrome/Brave user-data directory. Chromium-family browsers lock an active profile and opening the same live profile from a second CDP-controlled process risks corruption. The setup helper prefers the OS default browser; set `FRIDAY_COMPUTER_BROWSER_BIN` to override it, for example:
+Shared mode uses AT-SPI accessibility for structure/semantic actions plus bounded X11 window/input operations. It deliberately does **not** expose a remote CDP endpoint or capture general screenshots. Protected/password/OTP/CAPTCHA controls are omitted/refused and require Human takeover.
 
-```bash
-FRIDAY_COMPUTER_BROWSER_BIN=google-chrome-stable scripts/setup-linux-computer.sh native
-```
+Because shared mode intentionally uses the person's normal browser profile, a Computer task can act with the same already-authenticated website sessions as that person. This is powerful and should remain behind FRIDAY's Computer approvals and protected-input boundary.
 
-or:
+### Explicit isolated fallback
 
-```bash
-FRIDAY_COMPUTER_BROWSER_BIN=brave-browser-stable scripts/setup-linux-computer.sh native
-```
-
-The default profile directory is:
-
-```text
-${FRIDAY_HOME:-$HOME/.friday}/computer/browser-profile
-```
-
-## Install
-
-Run setup from the real Human X11 desktop session:
+`managed-cdp` is an opt-in fallback for sites/workflows that require FRIDAY's isolated CDP engine:
 
 ```bash
-sudo apt install wmctrl curl
-scripts/setup-linux-computer.sh native
-scripts/smoke-linux-computer.sh
+friday setup computer managed-cdp
 ```
 
-The helper:
+That mode uses a separate FRIDAY-managed browser profile and loopback-only CDP. It does **not** copy or pretend to synchronize the Human profile. Logins in that isolated fallback are independent by design.
+
+Return to the normal shared-profile behavior with:
+
+```bash
+friday setup computer shared
+```
+
+## Binary-owned setup
+
+From the real Human X11 desktop session, after normal `friday setup`:
+
+```bash
+friday setup computer
+friday doctor
+```
+
+The binary-owned setup:
 
 - requires `XDG_SESSION_TYPE=x11` and a live `DISPLAY`;
+- detects the system/default Brave, Chrome, or Chromium launcher, including supported Flatpak installations;
+- checks `wmctrl`, `xdotool`, `xprop`, Python and AT-SPI prerequisites;
+- when the operator selected FRIDAY's restricted privilege broker, installs only the fixed approved Computer dependency set if it is missing;
 - creates/reuses the configured number of real host virtual desktops;
-- writes `FRIDAY_COMPUTER_PROVIDER=linux-x11` and the Agent desktop indexes;
-- prefers the default Brave/Chrome/Chromium launcher and creates one persistent FRIDAY profile;
-- installs/restarts only `friday-computer-browser.service`;
-- disables/removes the old `friday-computer-headless.service` deployment;
-- stops old `friday-computer-share-*` VNC viewer units;
-- removes previously installed FRIDAY hidden-compositor configuration files from older releases.
+- persists Computer provider, browser launcher/mode, and Agent desktop indexes in FRIDAY's private runtime settings;
+- removes retired Sway/headless/viewer artifacts from older releases;
+- disables the managed browser systemd unit in normal shared mode;
+- installs the bundled managed-browser unit only when `managed-cdp` was explicitly selected.
 
-The setup never broad-kills the user's normal browser, KDE, or unrelated applications.
+No source-tree `.sh` command is part of the release-user setup flow. `scripts/setup-linux-computer.sh` remains only as a developer compatibility wrapper that delegates straight back to `friday setup computer`.
 
-Set the number of FRIDAY desktops before setup if more than one concurrent Agent desktop is desired:
+To request more than one Agent desktop through the binary-owned setup flow:
 
 ```bash
-FRIDAY_COMPUTER_AGENT_SCREENS=2 scripts/setup-linux-computer.sh native
+friday setup computer shared 2
 ```
 
-All of those desktops still share the same persistent FRIDAY browser profile.
+Browser detection is automatic. Setup intentionally does not inherit retired
+`FRIDAY_COMPUTER_BROWSER_*` shell/systemd overrides from the old installer; those values
+are removed during migration so an upgrade cannot stay pinned to a stale browser or
+managed profile. Persisted Computer settings are authoritative at runtime.
+
+## FRIDAY-owned window lifecycle
+
+For each leased Agent desktop FRIDAY keeps at most one owned normal-profile browser window. The provider:
+
+1. records the Human's current virtual desktop;
+2. switches temporarily to the target Agent desktop;
+3. asks the normal browser to create a new window;
+4. identifies the newly created Chromium-family X11 window;
+5. marks that exact window with `_FRIDAY_SCREEN_ID`;
+6. restores the Human's previous desktop;
+7. uses the marker for crash/restart recovery and safe cleanup.
+
+A pre-existing Human window never receives that marker. Cleanup verifies the marker again immediately before closing a window; a stale or unowned window is dropped from FRIDAY state rather than closed.
 
 ## Approval/retry behavior
 
-A routine visible Computer task requests one `computer.task.control` approval. That grant is scoped to the principal, the stable admitted turn or durable Session Job, the Computer node, and the target desktop. If Telegram durable delivery retries the **same** admitted message, a new Agent run/screen lease does not generate another routine control approval.
+A routine visible Computer task requests one `computer.task.control` approval. That grant is scoped to the principal, the stable admitted turn or durable Session Job, the Computer node, and the target desktop. A durable retry of the **same** admitted Telegram message must not generate another routine control approval.
 
-High-impact browser actions and protected credentials remain separately gated.
-
-Managed process cleanup uses Execution's run-scoped `closeRun(runId)` API, which remains valid after the Agent's async-local execution context has unwound. A successful browser action must not be converted into a failed channel delivery merely because post-run process cleanup happens after the Agent context closes.
-
-## Browser target lifecycle
-
-Normal navigation reuses one FRIDAY-owned browser target per Agent desktop. A new tab/window is created only when explicitly requested or when no healthy FRIDAY target exists. Stale FRIDAY-owned pages are pruned without killing the shared browser supervisor/profile.
-
-Media observations preserve bounded audio/video state such as `playing`, `paused`, `currentTime`, `muted`, and `volume`, so a status question can distinguish a YouTube search page from actual playback.
+High-impact browser actions and protected credentials remain separately gated. Managed process cleanup uses Execution's run-scoped cleanup path so post-run cleanup cannot turn an otherwise successful Computer result into a failed channel delivery merely because the Agent async context has already unwound.
 
 ## Security boundary
 
-Run FRIDAY and the browser as the ordinary user, never root. CDP remains loopback-only. Provider observations redact secrets, passwords, OTPs, tokens, PINs, CAPTCHA/challenge content, sensitive URL parameters, and protected input values before model exposure. Protected input continues to require Human takeover.
+Run FRIDAY and the browser as the ordinary desktop user, never root. Shared mode does not create CDP. The explicit `managed-cdp` fallback binds CDP to loopback only. Provider observations redact/omit protected values, OTPs, secrets, CAPTCHA/challenge content and sensitive URL parameters before model exposure. Protected input continues to require Human takeover.
 
-The native provider does not inject KWin JavaScript. On X11 it uses standard EWMH operations (`wmctrl`) to discover/create/switch virtual desktops. To reduce KWin instability, FRIDAY creates a new browser window while the Agent desktop is active rather than moving an already-created window across Plasma desktops; it then restores the Human's previous desktop.
+The native provider does not inject KWin JavaScript. On X11 it uses standard EWMH/X11 operations to discover/create/switch virtual desktops and to own only the browser windows it created.
 
-## Smoke and diagnostics
+## Diagnostics
 
-A healthy smoke result is:
-
-```text
-PASS: native X11 virtual desktops and loopback browser CDP are healthy.
-AGENT_DESKTOPS=1
-PRESENTATION=native-x11
-```
-
-Useful checks:
+Normal release-user verification is binary-owned:
 
 ```bash
+friday doctor
 wmctrl -d
+```
+
+In normal shared mode, `friday-computer-browser.service` should be absent/inactive because the Human browser process owns the shared profile. In explicit managed-CDP mode only:
+
+```bash
 systemctl --user status friday-computer-browser.service
-systemctl --user show-environment | grep -E '^(FRIDAY_COMPUTER_|DISPLAY|XAUTHORITY|XDG_SESSION_TYPE)='
 curl --fail --silent http://127.0.0.1:9222/json/version
 ```
 
@@ -125,6 +139,4 @@ systemctl --user status friday-computer-headless.service || true
 systemctl --user list-units 'friday-computer-share-*' --all --no-pager
 ```
 
-## Browser login bootstrap
-
-On the first native FRIDAY browser task, switch to the FRIDAY virtual desktop and sign into the sites you want the Agent to use. That login persists in the FRIDAY profile for later tasks and for every FRIDAY virtual desktop. This is a one-time profile setup, not a per-desktop login requirement.
+For the release-candidate real-world acceptance order, use [`../REAL_WORLD_VERIFICATION_STATUS.md`](../REAL_WORLD_VERIFICATION_STATUS.md).

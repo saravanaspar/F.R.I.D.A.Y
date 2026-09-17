@@ -13,37 +13,28 @@ service when the predecessor exits. `KillMode=control-group` keeps explicit
 service stop bounded to the whole FRIDAY process family.
 
 Install the standalone `friday` binary somewhere on the user's PATH, normally
-`~/.local/bin/friday`, complete `friday setup`, then install the example unit:
+`~/.local/bin/friday`, complete `friday setup`, then let the installed binary deploy
+its bundled user unit. A release user does not need the source checkout:
 
 ```bash
 systemd --version
-mkdir -p ~/.config/systemd/user
-cp deploy/systemd/friday.service ~/.config/systemd/user/friday.service
-systemctl --user daemon-reload
-systemctl --user enable --now friday
+friday setup service
+systemctl --user status friday.service --no-pager
 ```
 
-The example uses the dedicated `~/FRIDAY-workspace` working directory. `friday setup`
-creates and persists this workspace as `FRIDAY_WORKSPACE`; protected state remains in
-`~/.friday` and must never overlap the writable model/tool workspace. To use a different
-dedicated workspace, set `FRIDAY_WORKSPACE` before rerunning setup and keep the systemd
-working directory aligned with that persisted value via an override:
+`friday setup` creates and persists the dedicated writable workspace (normally
+`~/FRIDAY-workspace`) as `FRIDAY_WORKSPACE`; protected state remains in `~/.friday` and
+must never overlap the writable model/tool workspace. The bundled service starts from
+the default dedicated workspace, preserving workspace isolation without requiring a
+source checkout or manual unit-file copy.
+
+If an operator intentionally selects a non-default workspace, keep the service working
+directory aligned with that persisted workspace using a normal systemd user override.
+This is an advanced deployment override, not part of the default installation flow.
+
+After changing persisted FRIDAY settings, restart and inspect the service with:
 
 ```bash
-systemctl --user edit friday
-```
-
-```ini
-[Service]
-WorkingDirectory=/absolute/path/to/dedicated-workspace
-Environment=FRIDAY_WORKSPACE=/absolute/path/to/dedicated-workspace
-```
-
-Do not point the workspace at `$HOME`, `FRIDAY_HOME`, or a parent of either protected
-state directory. Then reload/restart:
-
-```bash
-systemctl --user daemon-reload
 systemctl --user restart friday
 journalctl --user -u friday -f
 ```

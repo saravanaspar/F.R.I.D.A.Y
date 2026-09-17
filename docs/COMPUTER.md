@@ -19,11 +19,11 @@ KDE Plasma / X11
     real Brave/Chrome window controlled by FRIDAY
 ```
 
-`wmctrl`/EWMH is used for virtual-desktop discovery/switching. FRIDAY creates the browser window while the target desktop is active and then restores the Human desktop. It deliberately does not inject temporary KWin JavaScript and does not use WayVNC/TigerVNC. The retired hidden-compositor/viewer provider and deployment files are no longer shipped. The setup helper still removes old installed `friday-computer-headless.service` / `friday-computer-share-*` artifacts during upgrades.
+`wmctrl`/EWMH is used for virtual-desktop discovery/switching. FRIDAY creates the browser window while the target desktop is active and then restores the Human desktop. It deliberately does not inject temporary KWin JavaScript and does not use WayVNC/TigerVNC. The retired hidden-compositor/viewer provider and deployment files are no longer shipped. The binary-owned Computer setup still removes old installed `friday-computer-headless.service` / `friday-computer-share-*` artifacts during upgrades.
 
-A FRIDAY browser profile is persistent across every FRIDAY virtual desktop and restart. The user signs into that FRIDAY browser profile **once**, not once per desktop or task. New Agent desktops/windows reuse the same cookies, logins, cache, extensions, downloads, and browser storage in that profile. It is intentionally a dedicated profile rather than opening a second controlled process against the person's already-running Chrome/Brave user-data directory, because Chromium-family browsers lock active profiles and concurrent writers are unsafe. The setup helper prefers the OS default browser (Brave on a Brave-default system) and supports an explicit `FRIDAY_COMPUTER_BROWSER_BIN` override for Chrome/Brave/Chromium.
+The default browser mode now uses the person's **normal Brave/Chrome/Chromium profile** rather than copying it into a stale FRIDAY profile. FRIDAY asks the normal browser to create a new window while the Agent desktop is active, marks only that X11 window as FRIDAY-owned, and restores the Human desktop. Existing Human browser windows stay open. Because the window belongs to the same normal browser/profile, current cookies and website logins are shared just like choosing **New Window** in the browser. Cleanup re-checks the FRIDAY ownership marker and closes only windows FRIDAY created.
 
-Visible browser tasks retain one FRIDAY-owned target per leased Agent desktop and reuse it for ordinary navigation. Stale FRIDAY-owned targets are pruned without killing the shared browser process/profile. A task approval is bound to the stable admitted turn/job identity plus principal/node/desktop, so a durable retry of the same Telegram message does not ask for another `computer.task.control` approval. High-impact browser actions and protected credentials remain separately gated.
+Shared-profile mode uses AT-SPI accessibility and bounded X11 input/window operations; it does not expose CDP or general screenshots. The separate `managed-cdp` mode remains an explicit isolated fallback and deliberately uses an independent FRIDAY profile rather than copying/synchronizing the Human profile. A task approval is bound to the stable admitted turn/job identity plus principal/node/desktop, so a durable retry of the same Telegram message does not ask for another `computer.task.control` approval. High-impact browser actions and protected credentials remain separately gated.
 
 Support is fail-closed; there is no hidden compositor fallback:
 
@@ -37,18 +37,14 @@ Support is fail-closed; there is no hidden compositor fallback:
 | Other Wayland compositors | **Unsupported unless a native provider is implemented** | No generic EWMH equivalent exists on Wayland. |
 | Windows/macOS | **Separate provider work** | Must use the platform's native virtual-desktop/window APIs. |
 
-Install the native Linux provider from the active X11 desktop session:
+Configure the native Linux provider from the installed FRIDAY binary while logged into the active X11 desktop session:
 
 ```bash
-scripts/setup-linux-computer.sh native
-scripts/smoke-linux-computer.sh
+friday setup computer
+friday doctor
 ```
 
-On Ubuntu/Kubuntu the only additional workspace helper normally required is:
-
-```bash
-sudo apt install wmctrl curl
-```
+The default `shared` mode uses the user's existing Brave/Chrome/Chromium profile and keeps existing Human windows open. On supported Debian/Ubuntu systems, when the restricted privilege broker is enabled, FRIDAY installs the fixed Computer prerequisite set itself. Users who intentionally select privilege mode `none` receive a bounded manual-remediation error instead of a hidden privilege escalation. The source-tree `scripts/setup-linux-computer.sh` file is only a developer compatibility wrapper around the binary command.
 
 ## Computer Node provider contract
 
@@ -99,7 +95,7 @@ Each leased screen also has a `ControlLease`. Agent actions must present the cur
 
 ## Browser Supervisor
 
-Providers expose one Browser Supervisor snapshot for the node's shared persistent browser profile and one opaque live context identity. The Computer core rejects stopped supervisors that claim live windows/tabs, duplicate tab ownership across windows, Human windows bound to Agent screens, Agent-role windows bound to Human screens, and replacement persistent-profile identities after registration. Browser-required admission and browser actions proceed only while that supervisor is running with the persistent shared profile ready. Status surfaces report only readiness/counts; they do not publish tab URLs/titles, browser content, profile paths, cookies, or credentials in generic Computer status.
+Providers expose one browser-state snapshot and one opaque context identity. In Linux shared mode this represents the detected normal browser plus FRIDAY-owned marked windows; in managed-CDP mode it represents the isolated supervisor/profile. The Computer core rejects stopped supervisors that claim live windows/tabs, duplicate tab ownership across windows, Human windows bound to Agent screens, Agent-role windows bound to Human screens, and replacement persistent-profile identities after registration. Browser-required admission and browser actions proceed only while the selected browser mode is healthy and its required automation boundary is available. Status surfaces report only readiness/counts; they do not publish tab URLs/titles, browser content, profile paths, cookies, or credentials in generic Computer status.
 
 Higher-level orchestration should use API/MCP before Computer browser automation. Once Computer is selected, the provider fallback order is:
 
@@ -166,7 +162,13 @@ Hand-back increments the generation again and requires `observeScreen()` to succ
 
 ## Structure-first Linux browser implementation
 
-The built-in Linux/X11 provider implements the first hybrid slice directly on its persistent Chromium-family CDP session; Playwright is not required for this path. It walks bounded interactive DOM controls into the canonical element shape, keeps selectors private to the provider, reuses local element ids only when selector continuity is known, and scopes each action ref to one observation generation. After an action it re-runs the same filtered observation and reports added/updated/removed/retained elements plus whether the URL changed.
+The built-in Linux/X11 provider has two browser automation boundaries. Normal `shared`
+mode opens and owns only a new normal-profile browser window and uses bounded AT-SPI plus
+X11 input/window operations, so the Human's already-open windows and shared login state
+remain with the same browser process/profile. Explicit `managed-cdp` fallback uses the
+isolated persistent Chromium-family CDP session; Playwright is not required for that
+path. Both modes project bounded semantic controls into the canonical element shape and
+scope actions to the current observation generation.
 
 For semantic actions the provider computes a conservative confidence from visibility, enabled/action state, name/context, geometry, and obscuration. High-impact activations (for example purchase/payment/delete/send/transfer/checkout clicks or activation keys) and low-confidence targets require a visual probe token before execution. Typing or scrolling near a high-impact label is not treated as the high-impact action itself. Probe tokens expire after 30 seconds, are bound to one screen and one exact semantic ref, and are consumed once. Raw selector actions remain available as a compatibility path for lower-level service callers but do not receive the new semantic gating guarantees. The model-facing `computer_browser` parser therefore requires observation-scoped semantic refs for element-targeted actions, preventing the LLM from bypassing those gates with a selector. Activation keys such as Enter/Space also require a semantic target.
 
@@ -180,4 +182,4 @@ Computer Node `restart`, `update`, and `resetManagedState` operations delegate t
 
 The first slice established the provider contract, admission, lease expiry/waiting, browser-action generation checks, takeover/hand-back behavior, status/doctor surfaces, and managed lifecycle guards. The second slice connected Project/Turn Loop execution to Computer targets and routed the existing bash/edit/process/IPython tool surfaces through the leased node while preserving Permissions and stale-generation checks. The third slice made Computer admission a durable Session Job state and reused the existing restart/resume path rather than introducing Computer-owned durable scheduling. The fourth slice added permission-gated Agent observe/browser tools plus authenticated Client Gateway status/observation/takeover APIs over the same Computer authority. The fifth slice completes the provider-neutral Browser Supervisor invariants and the human-takeover continuation path: a login-wall action may be interrupted, the user controls the same leased screen without secret capture, hand-back re-observes current state, and the same Session Job resumes without replaying the interrupted action. The final audit-hardening pass adds run-scoped lease renewal, provider process cleanup, browser-level durable readiness waits, mandatory observation safety attestation with core redaction, operational-error handling for asynchronous waiter drains, and a real Agent-executor/Project/Permissions/Computer/Session-Jobs login-wall acceptance path.
 
-Phase 4 provider-neutral implementation is complete in scope. Phase 5 now uses the built-in native Linux/X11 provider described in [`operations/LINUX_COMPUTER.md`](operations/LINUX_COMPUTER.md): real EWMH virtual-desktop discovery, persistent Brave/Chrome/Chromium CDP browser windows, Linux resource telemetry, provider-specific Doctor details, protected observation/action handling, run-scoped cleanup, and managed browser lifecycle are implemented. The older hidden-compositor/viewer presentation has been removed from the built-in provider source and deployment tree. KDE/GNOME Wayland require future compositor-native providers; Windows remains Phase 8 work.
+Phase 4 provider-neutral implementation is complete in scope. Phase 5 now uses the built-in native Linux/X11 provider described in [`operations/LINUX_COMPUTER.md`](operations/LINUX_COMPUTER.md): real EWMH virtual-desktop discovery, normal-profile Brave/Chrome/Chromium FRIDAY-owned windows, an explicit isolated CDP fallback, Linux resource telemetry, provider-specific Doctor details, protected observation/action handling, run-scoped cleanup, and managed browser lifecycle are implemented. The older hidden-compositor/viewer presentation has been removed from the built-in provider source and deployment tree. KDE/GNOME Wayland require future compositor-native providers; Windows remains Phase 8 work.

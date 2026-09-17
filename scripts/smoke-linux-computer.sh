@@ -17,6 +17,7 @@ manager_value() { printf '%s\n' "$manager_environment" | sed -n "s/^$1=//p" | ta
 session_type="${XDG_SESSION_TYPE:-$(manager_value XDG_SESSION_TYPE)}"
 provider="${FRIDAY_COMPUTER_PROVIDER:-$(manager_value FRIDAY_COMPUTER_PROVIDER)}"
 desktop_indexes="${FRIDAY_COMPUTER_X11_AGENT_DESKTOPS:-$(manager_value FRIDAY_COMPUTER_X11_AGENT_DESKTOPS)}"
+browser_mode="${FRIDAY_COMPUTER_BROWSER_MODE:-$(manager_value FRIDAY_COMPUTER_BROWSER_MODE)}"
 if [ "$provider" != "linux-x11" ]; then echo "FAIL: FRIDAY_COMPUTER_PROVIDER must be linux-x11; got ${provider:-unset}." >&2; exit 1; fi
 if [ "$session_type" != "x11" ]; then echo "FAIL: native Computer requires X11; got ${session_type:-unknown}. No alternate compositor/viewer fallback is enabled." >&2; exit 1; fi
 command -v wmctrl >/dev/null 2>&1 || { echo "FAIL: wmctrl is required." >&2; exit 1; }
@@ -32,6 +33,26 @@ for index in $desktop_indexes; do
   }
 done
 IFS=$old_ifs
+
+case "$browser_mode" in
+  shared)
+    browser_bin="${FRIDAY_COMPUTER_BROWSER_BIN:-$(manager_value FRIDAY_COMPUTER_BROWSER_BIN)}"
+    [ -n "$browser_bin" ] || { echo "FAIL: shared Computer browser launcher is not configured." >&2; exit 1; }
+    command -v xdotool >/dev/null 2>&1 || { echo "FAIL: xdotool is required for shared browser control." >&2; exit 1; }
+    command -v xprop >/dev/null 2>&1 || { echo "FAIL: xprop is required for FRIDAY window ownership markers." >&2; exit 1; }
+    command -v python3 >/dev/null 2>&1 || { echo "FAIL: python3 is required for shared browser accessibility." >&2; exit 1; }
+    command -v "$browser_bin" >/dev/null 2>&1 || { echo "FAIL: configured browser launcher is unavailable: $browser_bin" >&2; exit 1; }
+    python3 -c 'import pyatspi' >/dev/null 2>&1 || { echo "FAIL: Python AT-SPI bindings are unavailable." >&2; exit 1; }
+    printf 'PASS: native X11 virtual desktops and shared browser prerequisites are healthy.\n'
+    printf 'AGENT_DESKTOPS=%s\n' "$desktop_indexes"
+    printf 'BROWSER=%s\n' "$browser_bin"
+    printf 'BROWSER_MODE=shared\n'
+    printf 'PRESENTATION=native-x11\n'
+    exit 0
+    ;;
+  managed-cdp) ;;
+  *) echo "FAIL: FRIDAY_COMPUTER_BROWSER_MODE must be shared or managed-cdp; got ${browser_mode:-unset}." >&2; exit 1 ;;
+esac
 
 cdp_url="${FRIDAY_COMPUTER_CDP_URL:-$(manager_value FRIDAY_COMPUTER_CDP_URL)}"
 cdp_url="${cdp_url:-http://127.0.0.1:9222/}"
@@ -57,4 +78,5 @@ fi
 printf 'PASS: native X11 virtual desktops and loopback browser CDP are healthy.\n'
 printf 'AGENT_DESKTOPS=%s\n' "$desktop_indexes"
 printf 'CDP=%s\n' "$version_url"
+printf 'BROWSER_MODE=managed-cdp\n'
 printf 'PRESENTATION=native-x11\n'
