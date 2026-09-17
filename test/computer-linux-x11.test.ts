@@ -421,7 +421,7 @@ describe("native Linux/X11 Computer provider", () => {
       query: "Add",
       maxElements: 10,
     });
-    expect(first.domSummary).toContain("Visible dashboard");
+    expect(first.domSummary).toContain("token=[REDACTED]");
     expect(first.observationId).toBe("obs-1");
     expect(first.elements).toHaveLength(1);
     expect(first.elements?.[0]).toMatchObject({
@@ -438,7 +438,7 @@ describe("native Linux/X11 Computer provider", () => {
       query: "Add",
       maxElements: 10,
     });
-    expect(second.domSummary).toContain("Visible dashboard");
+    expect(second.domSummary).toContain("token=[REDACTED]");
     expect(second.observationId).toBe("obs-2");
     expect(second.elements?.[0]).toMatchObject({ id: "e1", ref: "obs-2:e1" });
     expect(second.delta).toMatchObject({ baseObservationId: "obs-1", retained: 1, added: [], updated: [], removedIds: [] });
