@@ -6,12 +6,14 @@ import { isAbsolute, join, resolve } from "node:path";
 import type { FridayPlugin } from "../../src/plugin.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION } from "../system/contract.js";
-import { DEVICES_CAPABILITY, type DeviceDescriptor, type DeviceRecord, type DevicesService, type PairingRequest } from "./contract.js";
+import { DEVICES_CAPABILITY, type DeviceDescriptor, type DeviceRecord, type DeviceRole, type DevicesService, type PairingRequest } from "./contract.js";
 
 interface DeviceState { readonly schema: 1; readonly devices: readonly DeviceRecord[]; }
 interface PendingState { readonly schema: 1; readonly pairings: readonly PairingRequest[]; }
 const MAX_DEVICES = 64;
 const MAX_PENDING = 16;
+const MAX_OUTSTANDING_CHALLENGES_PER_DEVICE = 8;
+const AUTH_CHALLENGE_TTL_MS = 2 * 60 * 1_000;
 const DEFAULT_TTL_MS = 10 * 60 * 1_000;
 
 export function getDevicesStateDir(environment: NodeJS.ProcessEnv = process.env): string {
@@ -49,6 +51,11 @@ function deviceType(value: unknown): DeviceDescriptor["type"] {
   if (value === "desktop" || value === "android" || value === "computer-node" || value === "test") return value;
   throw new Error("device type is invalid");
 }
+function deviceRole(value: unknown, fallback: DeviceRole = "operator"): DeviceRole {
+  if (value === undefined) return fallback;
+  if (value === "operator" || value === "read-only") return value;
+  throw new Error("device role is invalid");
+}
 function parseDevice(value: unknown): DeviceRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("device record is malformed");
   const raw = value as Record<string, unknown>;
@@ -56,10 +63,11 @@ function parseDevice(value: unknown): DeviceRecord {
   const name = text(raw.name, "device name", 128);
   const type = deviceType(raw.type);
   const publicKey = publicKeyText(raw.publicKey);
+  const role = deviceRole(raw.role);
   const pairedAt = text(raw.pairedAt, "pairedAt", 64);
   const lastSeenAt = raw.lastSeenAt === undefined ? undefined : text(raw.lastSeenAt, "lastSeenAt", 64);
   const revokedAt = raw.revokedAt === undefined ? undefined : text(raw.revokedAt, "revokedAt", 64);
-  return Object.freeze({ deviceId, name, type, publicKey, pairedAt, ...(lastSeenAt === undefined ? {} : { lastSeenAt }), ...(revokedAt === undefined ? {} : { revokedAt }) });
+  return Object.freeze({ deviceId, name, type, publicKey, role, pairedAt, ...(lastSeenAt === undefined ? {} : { lastSeenAt }), ...(revokedAt === undefined ? {} : { revokedAt }) });
 }
 function parsePairing(value: unknown): PairingRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("pairing is malformed");
@@ -122,7 +130,7 @@ function ttl(value: number | undefined): number {
 export function createDevicesService(): DevicesService {
   let devices: readonly DeviceRecord[] = [];
   let pairings: readonly PairingRequest[] = [];
-  const challenges = new Map<string, { value: string; expiresAt: number }>();
+  const challenges = new Map<string, Map<string, number>>();
   let loaded = false;
   let mutationTail: Promise<void> = Promise.resolve();
   const serialize = <T>(operation: () => T | Promise<T>): Promise<T> => {
@@ -146,7 +154,7 @@ export function createDevicesService(): DevicesService {
       const device: DeviceDescriptor = Object.freeze({ deviceId: text(input.deviceId, "deviceId", 128), name: text(input.name, "device name", 128), type: deviceType(input.type), publicKey: publicKeyText(input.publicKey) });
       validKey(device.publicKey);
       if (devices.some((entry) => entry.deviceId === device.deviceId && entry.revokedAt === undefined)) throw new Error("device is already paired");
-      pairings = Object.freeze(pairings.filter((entry) => Date.parse(entry.expiresAt) > Date.now()));
+      pairings = Object.freeze(pairings.filter((entry) => Date.parse(entry.expiresAt) > Date.now() && entry.device.deviceId !== device.deviceId));
       if (pairings.length >= MAX_PENDING) throw new Error("too many pending pairings");
       const expiresAt = new Date(Date.now() + ttl(options.ttlMs)).toISOString();
       const pairing: PairingRequest = Object.freeze({ pairingId: randomUUID(), device, challenge: randomBytes(32).toString("base64url"), expiresAt });
@@ -154,13 +162,13 @@ export function createDevicesService(): DevicesService {
       await persist();
       return pairing;
     }),
-    approvePairing: (pairingId: string) => serialize(async () => {
+    approvePairing: (pairingId: string, options: { readonly role?: DeviceRole | undefined } = {}) => serialize(async () => {
       await load();
       const id = text(pairingId, "pairingId", 128);
       const pairing = pairings.find((entry) => entry.pairingId === id);
       if (!pairing || Date.parse(pairing.expiresAt) <= Date.now()) throw new Error("pairing request is missing or expired");
       if (devices.length >= MAX_DEVICES) throw new Error("device limit reached");
-      const record: DeviceRecord = Object.freeze({ ...pairing.device, pairedAt: new Date().toISOString() });
+      const record: DeviceRecord = Object.freeze({ ...pairing.device, role: deviceRole(options.role), pairedAt: new Date().toISOString() });
       devices = Object.freeze([...devices.filter((entry) => entry.deviceId !== record.deviceId), record]);
       pairings = Object.freeze(pairings.filter((entry) => entry.pairingId !== id));
       await persist();
@@ -173,22 +181,37 @@ export function createDevicesService(): DevicesService {
       const id = text(deviceId, "deviceId", 128);
       const device = devices.find((entry) => entry.deviceId === id && entry.revokedAt === undefined);
       if (!device) throw new Error("device is not paired");
+      const now = Date.now();
+      const outstanding = challenges.get(id) ?? new Map<string, number>();
+      for (const [value, expiresAt] of outstanding) {
+        if (expiresAt <= now) outstanding.delete(value);
+      }
+      if (outstanding.size >= MAX_OUTSTANDING_CHALLENGES_PER_DEVICE) throw new Error("too many outstanding device challenges");
       const value = randomBytes(32).toString("base64url");
-      const expiresAt = Date.now() + 2 * 60 * 1_000;
-      challenges.set(id, { value, expiresAt });
+      const expiresAt = now + AUTH_CHALLENGE_TTL_MS;
+      outstanding.set(value, expiresAt);
+      challenges.set(id, outstanding);
       return Object.freeze({ challenge: value, expiresAt: new Date(expiresAt).toISOString() });
     }),
-    authenticate: (deviceId: string, challenge: string, signature: string) => serialize(async () => {
+    authenticate: (deviceId: string, challenge: string, signature: string, signaturePayload?: string) => serialize(async () => {
       await load();
       const id = text(deviceId, "deviceId", 128);
-      const expected = challenges.get(id);
-      if (!expected || expected.expiresAt <= Date.now() || expected.value !== text(challenge, "challenge", 512)) throw new Error("device challenge is invalid or expired");
+      const challengeValue = text(challenge, "challenge", 512);
+      const outstanding = challenges.get(id);
+      if (!outstanding) throw new Error("device challenge is invalid or expired");
+      const expiresAt = outstanding.get(challengeValue);
+      if (expiresAt === undefined || expiresAt <= Date.now()) {
+        if (expiresAt !== undefined) outstanding.delete(challengeValue);
+        if (outstanding.size === 0) challenges.delete(id);
+        throw new Error("device challenge is invalid or expired");
+      }
       const device = devices.find((entry) => entry.deviceId === id && entry.revokedAt === undefined);
       if (!device) throw new Error("device is not paired");
       let valid = false;
-      try { valid = verify(null, Buffer.from(expected.value), createPublicKey(device.publicKey), Buffer.from(text(signature, "signature", 16_384), "base64url")); } catch { valid = false; }
+      try { valid = verify(null, Buffer.from(signaturePayload === undefined ? challengeValue : text(signaturePayload, "signature payload", 256_000)), createPublicKey(device.publicKey), Buffer.from(text(signature, "signature", 16_384), "base64url")); } catch { valid = false; }
       if (!valid) throw new Error("device signature is invalid");
-      challenges.delete(id);
+      outstanding.delete(challengeValue);
+      if (outstanding.size === 0) challenges.delete(id);
       const updated: DeviceRecord = Object.freeze({ ...device, lastSeenAt: new Date().toISOString() });
       devices = Object.freeze(devices.map((entry) => entry.deviceId === id ? updated : entry));
       await writeJson("devices.json", { schema: 1, devices });
@@ -216,7 +239,7 @@ const devicesPlugin: FridayPlugin = definePlugin({ id: "devices", provides: [DEV
     id: "devices.list", label: "List paired devices", description: "List paired client and Computer Node identities without exposing private keys.",
     parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
     permission: () => ({ id: "devices.list", effect: "global-operational-read", resource: "devices", network: false }),
-    execute: () => service.devices().map(({ deviceId, name, type, pairedAt, lastSeenAt, revokedAt }) => ({ deviceId, name, type, pairedAt, ...(lastSeenAt === undefined ? {} : { lastSeenAt }), ...(revokedAt === undefined ? {} : { revokedAt }) })),
+    execute: () => service.devices().map(({ deviceId, name, type, role, pairedAt, lastSeenAt, revokedAt }) => ({ deviceId, name, type, role, pairedAt, ...(lastSeenAt === undefined ? {} : { lastSeenAt }), ...(revokedAt === undefined ? {} : { revokedAt }) })),
   });
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
     id: "devices.pairings", label: "List pending pairings", description: "List pending device pairing requests so a trusted operator can approve one.",
@@ -226,9 +249,9 @@ const devicesPlugin: FridayPlugin = definePlugin({ id: "devices", provides: [DEV
   });
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
     id: "devices.approve-pairing", label: "Approve device pairing", description: "Approve one pending pairing request from a trusted operator context.",
-    parameters: Object.freeze({ type: "object", properties: { pairingId: { type: "string" } }, required: ["pairingId"], additionalProperties: false }),
+    parameters: Object.freeze({ type: "object", properties: { pairingId: { type: "string" }, role: { type: "string", enum: ["operator", "read-only"] } }, required: ["pairingId"], additionalProperties: false }),
     permission: () => ({ id: "devices.approve-pairing", effect: "system-write", resource: "devices:pairing", network: false }),
-    execute: async (input) => service.approvePairing(text(input.pairingId, "pairingId", 128)),
+    execute: async (input) => service.approvePairing(text(input.pairingId, "pairingId", 128), { role: deviceRole(input.role) }),
   });
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
     id: "devices.revoke", label: "Revoke device", description: "Revoke a paired device and invalidate future authentication challenges.",

@@ -2,15 +2,48 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { reportOperationalError, sanitizeOperationalError } from "@friday/operational-errors";
-import { decodeClientMessage, encodeClientMessage, type ClientAuthenticate, type ClientErrorMessage, type ClientSignalMessage, type ServerSignalMessage } from "@friday/client-protocol";
+import { clientRequestSigningPayload, clientWebSocketSigningPayload, decodeClientMessage, encodeClientMessage, type ClientAuthenticate, type ClientErrorMessage, type ClientSignalMessage, type ServerSignalMessage } from "@friday/client-protocol";
 import { WebSocket, WebSocketServer } from "ws";
 import type { DevicesService, DeviceType } from "../devices/contract.js";
 import type { ProjectPolicy, ProjectRepositoryMetadata, ProjectValidationCommands } from "../projects/contract.js";
 import type { ComputerService } from "../computer/contract.js";
+import { permissionEffectAccess, type PermissionEffect, type PermissionsService } from "../permissions/contract.js";
+import type { PermissionsTrustedService } from "../permissions/trusted-contract.js";
 import type { ClientConnection, ClientGatewayListenOptions, ClientGatewayResources, ClientGatewayServerStatus, ClientGatewayService } from "./contract.js";
 
 const MAX_HTTP_BODY_BYTES = 64 * 1024;
 const MAX_WEBSOCKET_PAYLOAD_BYTES = 2 * 1024 * 1024;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const CLIENT_READ_PATHS = new Set([
+  "/v1/events/replay",
+  "/v1/computer/status", "/v1/computer/nodes", "/v1/computer/screens", "/v1/computer/leases", "/v1/computer/observe",
+  "/v1/agent-profiles/list",
+  "/v1/conversations/list", "/v1/conversations/mentions/resolve", "/v1/conversations/reactions/list",
+  "/v1/projects/list", "/v1/projects/resolve-target", "/v1/projects/worktrees/inspect", "/v1/projects/worktrees/diff",
+  "/v1/session-jobs/list", "/v1/session-jobs/get",
+  "/v1/artifacts/storage", "/v1/artifacts/inspect",
+]);
+
+class FixedWindowLimiter {
+  readonly #entries = new Map<string, { readonly startedAt: number; readonly count: number }>();
+  constructor(readonly limit: number, readonly windowMs: number, readonly maxEntries = 2_048) {}
+  consume(key: string, now = Date.now()): boolean {
+    const current = this.#entries.get(key);
+    if (!current || now - current.startedAt >= this.windowMs) {
+      if (this.#entries.size >= this.maxEntries) {
+        for (const [entryKey, entry] of this.#entries) {
+          if (now - entry.startedAt >= this.windowMs) this.#entries.delete(entryKey);
+        }
+        if (this.#entries.size >= this.maxEntries) this.#entries.delete(this.#entries.keys().next().value as string);
+      }
+      this.#entries.set(key, { startedAt: now, count: 1 });
+      return true;
+    }
+    if (current.count >= this.limit) return false;
+    this.#entries.set(key, { startedAt: current.startedAt, count: current.count + 1 });
+    return true;
+  }
+}
 
 export interface ClientTransportController {
   readonly status: () => ClientGatewayServerStatus;
@@ -125,6 +158,20 @@ function pathOf(request: IncomingMessage): string {
   try { return new URL(request.url ?? "/", "http://localhost").pathname; } catch { return "/invalid"; }
 }
 
+function operationBody(body: Record<string, unknown>): Readonly<Record<string, unknown>> {
+  const { deviceId: _deviceId, challenge: _challenge, signature: _signature, ...operation } = body;
+  return operation;
+}
+
+function clientPermissionEffect(path: string): PermissionEffect {
+  return CLIENT_READ_PATHS.has(path) ? "private-read" : "system-write";
+}
+
+function clientPermissionActionId(path: string): string {
+  const suffix = path.replace(/^\/v1\//u, "").replaceAll("/", ".").replace(/[^A-Za-z0-9._:-]/gu, "-");
+  return `clients.gateway.${suffix || "request"}`;
+}
+
 function clientHumanOwner(deviceId: string): string {
   return `client:${deviceId}`;
 }
@@ -160,6 +207,8 @@ function sendSocketError(socket: WebSocket, requestId: string, error: unknown): 
 export async function startClientTransport(
   gateway: ClientGatewayService,
   devices: DevicesService,
+  permissions: PermissionsService,
+  permissionsTrusted: PermissionsTrustedService,
   options: ClientGatewayListenOptions = {},
   resources: ClientGatewayResources = {},
 ): Promise<ClientTransportController> {
@@ -171,6 +220,9 @@ export async function startClientTransport(
   if (!Number.isSafeInteger(authenticationTimeoutMs) || authenticationTimeoutMs < 1_000 || authenticationTimeoutMs > 60_000) throw new Error("authenticationTimeoutMs must be from 1000 to 60000");
 
   const socketsByDevice = new Map<string, Set<WebSocket>>();
+  const pairingLimiter = new FixedWindowLimiter(10, RATE_LIMIT_WINDOW_MS);
+  const challengeRemoteLimiter = new FixedWindowLimiter(120, RATE_LIMIT_WINDOW_MS);
+  const challengeDeviceLimiter = new FixedWindowLimiter(30, RATE_LIMIT_WINDOW_MS);
   const server = createServer(async (request, response) => {
     try {
       const path = pathOf(request);
@@ -179,6 +231,9 @@ export async function startClientTransport(
         return;
       }
       if (request.method !== "POST") { json(response, 404, { error: "not_found" }); return; }
+      const remote = request.socket.remoteAddress ?? "unknown";
+      if (path === "/v1/pairings" && !pairingLimiter.consume(remote)) { response.setHeader("retry-after", "60"); json(response, 429, { error: "rate_limited", message: "too many pairing requests" }); return; }
+      if (path === "/v1/auth/challenge" && !challengeRemoteLimiter.consume(remote)) { response.setHeader("retry-after", "60"); json(response, 429, { error: "rate_limited", message: "too many authentication challenge requests" }); return; }
       const body = await requestJson(request);
       if (path === "/v1/pairings") {
         const pairing = await devices.beginPairing({
@@ -191,19 +246,40 @@ export async function startClientTransport(
         return;
       }
       if (path === "/v1/auth/challenge") {
-        json(response, 200, await devices.issueChallenge(requiredText(body, "deviceId", 128)));
+        const deviceId = requiredText(body, "deviceId", 128);
+        if (!challengeDeviceLimiter.consume(deviceId)) { response.setHeader("retry-after", "60"); json(response, 429, { error: "rate_limited", message: "too many authentication challenge requests for this device" }); return; }
+        json(response, 200, await devices.issueChallenge(deviceId));
         return;
       }
+      const authenticatedConnection = async (): Promise<ClientConnection> => {
+        const deviceId = requiredText(body, "deviceId", 128);
+        const challenge = requiredText(body, "challenge", 512);
+        const signaturePayload = clientRequestSigningPayload({ challenge, deviceId, method: request.method ?? "POST", path, body: operationBody(body) });
+        const connection = await gateway.connect({ deviceId, challenge, signature: requiredText(body, "signature"), signaturePayload });
+        try {
+          const effect = clientPermissionEffect(path);
+          await permissionsTrusted.runAsChannel({ channel: "client", accountId: "gateway", senderId: deviceId }, () => permissions.authorize({
+            mode: "full",
+            workspace: process.cwd(),
+            access: permissionEffectAccess(effect),
+            action: { id: clientPermissionActionId(path), effect, resource: `client-gateway:${path}`, network: false },
+            reason: `Paired device request ${path}`,
+          }));
+          return connection;
+        } catch (error) {
+          connection.close();
+          throw error;
+        }
+      };
       if (path === "/v1/events/replay") {
-        const connection = await gateway.connect({ deviceId: requiredText(body, "deviceId", 128), challenge: requiredText(body, "challenge", 512), signature: requiredText(body, "signature") });
+        const connection = await authenticatedConnection();
         try { json(response, 200, { events: connection.resume(cursor(body.afterSequence)), latestSequence: gateway.latestSequence() }); }
         finally { connection.close(); }
         return;
       }
       const authenticatedDevice = async (): Promise<string> => {
-        const deviceId = requiredText(body, "deviceId", 128);
-        await gateway.connect({ deviceId, challenge: requiredText(body, "challenge", 512), signature: requiredText(body, "signature") }).then((connection) => { connection.close(); });
-        return deviceId;
+        const connection = await authenticatedConnection();
+        try { return connection.deviceId; } finally { connection.close(); }
       };
       if (path === "/v1/computer/status") {
         await authenticatedDevice();
@@ -543,11 +619,11 @@ export async function startClientTransport(
         const result = await resources.turnRuntime.submit({
           id: typeof body.turnId === "string" ? body.turnId : randomUUID(),
           principal: {
-            authority: "local",
+            authority: "channel",
             channel: "client",
-            accountId: deviceId,
+            accountId: "gateway",
             conversationId: conversation.id,
-            senderId: "operator",
+            senderId: deviceId,
             sharedConversationId: conversation.id,
             ...(typeof body.threadId === "string" ? { threadId: body.threadId } : {}),
             ...(profileId === undefined ? {} : { agentProfileId: profileId }),
@@ -641,7 +717,7 @@ export async function startClientTransport(
             if (message.kind !== "client.authenticate") { sendSocketError(websocket, message.requestId, new Error("authentication is required")); return; }
             const auth = message as ClientAuthenticate;
             try {
-              connection = await gateway.connect(auth);
+              connection = await gateway.connect({ ...auth, signaturePayload: clientWebSocketSigningPayload({ challenge: auth.challenge, deviceId: auth.deviceId, afterSequence: auth.afterSequence }) });
               authenticatedDeviceId = auth.deviceId;
               clearTimeout(timeout);
               const deviceSockets = socketsByDevice.get(auth.deviceId) ?? new Set<WebSocket>();

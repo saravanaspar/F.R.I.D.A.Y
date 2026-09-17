@@ -97,6 +97,8 @@ def find_frame(title: str, active_only: bool = False) -> Any:
     fuzzy = []
     active_exact = []
     active_fuzzy = []
+    background_exact = []
+    background_fuzzy = []
     needle = clean(title, 1024)
     for app_index in range(desktop.childCount):
         app = child_at(desktop, app_index)
@@ -107,27 +109,42 @@ def find_frame(title: str, active_only: bool = False) -> Any:
                 continue
             name = clean(getattr(frame, "name", ""), 1024)
             is_active = False
+            is_showing = False
             try:
                 state = frame.getState()
                 is_active = state_has(state, pyatspi.STATE_ACTIVE)
+                is_showing = state_has(state, pyatspi.STATE_SHOWING)
             except Exception:
                 is_active = False
+                is_showing = False
             if name == needle:
                 exact.append(frame)
                 if is_active:
                     active_exact.append(frame)
+                if not is_showing:
+                    background_exact.append(frame)
             elif needle and (needle in name or name in needle):
                 fuzzy.append(frame)
                 if is_active:
                     active_fuzzy.append(frame)
+                if not is_showing:
+                    background_fuzzy.append(frame)
     if active_only and active_exact:
         return active_exact[0]
     if active_only and active_fuzzy:
         return active_fuzzy[0]
     if active_only:
         raise RuntimeError("FRIDAY browser accessibility window is not active; retry after the owned browser window receives focus")
+    # Shared-background mode intentionally leaves the FRIDAY window on an
+    # inactive virtual desktop. If a Human window happens to have the same
+    # page title, prefer the non-showing frame so accessibility actions stay
+    # on the Agent desktop instead of touching the visible Human browser.
+    if background_exact:
+        return background_exact[0]
     if exact:
         return exact[0]
+    if background_fuzzy:
+        return background_fuzzy[0]
     if fuzzy:
         return fuzzy[0]
     raise RuntimeError("FRIDAY browser accessibility window is unavailable; enable desktop accessibility and retry")
@@ -175,13 +192,17 @@ def snapshot(args: argparse.Namespace) -> dict[str, Any]:
     elements: list[dict[str, Any]] = []
     visited = 0
     address_candidates: list[str] = []
+    media_state: dict[str, Any] | None = None
+    media_scan_limit = min(3000, max(512, maximum * 6))
 
     start = resolve_path(frame, args.near or "") if args.near else frame
     prefix = args.near or ""
 
     def visit(obj: Any, path: str, depth: int) -> None:
-        nonlocal visited
-        if len(elements) >= maximum or visited >= 3000 or depth > 18:
+        nonlocal visited, media_state
+        if visited >= 3000 or depth > 18:
+            return
+        if len(elements) >= maximum and ((media_state is not None and media_state.get("playing") is True) or visited >= media_scan_limit):
             return
         visited += 1
         role, name, attrs, protected, challenge = object_signature(obj)
@@ -191,9 +212,18 @@ def snapshot(args: argparse.Namespace) -> dict[str, Any]:
         actions_native = action_names(obj)
         editable = state_has(state, pyatspi.STATE_EDITABLE) if state is not None else False
         interactive = role in INTERACTIVE_ROLES or bool(actions_native) or editable
-        visible = state_has(state, pyatspi.STATE_VISIBLE) and state_has(state, pyatspi.STATE_SHOWING) if state is not None else box is not None
+        visible = (state_has(state, pyatspi.STATE_VISIBLE) and (state_has(state, pyatspi.STATE_SHOWING) or not args.active)) if state is not None else box is not None
         enabled = state_has(state, pyatspi.STATE_ENABLED) if state is not None else True
         focusable = state_has(state, pyatspi.STATE_FOCUSABLE) if state is not None else False
+        if visible and enabled and role in {"push button", "button", "toggle button"}:
+            control_name = name.strip()
+            media_context = " ".join([control_name, *attrs.values()])
+            pause_match = re.match(r"^pause(?:\s+video)?(?:\s*\([^)]*\)|$)", control_name, re.I)
+            media_hint = bool(re.search(r"\([^)]*\)", control_name) or re.search(r"\b(video|audio|media|player)\b", media_context, re.I))
+            if pause_match and media_hint:
+                media_state = {"elementCount": 1, "playing": True, "paused": False, "ended": False}
+            elif (media_state is None or media_state.get("playing") is not True) and re.match(r"^play(?:\s+video)?(?:\s*\([^)]*\)|$)", control_name, re.I):
+                media_state = {"elementCount": 1, "playing": False, "paused": True, "ended": False}
         candidate_text = clean(" ".join([name, value, " ".join(attrs.values())]), 2048).lower()
         include = box is not None and visible and (scope == "all" or interactive)
         if query and query not in candidate_text:
@@ -255,13 +285,14 @@ def snapshot(args: argparse.Namespace) -> dict[str, Any]:
                 visit(child_at(obj, index), child_path, depth + 1)
             except Exception:
                 continue
-            if len(elements) >= maximum or visited >= 3000:
+            if visited >= 3000 or (len(elements) >= maximum and ((media_state is not None and media_state.get("playing") is True) or visited >= media_scan_limit)):
                 break
 
     visit(start, prefix, 0)
     return {
         "frameTitle": clean(getattr(frame, "name", ""), 1024),
         "url": address_candidates[0] if address_candidates else None,
+        "media": media_state,
         "elements": elements,
     }
 

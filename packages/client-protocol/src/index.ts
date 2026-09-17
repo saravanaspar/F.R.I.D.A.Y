@@ -141,3 +141,69 @@ export function decodeClientMessage(raw: string): ClientProtocolMessage {
     ...(value.challenge === undefined ? {} : { challenge: value.challenge }),
   });
 }
+
+export interface ClientRequestSigningInput {
+  readonly challenge: string;
+  readonly deviceId: string;
+  readonly method: string;
+  readonly path: string;
+  readonly body?: unknown;
+}
+
+export interface ClientWebSocketSigningInput {
+  readonly challenge: string;
+  readonly deviceId: string;
+  readonly afterSequence?: number | undefined;
+}
+
+function canonicalJsonValue(value: unknown, inArray = false): string | undefined {
+  if (value === null) return "null";
+  if (typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number") return Number.isFinite(value) ? JSON.stringify(value) : "null";
+  if (typeof value === "undefined" || typeof value === "function" || typeof value === "symbol") {
+    return inArray ? "null" : undefined;
+  }
+  if (typeof value === "bigint") throw new TypeError("client authentication payload must be JSON-serializable");
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJsonValue(item, true) ?? "null").join(",")}]`;
+  }
+  if (typeof value === "object") {
+    const entries = Object.keys(value as Record<string, unknown>)
+      .sort()
+      .flatMap((key) => {
+        const encoded = canonicalJsonValue((value as Record<string, unknown>)[key], false);
+        return encoded === undefined ? [] : [`${JSON.stringify(key)}:${encoded}`];
+      });
+    return `{${entries.join(",")}}`;
+  }
+  throw new TypeError("client authentication payload must be JSON-serializable");
+}
+
+function canonicalJson(value: unknown): string {
+  return canonicalJsonValue(value, false) ?? "null";
+}
+
+export function clientRequestSigningPayload(input: ClientRequestSigningInput): string {
+  if (!input.challenge.trim() || !input.deviceId.trim() || !input.method.trim() || !input.path.startsWith("/")) {
+    throw new Error("client authentication signing input is malformed");
+  }
+  return `friday-client-auth-v1:${canonicalJson({
+    body: input.body ?? {},
+    challenge: input.challenge,
+    deviceId: input.deviceId,
+    method: input.method.toUpperCase(),
+    path: input.path,
+  })}`;
+}
+
+export function clientWebSocketSigningPayload(input: ClientWebSocketSigningInput): string {
+  const afterSequence = input.afterSequence ?? 0;
+  if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new Error("client websocket resume cursor is malformed");
+  return clientRequestSigningPayload({
+    challenge: input.challenge,
+    deviceId: input.deviceId,
+    method: "WEBSOCKET",
+    path: "/v1/stream",
+    body: { afterSequence },
+  });
+}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { filterDesktopCommands } from "../apps/desktop/src/commands.js";
 import { parseDesktopDeepLink } from "../apps/desktop/src/deep-links.js";
 import { createDesktopStorage } from "../apps/desktop/src/storage.js";
+import { clientRequestSigningPayload } from "@friday/client-protocol";
 import { createDesktopGatewayClient } from "../apps/desktop/src/gateway.js";
 
 describe("desktop client infrastructure", () => {
@@ -46,6 +47,16 @@ describe("desktop client infrastructure", () => {
     });
     await expect(client.health()).resolves.toMatchObject({ status: "ok", protocolVersion: 1 });
     await expect(client.request("/v1/conversations/list")).resolves.toEqual({ conversations: [] });
-    expect(JSON.parse(requests.at(-1)?.body ?? "{}")).toMatchObject({ deviceId: "desktop-1", challenge: "challenge-1", signature: "signature-for-challenge-1" });
+    expect(JSON.parse(requests.at(-1)?.body ?? "{}")).toMatchObject({
+      deviceId: "desktop-1",
+      challenge: "challenge-1",
+      signature: `signature-for-${clientRequestSigningPayload({
+        challenge: "challenge-1",
+        deviceId: "desktop-1",
+        method: "POST",
+        path: "/v1/conversations/list",
+        body: {},
+      })}`,
+    });
   });
 });

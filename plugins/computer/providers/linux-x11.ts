@@ -417,6 +417,7 @@ interface SharedAccessibilityElement {
 interface SharedAccessibilitySnapshot {
   readonly frameTitle?: unknown;
   readonly url?: unknown;
+  readonly media?: unknown;
   readonly elements?: unknown;
 }
 
@@ -1055,7 +1056,13 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
 
   async function cleanupExistingRun(request: import("../contract.js").ComputerRunProcessCleanupRequest): Promise<void> {
     if (!options.cleanupRunProcesses) throw new Error("Linux Computer process cleanup is unavailable without the shared Execution capability");
-    await options.cleanupRunProcesses(request);
+    let cleanupError: unknown;
+    try {
+      await options.cleanupRunProcesses(request);
+    } catch (error) {
+      cleanupError = error;
+    }
+    if (cleanupError !== undefined) throw cleanupError;
   }
 
   async function lifecycle(action: "restart" | "update", signal?: AbortSignal): Promise<void> {
@@ -1091,26 +1098,6 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
     const result = await runCommand("wmctrl", ["-d"], signal);
     if (!result.ok) throw new Error(sanitizeText(result.stderr || "wmctrl could not query virtual desktops", 512));
     return parseWmctrlDesktops(result.stdout, environment);
-  }
-
-  async function activeX11Desktop(signal?: AbortSignal): Promise<number> {
-    const result = await runCommand("wmctrl", ["-d"], signal);
-    if (!result.ok) throw new Error(sanitizeText(result.stderr || "wmctrl could not query the active desktop", 512));
-    for (const line of result.stdout.split(/\r?\n/u)) {
-      const match = line.match(/^\s*(\d+)\s+\*/u);
-      if (match) return Number(match[1]);
-    }
-    throw new Error("wmctrl did not report an active X11 desktop");
-  }
-
-  async function switchX11Desktop(desktopIndex: number, signal?: AbortSignal): Promise<void> {
-    const result = await runCommand("wmctrl", ["-s", String(desktopIndex)], signal);
-    if (!result.ok) throw new Error(sanitizeText(result.stderr || `wmctrl could not switch to desktop ${desktopIndex + 1}`, 512));
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      if (await activeX11Desktop(signal) === desktopIndex) return;
-      await delay(25, signal);
-    }
-    throw new Error(`X11 desktop ${desktopIndex + 1} did not become active`);
   }
 
   function sharedWindowMarker(screenId: string): string {
@@ -1183,56 +1170,32 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
       observationStateByScreen.delete(screenId);
       nextElementIdByScreen.delete(screenId);
     }
-    const previousDesktop = await activeX11Desktop(signal);
     const desiredDesktop = x11DesktopIndex(screenId, outputGeometry);
-    if (previousDesktop !== desiredDesktop) await switchX11Desktop(desiredDesktop, signal);
     const before = new Set(windows.map((window) => window.id));
     const launchToken = `FRIDAY-${randomUUID()}`;
     const launchPage = `data:text/html,<title>${launchToken}</title>`;
-    try {
-      await launchCommand(sharedBrowserBin, [...sharedBrowserArgs, "--new-window", launchPage]);
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        await delay(50, signal);
-        windows = await x11ClassWindows(signal);
-        const candidates = windows.filter((window) => !before.has(window.id)
-          && /(brave|chrome|chromium)/iu.test(window.className)
-          && window.title.includes(launchToken));
-        const window = candidates[candidates.length - 1];
-        if (!window) continue;
-        if (window.desktopIndex !== desiredDesktop) {
-          const moved = await runCommand("wmctrl", ["-ir", window.id, "-t", String(desiredDesktop)], signal);
-          if (!moved.ok) throw new Error(sanitizeText(moved.stderr || "wmctrl could not place the FRIDAY browser window on its Agent desktop", 512));
-        }
-        await markSharedWindow(screenId, window.id, signal);
-        targetByScreen.set(screenId, window.id);
-        return window.id;
+    await launchCommand(sharedBrowserBin, [...sharedBrowserArgs, "--new-window", launchPage]);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await delay(50, signal);
+      windows = await x11ClassWindows(signal);
+      const candidates = windows.filter((window) => !before.has(window.id)
+        && /(brave|chrome|chromium)/iu.test(window.className)
+        && window.title.includes(launchToken));
+      const window = candidates[candidates.length - 1];
+      if (!window) continue;
+      if (window.desktopIndex !== desiredDesktop) {
+        const moved = await runCommand("wmctrl", ["-ir", window.id, "-t", String(desiredDesktop)], signal);
+        if (!moved.ok) throw new Error(sanitizeText(moved.stderr || "wmctrl could not place the FRIDAY browser window on its Agent desktop", 512));
       }
-      throw new Error("The normal browser did not create a new FRIDAY window on the Agent desktop");
-    } finally {
-      if (previousDesktop !== desiredDesktop) {
-        await switchX11Desktop(previousDesktop, signal).catch((error: unknown) => {
-          reportOperationalError({ component: "computer", operation: "restore Human X11 desktop after shared browser creation", error, severity: "warn" });
-        });
-      }
+      await markSharedWindow(screenId, window.id, signal);
+      targetByScreen.set(screenId, window.id);
+      return window.id;
     }
+    throw new Error("The normal browser did not create a new FRIDAY window on the Agent desktop");
   }
 
-  async function withActiveSharedWindow<T>(screenId: string, windowId: string, operation: (title: string) => Promise<T>, signal?: AbortSignal): Promise<T> {
-    const desiredDesktop = x11DesktopIndex(screenId, outputGeometry);
-    const previousDesktop = await activeX11Desktop(signal);
-    if (previousDesktop !== desiredDesktop) await switchX11Desktop(desiredDesktop, signal);
-    try {
-      const activated = await runCommand("xdotool", ["windowactivate", "--sync", windowId], signal);
-      if (!activated.ok) throw new Error(sanitizeText(activated.stderr || "xdotool could not activate the FRIDAY browser window", 512));
-      const title = await sharedWindowTitle(windowId, signal);
-      return await operation(title);
-    } finally {
-      if (previousDesktop !== desiredDesktop) {
-        await switchX11Desktop(previousDesktop, signal).catch((error: unknown) => {
-          reportOperationalError({ component: "computer", operation: "restore Human X11 desktop after shared browser accessibility operation", error, severity: "warn" });
-        });
-      }
-    }
+  async function sharedWindowOperationTitle(windowId: string, signal?: AbortSignal): Promise<string> {
+    return sharedWindowTitle(windowId, signal);
   }
 
   async function atspiJson<T>(args: readonly string[], signal?: AbortSignal): Promise<T> {
@@ -1269,6 +1232,17 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
     const expected = x11DesktopIndex(screenId, outputGeometry);
     const window = await x11WindowForTarget(targetId, signal);
     return window?.desktopIndex === expected;
+  }
+
+  async function placeX11TargetOnDesktop(screenId: string, targetId: string, signal?: AbortSignal): Promise<boolean> {
+    const expected = x11DesktopIndex(screenId, outputGeometry);
+    const window = await x11WindowForTarget(targetId, signal);
+    if (!window) return false;
+    if (window.desktopIndex === expected) return true;
+    const moved = await runCommand("wmctrl", ["-ir", window.id, "-t", String(expected)], signal);
+    if (!moved.ok) throw new Error(sanitizeText(moved.stderr || `wmctrl could not place the FRIDAY browser window on desktop ${expected + 1}`, 512));
+    const placed = await x11WindowForTarget(targetId, signal);
+    return placed?.desktopIndex === expected;
   }
 
   async function browserTargets(signal?: AbortSignal): Promise<readonly LinuxCdpTarget[]> {
@@ -1588,28 +1562,16 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
       }
     }
 
-    const previousDesktop = await activeX11Desktop(signal);
     const desiredDesktop = x11DesktopIndex(screenId, outputGeometry);
-    if (previousDesktop !== desiredDesktop) await switchX11Desktop(desiredDesktop, signal);
-    let result: unknown;
-    try {
-      result = await cdp.browserCommand("Target.createTarget", {
-        url: "about:blank",
-        newWindow: true,
-        background: false,
-        left: geometry.x,
-        top: geometry.y,
-        width: Math.max(640, geometry.width),
-        height: Math.max(480, geometry.height),
-      }, signal);
-    } catch (error) {
-      if (previousDesktop !== desiredDesktop) {
-        await switchX11Desktop(previousDesktop, signal).catch((restoreError: unknown) => {
-          reportOperationalError({ component: "computer", operation: "restore Human X11 desktop after browser creation failure", error: restoreError, severity: "warn" });
-        });
-      }
-      throw error;
-    }
+    const result = await cdp.browserCommand("Target.createTarget", {
+      url: "about:blank",
+      newWindow: true,
+      background: true,
+      left: geometry.x,
+      top: geometry.y,
+      width: Math.max(640, geometry.width),
+      height: Math.max(480, geometry.height),
+    }, signal);
     if (!result || typeof result !== "object" || typeof (result as { targetId?: unknown }).targetId !== "string") {
       throw new Error("Chromium CDP did not return a target id");
     }
@@ -1619,32 +1581,16 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
       targets = await browserTargets(signal);
       if (targets.some((target) => target.id === targetId)) {
         await markOwnedTarget(screenId, targetId, signal);
-        {
-          let placed = false;
-          try {
-            placed = await x11TargetIsOnDesktop(screenId, targetId, signal);
-          } finally {
-            if (previousDesktop !== desiredDesktop) {
-              await switchX11Desktop(previousDesktop, signal).catch((error: unknown) => {
-                reportOperationalError({ component: "computer", operation: "restore Human X11 desktop after FRIDAY window creation", error, severity: "warn" });
-              });
-            }
-          }
-          if (!placed) {
-            await closeOwnedTarget(targetId, signal).catch((closeError: unknown) => {
-              reportOperationalError({ component: "computer", operation: "close misplaced X11 browser target", error: closeError, severity: "warn" });
-            });
-            throw new Error(`FRIDAY browser window was not created on X11 desktop ${desiredDesktop + 1}`);
-          }
+        const placed = await placeX11TargetOnDesktop(screenId, targetId, signal);
+        if (!placed) {
+          await closeOwnedTarget(targetId, signal).catch((closeError: unknown) => {
+            reportOperationalError({ component: "computer", operation: "close misplaced X11 browser target", error: closeError, severity: "warn" });
+          });
+          throw new Error(`FRIDAY browser window could not be placed on X11 desktop ${desiredDesktop + 1}`);
         }
         return targetId;
       }
       await delay(25, signal);
-    }
-    if (previousDesktop !== desiredDesktop) {
-      await switchX11Desktop(previousDesktop, signal).catch((restoreError: unknown) => {
-        reportOperationalError({ component: "computer", operation: "restore Human X11 desktop after browser readiness timeout", error: restoreError, severity: "warn" });
-      });
     }
     throw new Error("Chromium CDP target did not become ready");
   }
@@ -1961,6 +1907,36 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
     return Object.freeze({ elements: Object.freeze(elements), records, idsBySelector });
   }
 
+  function sharedAccessibilitySnapshotMediaState(value: unknown): ComputerBrowserTabSnapshot["media"] | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    if (!Number.isInteger(record.elementCount) || (record.elementCount as number) < 0) return undefined;
+    if (typeof record.playing !== "boolean" || typeof record.paused !== "boolean" || typeof record.ended !== "boolean") return undefined;
+    return Object.freeze({
+      elementCount: record.elementCount as number,
+      playing: record.playing,
+      paused: record.paused,
+      ended: record.ended,
+    });
+  }
+
+  function sharedAccessibilityMediaState(elements: readonly ComputerElement[]): ComputerBrowserTabSnapshot["media"] | undefined {
+    const controls = elements.filter((element) => {
+      const role = element.role.trim().toLowerCase();
+      return element.visible && element.enabled && (role === "button" || role === "push button" || role === "toggle button");
+    });
+    const pauseControl = controls.find((element) => {
+      const name = (element.name ?? "").trim();
+      const context = `${name} ${element.context ?? ""}`;
+      return /^pause(?:\s+video)?(?:\s*\([^)]*\)|$)/iu.test(name)
+        && (/\([^)]*\)/u.test(name) || /\b(video|audio|media|player)\b/iu.test(context));
+    });
+    if (pauseControl) return Object.freeze({ elementCount: 1, playing: true, paused: false, ended: false });
+    const playControl = controls.find((element) => /^play(?:\s+video)?(?:\s*\(|$)/iu.test((element.name ?? "").trim()));
+    if (playControl) return Object.freeze({ elementCount: 1, playing: false, paused: true, ended: false });
+    return undefined;
+  }
+
   async function observeSharedScreen(
     screenId: string,
     signal?: AbortSignal,
@@ -1973,19 +1949,27 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
     const requestKey = JSON.stringify({ scope: request.scope, query: request.query ?? "", nearSelector: nearSelector ?? "", maxElements: request.maxElements });
     const previous = observationStateByScreen.get(screenId);
     const observationId = `obs-${++observationSequence}`;
-    const snapshot = await withActiveSharedWindow(screenId, windowId, async (title) => atspiJson<SharedAccessibilitySnapshot>([
-      "snapshot", "--active", "--title", title,
+    const title = await sharedWindowOperationTitle(windowId, signal);
+    const snapshot = await atspiJson<SharedAccessibilitySnapshot>([
+      "snapshot", "--title", title,
       "--scope", request.scope ?? "interactive",
       "--max-elements", String(request.maxElements ?? 80),
       ...(request.query ? ["--query", request.query] : []),
       ...(nearPath !== undefined ? ["--near", nearPath] : []),
-    ], signal), signal);
+    ], signal);
     const structured = await sharedStructuredObservation(screenId, observationId, request, snapshot);
     const currentTitle = sanitizeTitle(typeof snapshot.frameTitle === "string" ? snapshot.frameTitle : await sharedWindowTitle(windowId, signal));
     const currentUrl = typeof snapshot.url === "string" && snapshot.url.trim()
       ? sanitizeUrl(snapshot.url)
       : previous?.observation.url ?? "about:blank";
-    const tabs = Object.freeze([Object.freeze({ id: `x11:${windowId}`, title: currentTitle, url: currentUrl, active: true })]);
+    const media = sharedAccessibilitySnapshotMediaState(snapshot.media) ?? sharedAccessibilityMediaState(structured.elements);
+    const tabs = Object.freeze([Object.freeze({
+      id: `x11:${windowId}`,
+      title: currentTitle,
+      url: currentUrl,
+      active: true,
+      ...(media === undefined ? {} : { media }),
+    })]);
     const summary = sanitizeText(structured.elements.map((element) => `${element.role} ${element.name ?? ""} ${element.context ?? ""}`).join(" | "), MAX_DOM_SUMMARY);
     const delta = observationDelta(previous, requestKey, structured.elements, structured.records);
     const observation = Object.freeze({
@@ -2230,16 +2214,14 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
     let actionConfidence: number | undefined;
     if (action.kind === "navigate") {
       const url = safeNavigationUrl(action.url);
-      await withActiveSharedWindow(request.screenId, windowId, async () => {
-        for (const [command, args] of [
-          ["xdotool", ["key", "--clearmodifiers", "ctrl+l"]],
-          ["xdotool", ["type", "--clearmodifiers", "--delay", "1", "--", url]],
-          ["xdotool", ["key", "--clearmodifiers", "Return"]],
-        ] as const) {
-          const result = await runCommand(command, args, request.signal);
-          if (!result.ok) throw new Error(sanitizeText(result.stderr || `xdotool failed during ${action.kind}`, 512));
-        }
-      }, request.signal);
+      for (const [command, args] of [
+        ["xdotool", ["key", "--window", windowId, "--clearmodifiers", "ctrl+l"]],
+        ["xdotool", ["type", "--window", windowId, "--clearmodifiers", "--delay", "1", "--", url]],
+        ["xdotool", ["key", "--window", windowId, "--clearmodifiers", "Return"]],
+      ] as const) {
+        const result = await runCommand(command, args, request.signal);
+        if (!result.ok) throw new Error(sanitizeText(result.stderr || `xdotool failed during ${action.kind}`, 512));
+      }
       await delay(BROWSER_INPUT_SETTLE_MS, request.signal);
     } else if (action.kind === "click" || action.kind === "type") {
       const semantic = currentSemanticRecord(request.screenId, action.target);
@@ -2252,11 +2234,11 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
       const gated = gatedSemanticAction(request.screenId, semantic, actionConfidence, action.kind === "click", action.visualProbeToken, "accessibility");
       if (gated) return gated;
       const path = semantic.record.selector.slice("atspi:".length);
-      await withActiveSharedWindow(request.screenId, windowId, async (title) => {
-        await atspiJson(["action", "--active", "--title", title, "--path", path, "--kind", action.kind, ...(action.kind === "type" ? ["--text", action.text] : [])], request.signal);
-      }, request.signal);
+      const title = await sharedWindowOperationTitle(windowId, request.signal);
+      await atspiJson(["action", "--title", title, "--path", path, "--kind", action.kind, ...(action.kind === "type" ? ["--text", action.text] : [])], request.signal);
       await delay(BROWSER_INPUT_SETTLE_MS, request.signal);
     } else if (action.kind === "press") {
+      const key = xdotoolKeyName(action.key);
       if (action.target) {
         const semantic = currentSemanticRecord(request.screenId, action.target);
         if (!semantic) throw new Error("shared-browser press targets require a current semantic element ref");
@@ -2265,18 +2247,18 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
         const activationKey = /^(enter|numpadenter|space|spacebar)$/i.test(action.key.trim());
         const gated = gatedSemanticAction(request.screenId, semantic, actionConfidence, activationKey, action.visualProbeToken, "accessibility");
         if (gated) return gated;
-        if (!semantic.record.selector.startsWith("atspi:")) throw new Error("shared-browser semantic target is invalid");
-        const path = semantic.record.selector.slice("atspi:".length);
-        await withActiveSharedWindow(request.screenId, windowId, async (title) => {
-          await atspiJson(["action", "--active", "--title", title, "--path", path, "--kind", "focus"], request.signal);
-          const keyResult = await runCommand("xdotool", ["key", "--clearmodifiers", xdotoolKeyName(action.key)], request.signal);
+        if (activationKey && semantic.record.element.actions.includes("click")) {
+          if (!semantic.record.selector.startsWith("atspi:")) throw new Error("shared-browser semantic target is invalid");
+          const path = semantic.record.selector.slice("atspi:".length);
+          const title = await sharedWindowOperationTitle(windowId, request.signal);
+          await atspiJson(["action", "--title", title, "--path", path, "--kind", "click"], request.signal);
+        } else {
+          const keyResult = await runCommand("xdotool", ["key", "--window", windowId, "--clearmodifiers", key], request.signal);
           if (!keyResult.ok) throw new Error(sanitizeText(keyResult.stderr || "xdotool could not send browser key", 512));
-        }, request.signal);
+        }
       } else {
-        await withActiveSharedWindow(request.screenId, windowId, async () => {
-          const keyResult = await runCommand("xdotool", ["key", "--clearmodifiers", xdotoolKeyName(action.key)], request.signal);
-          if (!keyResult.ok) throw new Error(sanitizeText(keyResult.stderr || "xdotool could not send browser key", 512));
-        }, request.signal);
+        const keyResult = await runCommand("xdotool", ["key", "--window", windowId, "--clearmodifiers", key], request.signal);
+        if (!keyResult.ok) throw new Error(sanitizeText(keyResult.stderr || "xdotool could not send browser key", 512));
       }
       await delay(BROWSER_INPUT_SETTLE_MS, request.signal);
     } else if (action.kind === "scroll") {
@@ -2288,17 +2270,15 @@ export function createLinuxX11ComputerAdapter(options: LinuxX11ComputerAdapterOp
         const gated = gatedSemanticAction(request.screenId, semantic, actionConfidence, false, action.visualProbeToken, "accessibility");
         if (gated) return gated;
       }
-      await withActiveSharedWindow(request.screenId, windowId, async () => {
-        const vertical = Math.max(-10, Math.min(10, Math.round(action.deltaY / 100)));
-        const horizontal = Math.max(-10, Math.min(10, Math.round((action.deltaX ?? 0) / 100)));
-        const clicks: string[] = [];
-        for (let index = 0; index < Math.abs(vertical); index += 1) clicks.push(vertical > 0 ? "5" : "4");
-        for (let index = 0; index < Math.abs(horizontal); index += 1) clicks.push(horizontal > 0 ? "7" : "6");
-        for (const button of clicks) {
-          const result = await runCommand("xdotool", ["click", button], request.signal);
-          if (!result.ok) throw new Error(sanitizeText(result.stderr || "xdotool could not scroll browser window", 512));
-        }
-      }, request.signal);
+      const vertical = Math.max(-10, Math.min(10, Math.round(action.deltaY / 100)));
+      const horizontal = Math.max(-10, Math.min(10, Math.round((action.deltaX ?? 0) / 100)));
+      const clicks: string[] = [];
+      for (let index = 0; index < Math.abs(vertical); index += 1) clicks.push(vertical > 0 ? "5" : "4");
+      for (let index = 0; index < Math.abs(horizontal); index += 1) clicks.push(horizontal > 0 ? "7" : "6");
+      for (const button of clicks) {
+        const result = await runCommand("xdotool", ["click", "--window", windowId, button], request.signal);
+        if (!result.ok) throw new Error(sanitizeText(result.stderr || "xdotool could not scroll browser window", 512));
+      }
       await delay(BROWSER_INPUT_SETTLE_MS, request.signal);
     }
     const observation = await observeSharedScreen(request.screenId, request.signal, beforeState?.request);

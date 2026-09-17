@@ -30,11 +30,14 @@ export interface ClientConnectInput {
   readonly deviceId: string;
   readonly challenge: string;
   readonly signature: string;
+  /** Exact host-defined operation payload covered by the device signature. Network transports must set this. */
+  readonly signaturePayload?: string | undefined;
 }
 
 export interface ClientConnection {
   readonly connectionId: string;
   readonly deviceId: string;
+  readonly role: "read-only" | "operator";
   readonly connectedAt: string;
   resume(afterSequence?: number): readonly ClientEventMessage[];
   subscribe(listener: (message: ClientEventMessage) => void): () => void;
@@ -43,7 +46,7 @@ export interface ClientConnection {
 
 export interface ClientGatewayService {
   connect(input: ClientConnectInput): Promise<ClientConnection>;
-  connections(): readonly Pick<ClientConnection, "connectionId" | "deviceId" | "connectedAt">[];
+  connections(): readonly Pick<ClientConnection, "connectionId" | "deviceId" | "role" | "connectedAt">[];
   latestSequence(): number;
   start(options?: ClientGatewayListenOptions): Promise<ClientGatewayServerStatus>;
   stop(): Promise<void>;

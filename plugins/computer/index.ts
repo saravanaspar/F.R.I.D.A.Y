@@ -338,15 +338,18 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
   const taskApprovals = new Map<string, number>();
   const taskPresentations = new Map<string, number>();
   const pendingHighImpactTargets = new Map<string, number>();
+  const pendingVisualProbeTargets = new Map<string, Readonly<{ ref: string; expiresAt: number }>>();
 
   const pruneApprovalState = (): void => {
     const now = Date.now();
     for (const [key, expiresAt] of taskApprovals) if (expiresAt <= now) taskApprovals.delete(key);
     for (const [key, expiresAt] of taskPresentations) if (expiresAt <= now) taskPresentations.delete(key);
     for (const [key, expiresAt] of pendingHighImpactTargets) if (expiresAt <= now) pendingHighImpactTargets.delete(key);
+    for (const [key, pending] of pendingVisualProbeTargets) if (pending.expiresAt <= now) pendingVisualProbeTargets.delete(key);
     while (taskApprovals.size > MAX_COMPUTER_TASK_APPROVALS) taskApprovals.delete(taskApprovals.keys().next().value!);
     while (taskPresentations.size > MAX_COMPUTER_TASK_APPROVALS) taskPresentations.delete(taskPresentations.keys().next().value!);
     while (pendingHighImpactTargets.size > MAX_COMPUTER_TASK_APPROVALS * 4) pendingHighImpactTargets.delete(pendingHighImpactTargets.keys().next().value!);
+    while (pendingVisualProbeTargets.size > MAX_COMPUTER_TASK_APPROVALS * 4) pendingVisualProbeTargets.delete(pendingVisualProbeTargets.keys().next().value!);
   };
 
   const taskKey = (context: AgentToolExecutionContext, binding: ComputerExecutionBinding): string =>
@@ -354,6 +357,22 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
 
   const highImpactKey = (context: AgentToolExecutionContext, binding: ComputerExecutionBinding, ref: string): string =>
     `${taskKey(context, binding)}|high-impact|${ref}`;
+
+  const clearPendingVisualProbe = (context: AgentToolExecutionContext, binding: ComputerExecutionBinding): void => {
+    pendingVisualProbeTargets.delete(taskKey(context, binding));
+  };
+
+  const enforceVisualProbeTransition = (
+    context: AgentToolExecutionContext,
+    binding: ComputerExecutionBinding,
+    action: ComputerBrowserAction,
+  ): void => {
+    pruneApprovalState();
+    const pending = pendingVisualProbeTargets.get(taskKey(context, binding));
+    if (!pending) return;
+    if ("target" in action && action.target === pending.ref && "visualProbeToken" in action && Boolean(action.visualProbeToken)) return;
+    throw new Error(`VISUAL_PROBE_REQUIRED: call computer_visual_probe for ${pending.ref} and retry that target with its probeToken, or call computer_observe to obtain a fresh observation before another computer_browser action`);
+  };
 
   const authorizeComputerTask = async (context: AgentToolExecutionContext, binding: ComputerExecutionBinding, signal?: AbortSignal): Promise<void> => {
     pruneApprovalState();
@@ -384,7 +403,7 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
         kind: "status",
         message: sharedView.viewOnly
           ? `Shared Agent Screen ${sharedView.workspaceName} is ready on ${sharedView.screenId}. Switch to that desktop/workspace to watch FRIDAY.`
-          : `FRIDAY native desktop ${sharedView.workspaceName} is ready on ${sharedView.screenId}. It is a real host virtual desktop; switch to it whenever you want to watch or interact.`,
+          : `FRIDAY native desktop ${sharedView.workspaceName} is ready on ${sharedView.screenId}. Computer work targets that Agent desktop in the background without switching the Human desktop; if a background control cannot be performed safely, the action fails instead of stealing focus.`,
         jobStatus: "running",
         notify: false,
       });
@@ -460,12 +479,13 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
       const binding = currentComputerBinding(service, context);
       await authorizeComputerTask(context!, binding, signal);
       try {
-        return {
-          output: agentObservationOutput(await service.observeScreen(binding.screenLeaseId, binding.ownerId, binding.generation, signal, observationRequest(input))),
-        };
+        const observation = await service.observeScreen(binding.screenLeaseId, binding.ownerId, binding.generation, signal, observationRequest(input));
+        clearPendingVisualProbe(context!, binding);
+        return { output: agentObservationOutput(observation) };
       } catch (error) {
         const resume = await resumeAgentComputerAfterTakeover(service, binding, error, signal);
         if (!resume.resumedAfterTakeover) throw error;
+        clearPendingVisualProbe(context!, binding);
         return { output: resumedAfterHumanTakeover(resume) };
       }
     },
@@ -498,6 +518,7 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
       const initialBinding = currentComputerBinding(service, context);
       const action = browserAction(input);
       await authorizeComputerTask(context!, initialBinding, signal);
+      enforceVisualProbeTransition(context!, initialBinding, action);
       await authorizeHighImpactBrowserAction(context!, initialBinding, action);
       const binding = await waitForAgentBrowserAdmission(service, context!, initialBinding, signal);
       if (binding.generation !== initialBinding.generation) {
@@ -507,10 +528,21 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
           initialBinding.generation,
           signal,
         );
-        if (resume.resumedAfterTakeover) return { output: resumedAfterHumanTakeover(resume) };
+        if (resume.resumedAfterTakeover) {
+          clearPendingVisualProbe(context!, initialBinding);
+          return { output: resumedAfterHumanTakeover(resume) };
+        }
       }
       try {
         const result = await service.runBrowserAction(binding.screenLeaseId, binding.ownerId, binding.generation, action, signal);
+        if (result.visualProbeRequired) {
+          pendingVisualProbeTargets.set(taskKey(context!, initialBinding), Object.freeze({
+            ref: result.visualProbeRequired.ref,
+            expiresAt: Date.now() + COMPUTER_TASK_APPROVAL_TTL_MS,
+          }));
+        } else {
+          clearPendingVisualProbe(context!, initialBinding);
+        }
         if (result.visualProbeRequired?.reason === "high-impact-action") {
           pendingHighImpactTargets.set(
             highImpactKey(context!, initialBinding, result.visualProbeRequired.ref),
@@ -521,6 +553,7 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
       } catch (error) {
         const resume = await resumeAgentComputerAfterTakeover(service, initialBinding, error, signal);
         if (!resume.resumedAfterTakeover) throw error;
+        clearPendingVisualProbe(context!, initialBinding);
         return { output: resumedAfterHumanTakeover(resume) };
       }
     },
@@ -571,7 +604,10 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
           initialBinding.generation,
           signal,
         );
-        if (resume.resumedAfterTakeover) return { output: resumedAfterHumanTakeover(resume) };
+        if (resume.resumedAfterTakeover) {
+          clearPendingVisualProbe(context!, initialBinding);
+          return { output: resumedAfterHumanTakeover(resume) };
+        }
       }
       try {
         const result = await service.visualProbe(binding.screenLeaseId, binding.ownerId, binding.generation, request, signal);
@@ -586,6 +622,7 @@ function registerAgentComputerTools(ctx: PluginContext, service: ComputerService
       } catch (error) {
         const resume = await resumeAgentComputerAfterTakeover(service, initialBinding, error, signal);
         if (!resume.resumedAfterTakeover) throw error;
+        clearPendingVisualProbe(context!, initialBinding);
         return { output: resumedAfterHumanTakeover(resume) };
       }
     },
