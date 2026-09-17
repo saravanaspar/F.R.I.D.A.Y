@@ -129,12 +129,14 @@ async function main(): Promise<void> {
     requireCondition(address && typeof address !== "string", "Fixture server did not bind a TCP address");
     const baseUrl = `http://127.0.0.1:${address.port}`;
     const run = async (action: ComputerBrowserAction): Promise<ComputerObservation> => {
+      process.stderr.write(`STEP start: ${JSON.stringify(action)}\n`);
       const result = await adapter.runBrowserAction!({
         screenId: screen.id,
         controlGeneration: 1,
         action,
         automationOrder: ["cdp"],
       });
+      process.stderr.write(`STEP done: ${action.kind}\n`);
       requireCondition(result.mode === "cdp", `Expected CDP mode, got ${result.mode}`);
       return result.observation;
     };
@@ -153,7 +155,7 @@ async function main(): Promise<void> {
     observation = await run({ kind: "type", target: "#safe-input", text: SAFE_TEXT, sensitive: false });
     requireCondition(observation.domSummary?.includes(`typed=${SAFE_TEXT}`) === true, "CDP text input did not reach the focused live element");
 
-    observation = await run({ kind: "press", key: "Enter" });
+    observation = await run({ kind: "press", key: "Enter", target: "#safe-input" });
     requireCondition(observation.domSummary?.includes("key=Enter") === true, "CDP key press did not reach the focused live element");
 
     let protectedRejected = false;
@@ -176,6 +178,7 @@ async function main(): Promise<void> {
     process.stdout.write(`SCREEN=${screen.id}\n`);
     process.stdout.write(`CDP=${environment.FRIDAY_COMPUTER_CDP_URL?.trim() || "http://127.0.0.1:9222/"}\n`);
   } finally {
+    server.closeAllConnections?.();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 }
