@@ -149,6 +149,7 @@ export function createDevicesService(): DevicesService {
     await writeJson("pairings.json", { schema: 1, pairings });
   }
   const service: DevicesService = Object.freeze({
+    initialize: () => serialize(load),
     beginPairing: (input: DeviceDescriptor, options: { readonly ttlMs?: number | undefined } = {}) => serialize(async () => {
       await load();
       const device: DeviceDescriptor = Object.freeze({ deviceId: text(input.deviceId, "deviceId", 128), name: text(input.name, "device name", 128), type: deviceType(input.type), publicKey: publicKeyText(input.publicKey) });

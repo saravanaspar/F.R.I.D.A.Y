@@ -8,8 +8,11 @@ import { FRIDAY_VERSION } from "./version.js";
 import { runDoctor } from "./doctor.js";
 import { runComputerBrowserSupervisor } from "./computer-browser-supervisor.js";
 import { readBootstrapConfig } from "./bootstrap.js";
-import { discoverPlugins, installPlugin, setPluginEnabled } from "./plugin-packages.js";
+import { discoverPlugins, installPlugin, setPluginEnabled } from "../packages/plugin-packages.js";
 import { resolve } from "node:path";
+import { join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { pluginHome } from "../packages/plugin-packages.js";
 
 
 
@@ -28,6 +31,7 @@ function help(): void {
     "  friday plugin install DIR   Install a local plugin package (requires restart)",
     "  friday plugin enable ID     Enable a plugin (requires restart)",
     "  friday plugin disable ID    Disable a plugin (requires restart)",
+    "  friday device approve ID    Approve the first desktop pairing on this host",
     "  friday --version",
     "",
     maintenanceHelp(),
@@ -60,6 +64,20 @@ async function runPluginCli(args: readonly string[]): Promise<void> {
   throw new Error("Usage: friday plugin list | install DIR | enable ID | disable ID");
 }
 
+async function approveFirstDevice(args: readonly string[]): Promise<void> {
+  if (args.length !== 2 || args[0] !== "approve" || !/^[A-Za-z0-9-]{1,128}$/u.test(args[1] ?? "")) throw new Error("Usage: friday device approve PAIRING_ID");
+  const file = resolve(process.env.FRIDAY_PAIRING_BOOTSTRAP_FILE?.trim() || join(pluginHome(), "gateway-pairing-bootstrap.json"));
+  const raw = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+  if (raw.version !== 1 || !Number.isSafeInteger(raw.port) || typeof raw.port !== "number" || raw.port < 1 || raw.port > 65_535 || typeof raw.token !== "string") throw new Error("Gateway pairing bootstrap file is invalid");
+  const response = await fetch(`http://127.0.0.1:${raw.port}/v1/pairings/bootstrap-approve`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ pairingId: args[1], token: raw.token }),
+  });
+  if (!response.ok) throw new Error(`Pairing approval failed (${response.status}). Check the pairing ID and that no device is already paired.`);
+  const approved = await response.json() as { deviceId: string };
+  process.stdout.write(`Approved first device ${approved.deviceId}. Reconnect from Desktop.\n`);
+}
+
 export async function runFridayCli(args: readonly string[] = process.argv.slice(2)): Promise<void> {
   const [command, ...rest] = args;
   if (command === undefined || command === "run") return runRuntime();
@@ -69,6 +87,7 @@ export async function runFridayCli(args: readonly string[] = process.argv.slice(
   }
   if (command === "backup") return runBackupCli(rest);
   if (command === "plugin") return runPluginCli(rest);
+  if (command === "device") return approveFirstDevice(rest);
   if (command === "doctor") { process.exitCode = await runDoctor(rest); return; }
   if (command === "vault" && rest[0] === "recovery") return runVaultRecoveryCli(rest.slice(1));
   if (command === "setup") return runSetupCli(rest);

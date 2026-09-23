@@ -16,6 +16,7 @@ export interface DesktopGatewayStatus {
 
 export interface DesktopGatewayClient {
   health(): Promise<{ readonly status: string; readonly protocolVersion: number }>;
+  beginPairing(device: { readonly deviceId: string; readonly name: string; readonly publicKey: string }): Promise<{ readonly pairingId: string; readonly expiresAt: string }>;
   request<T>(path: string, body?: Readonly<Record<string, unknown>>): Promise<T>;
   stream(afterSequence: number, onEvent: (event: DesktopEvent) => void, onStatus?: (status: DesktopGatewayStatus) => void): () => void;
 }
@@ -58,6 +59,12 @@ export function createDesktopGatewayClient(options: DesktopGatewayOptions): Desk
       const response = await fetcher(`${baseUrl}/health`, { method: "GET" });
       if (!response.ok) throw new Error(`gateway health failed (${response.status})`);
       return await response.json() as { readonly status: string; readonly protocolVersion: number };
+    },
+    async beginPairing(device) {
+      const response = await fetcher(`${baseUrl}/v1/pairings`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...device, type: "desktop" }) });
+      const payload: unknown = await response.json();
+      if (!response.ok || !payload || typeof payload !== "object" || typeof (payload as Record<string, unknown>).pairingId !== "string") throw new Error("gateway pairing request failed");
+      return payload as { readonly pairingId: string; readonly expiresAt: string };
     },
     async request<T>(path: string, body: Readonly<Record<string, unknown>> = {}) {
       if (!path.startsWith("/")) throw new Error("gateway request path must be absolute");

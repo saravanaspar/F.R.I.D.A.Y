@@ -27,7 +27,7 @@ friday plugin enable example.plugin
 
 Packages install in `FRIDAY_HOME/plugins/<id>/` (`~/.friday/plugins` by default). Built-in plugins appear as `built-in` in `friday plugin list`. Enablement is saved in `FRIDAY_HOME/plugin-state.json` and applied on the next restart. Dependency validation by the kernel is fail-closed: disabling a provider required by an enabled plugin prevents startup. The `capabilities` kernel cannot be disabled. Existing explicit source config entries still load as before.
 
-**Trust boundary:** this initial package loader runs installed code in the FRIDAY process with the host user's privileges. Only install locally reviewed packages. Isolated plugin hosts, signatures, package upgrades/rollback, an authenticated gateway management API, and Desktop controls are future work; the CLI does not claim to provide these protections. The bundled release still contains the built-in plugins for compatibility, while packages are attached from the installation directory at runtime.
+**Trust boundary:** this initial package loader runs installed code in the FRIDAY process with the host user's privileges. Only install locally reviewed packages. Isolated plugin hosts, signatures, and package upgrades/rollback are future work. The paired Desktop Plugins page uses the authenticated Gateway to list and toggle installed packages; changes apply on restart. The bundled release still contains the built-in plugins for compatibility, while packages are attached from the installation directory at runtime.
 
 ## 1. Start with a contract
 

@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { AddressInfo } from "node:net";
 import { reportOperationalError, sanitizeOperationalError } from "@friday/operational-errors";
 import { clientRequestSigningPayload, clientWebSocketSigningPayload, decodeClientMessage, encodeClientMessage, type ClientAuthenticate, type ClientErrorMessage, type ClientSignalMessage, type ServerSignalMessage } from "@friday/client-protocol";
@@ -22,6 +24,7 @@ const CLIENT_READ_PATHS = new Set([
   "/v1/projects/list", "/v1/projects/resolve-target", "/v1/projects/worktrees/inspect", "/v1/projects/worktrees/diff",
   "/v1/session-jobs/list", "/v1/session-jobs/get",
   "/v1/artifacts/storage", "/v1/artifacts/inspect",
+  "/v1/plugins/list",
 ]);
 
 class FixedWindowLimiter {
@@ -158,6 +161,34 @@ function pathOf(request: IncomingMessage): string {
   try { return new URL(request.url ?? "/", "http://localhost").pathname; } catch { return "/invalid"; }
 }
 
+function desktopOrigin(value: string | undefined): string | undefined {
+  if (value === "null") return value; // Electron's file:// renderer has an opaque origin.
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]")) return url.origin;
+  } catch { /* invalid origins never receive CORS permission */ }
+  return undefined;
+}
+
+async function localBootstrap(port: number): Promise<{ readonly token: string; readonly close: () => Promise<void> } | undefined> {
+  const file = process.env.FRIDAY_PAIRING_BOOTSTRAP_FILE?.trim();
+  if (!file) return undefined;
+  const token = randomBytes(32).toString("base64url");
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, JSON.stringify({ version: 1, port, token }), { flag: "wx", mode: 0o600 });
+    await rename(temporary, file);
+  } finally { await rm(temporary, { force: true }); }
+  return { token, close: async () => {
+    try {
+      const current = JSON.parse(await readFile(file, "utf8")) as { token?: string };
+      if (current.token === token) await rm(file, { force: true });
+    } catch { /* a removed or replaced token file belongs to another process */ }
+  } };
+}
+
 function operationBody(body: Record<string, unknown>): Readonly<Record<string, unknown>> {
   const { deviceId: _deviceId, challenge: _challenge, signature: _signature, ...operation } = body;
   return operation;
@@ -218,14 +249,27 @@ export async function startClientTransport(
   if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) throw new Error("client gateway port must be from 0 to 65535");
   const authenticationTimeoutMs = options.authenticationTimeoutMs ?? 10_000;
   if (!Number.isSafeInteger(authenticationTimeoutMs) || authenticationTimeoutMs < 1_000 || authenticationTimeoutMs > 60_000) throw new Error("authenticationTimeoutMs must be from 1000 to 60000");
+  await devices.initialize();
 
   const socketsByDevice = new Map<string, Set<WebSocket>>();
   const pairingLimiter = new FixedWindowLimiter(10, RATE_LIMIT_WINDOW_MS);
   const challengeRemoteLimiter = new FixedWindowLimiter(120, RATE_LIMIT_WINDOW_MS);
   const challengeDeviceLimiter = new FixedWindowLimiter(30, RATE_LIMIT_WINDOW_MS);
+  let bootstrap: Awaited<ReturnType<typeof localBootstrap>>;
   const server = createServer(async (request, response) => {
     try {
       const path = pathOf(request);
+      const origin = desktopOrigin(request.headers.origin);
+      if (origin) {
+        response.setHeader("access-control-allow-origin", origin);
+        response.setHeader("vary", "Origin");
+      }
+      if (request.method === "OPTIONS") {
+        if (!origin) { json(response, 403, { error: "origin_not_allowed" }); return; }
+        response.writeHead(204, { "access-control-allow-methods": "GET, POST", "access-control-allow-headers": "content-type", "access-control-max-age": "600" });
+        response.end();
+        return;
+      }
       if (request.method === "GET" && path === "/health") {
         json(response, 200, { status: "ok", protocolVersion: 1 });
         return;
@@ -233,8 +277,19 @@ export async function startClientTransport(
       if (request.method !== "POST") { json(response, 404, { error: "not_found" }); return; }
       const remote = request.socket.remoteAddress ?? "unknown";
       if (path === "/v1/pairings" && !pairingLimiter.consume(remote)) { response.setHeader("retry-after", "60"); json(response, 429, { error: "rate_limited", message: "too many pairing requests" }); return; }
+      if (path === "/v1/pairings/bootstrap-approve" && !pairingLimiter.consume(remote)) { response.setHeader("retry-after", "60"); json(response, 429, { error: "rate_limited" }); return; }
       if (path === "/v1/auth/challenge" && !challengeRemoteLimiter.consume(remote)) { response.setHeader("retry-after", "60"); json(response, 429, { error: "rate_limited", message: "too many authentication challenge requests" }); return; }
       const body = await requestJson(request);
+      if (path === "/v1/pairings/bootstrap-approve") {
+        const candidate = requiredText(body, "token", 128);
+        if (!bootstrap || !timingSafeEqual(Buffer.from(candidate.padEnd(64, " ").slice(0, 64)), Buffer.from(bootstrap.token.padEnd(64, " ").slice(0, 64))) || candidate !== bootstrap.token) throw new Error("bootstrap authorization failed");
+        if (devices.devices().some((device) => !device.revokedAt)) throw new Error("bootstrap is only available before the first device is paired");
+        const approved = await devices.approvePairing(requiredText(body, "pairingId", 128), { role: "operator" });
+        json(response, 200, { deviceId: approved.deviceId, role: approved.role });
+        await bootstrap.close();
+        bootstrap = undefined;
+        return;
+      }
       if (path === "/v1/pairings") {
         const pairing = await devices.beginPairing({
           deviceId: requiredText(body, "deviceId", 128),
@@ -281,6 +336,32 @@ export async function startClientTransport(
         const connection = await authenticatedConnection();
         try { return connection.deviceId; } finally { connection.close(); }
       };
+      if (path === "/v1/plugins/list") {
+        await authenticatedDevice();
+        if (!resources.pluginManagement) throw new Error("plugin management is unavailable");
+        json(response, 200, { plugins: await resources.pluginManagement.list() });
+        return;
+      }
+      if (path === "/v1/pairings/pending") {
+        await authenticatedDevice();
+        json(response, 200, { pairings: devices.pendingPairings().map(({ pairingId, device, expiresAt }) => ({ pairingId, device: { name: device.name, type: device.type }, expiresAt })) });
+        return;
+      }
+      if (path === "/v1/pairings/approve") {
+        await authenticatedDevice();
+        const approved = await devices.approvePairing(requiredText(body, "pairingId", 128));
+        json(response, 200, { deviceId: approved.deviceId, role: approved.role });
+        return;
+      }
+      if (path === "/v1/plugins/set-enabled") {
+        await authenticatedDevice();
+        if (!resources.pluginManagement) throw new Error("plugin management is unavailable");
+        const id = requiredText(body, "id", 128);
+        if (typeof body.enabled !== "boolean") throw new Error("enabled must be a boolean");
+        await resources.pluginManagement.setEnabled(id, body.enabled);
+        json(response, 200, { plugins: await resources.pluginManagement.list(), requiresRestart: true });
+        return;
+      }
       if (path === "/v1/computer/status") {
         await authenticatedDevice();
         const computer = requireComputer(resources);
@@ -760,6 +841,8 @@ export async function startClientTransport(
   });
   const address = server.address() as AddressInfo | null;
   if (!address) throw new Error("client gateway did not expose a listening address");
+  try { bootstrap = devices.devices().some((device) => !device.revokedAt) ? undefined : await localBootstrap(address.port); }
+  catch (error) { await new Promise<void>((resolveClose) => server.close(() => resolveClose())); throw error; }
   const startedAt = new Date().toISOString();
   let running = true;
   return Object.freeze({
@@ -771,6 +854,7 @@ export async function startClientTransport(
       socketsByDevice.clear();
       await new Promise<void>((resolveClose, rejectClose) => websocketServer.close((error) => error ? rejectClose(error) : resolveClose()));
       await new Promise<void>((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
+      await bootstrap?.close();
     },
   });
 }

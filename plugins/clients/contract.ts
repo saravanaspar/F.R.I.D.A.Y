@@ -51,9 +51,24 @@ export interface ClientGatewayService {
   start(options?: ClientGatewayListenOptions): Promise<ClientGatewayServerStatus>;
   stop(): Promise<void>;
   serverStatus(): ClientGatewayServerStatus;
+  configurePluginManagement(service: ClientPluginManagement): void;
+}
+
+export interface ClientPluginDescriptor {
+  readonly id: string;
+  readonly name: string;
+  readonly version: string;
+  readonly builtIn: boolean;
+  readonly enabled: boolean;
+}
+
+export interface ClientPluginManagement {
+  list(): Promise<readonly ClientPluginDescriptor[]>;
+  setEnabled(id: string, enabled: boolean): Promise<void>;
 }
 
 export interface ClientGatewayResources {
+  readonly pluginManagement?: ClientPluginManagement | undefined;
   readonly agentProfiles?: AgentProfilesService | undefined;
   readonly conversations?: ConversationsService | undefined;
   readonly turnRuntime?: TurnRuntimeService | undefined;

@@ -6,7 +6,7 @@ import { activateConfiguredPlugins, readBootstrapConfig } from "../src/bootstrap
 import { activePluginKernel, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import { activeCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import { CLIENT_GATEWAY_CAPABILITY } from "../plugins/clients/contract.js";
-import { discoverPlugins, installPlugin, setPluginEnabled } from "../src/plugin-packages.js";
+import { activePluginCatalog, discoverPlugins, installPlugin, setPluginEnabled } from "../packages/plugin-packages.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -59,12 +59,14 @@ describe("FRIDAY bootstrap config", () => {
     try {
       runtime = await activateConfiguredPlugins(resolve("friday.config.json"));
       const gateway = activeCapabilityRegistry().require(CLIENT_GATEWAY_CAPABILITY);
+      expect(activePluginCatalog()).toContain("./plugins/clients/index.ts");
       const status = gateway.serverStatus();
       expect(status.running).toBe(true);
       const response = await fetch(`http://127.0.0.1:${status.port}/health`);
       expect(await response.json()).toMatchObject({ status: "ok", protocolVersion: 1 });
     } finally {
       await runtime?.dispose();
+      expect(activePluginCatalog()).toBeUndefined();
       if (previousHome === undefined) delete process.env.FRIDAY_HOME;
       else process.env.FRIDAY_HOME = previousHome;
       if (previousStateDir === undefined) delete process.env.FRIDAY_STATE_DIR;

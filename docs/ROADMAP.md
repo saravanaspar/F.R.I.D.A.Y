@@ -4,7 +4,7 @@ This roadmap defines the target platform and an implementation sequence. It is a
 
 ## Current foundation
 
-Plugin packaging migration has begun: the bootstrap can discover local packages from `FRIDAY_HOME/plugins`, the CLI can install/list/enable/disable them, and normal runtime startup brings up the loopback Client Gateway. Built-ins remain bundled in the current executable and external packages still run inside Core; process isolation, signed updates, Desktop plugin controls, first-device bootstrap, Activity, interactions, Channel removal, and native CUA remain open work. See [plugin package workflow](PLUGIN_DEVELOPMENT.md#installed-packages-initial-local-workflow) and [Gateway operations](CLIENT_GATEWAY.md).
+Plugin packaging migration has begun: the bootstrap discovers local packages from `FRIDAY_HOME/plugins`, the CLI and paired Desktop can list and toggle them, and normal runtime startup brings up the loopback Client Gateway. A local host command approves the first device. Built-ins remain bundled in the current executable and external packages still run inside Core; process isolation, signed updates, Activity, interactions, Channel removal, and native CUA remain open work. See [plugin package workflow](PLUGIN_DEVELOPMENT.md#installed-packages-initial-local-workflow) and [Gateway operations](CLIENT_GATEWAY.md).
 
 F.R.I.D.A.Y already provides the core runtime: Turn Loop, Sessions, Session Jobs, Memory, Scheduler, Tools, Sandbox, Permissions, Vault, Events, Artifacts, Skills, MCP, Subagents, observability, and verified self-improvement. These remain authoritative. New features must compose them instead of creating duplicate agents, queues, memory stores, permission systems, or file systems.
 
@@ -173,20 +173,19 @@ Acceptance: a user can switch between their normal X11 virtual desktop and a FRI
 
 Tracking: [issue #19](https://github.com/saravanaspar/F.R.I.D.A.Y/issues/19).
 
-Status: **in progress**. The repository now has the `apps/desktop` shell, typed
-local cache/reducer, authenticated HTTP/WebSocket gateway client, reconnect and
-sequence resume, versioned offline cache, OS credential bridge, deep-link
-validation, command palette, native single-instance Electron host, and the
-server-side client routes for conversations, profiles, projects, turns, Computer
-control, background jobs, and artifact metadata. The reserved `apps/android`
-boundary remains for Phase 7.
+Status: **in progress**. The `apps/desktop` renderer now uses the authenticated
+HTTP/WebSocket Gateway for pairing, conversation selection/creation, turns,
+event replay, plugin toggles and Computer lease control. The Electron host
+keeps private signing keys in OS storage. Local bootstrap can approve the first
+device; an authenticated operator can approve later devices. The reserved
+`apps/android` boundary remains for Phase 7.
 
-The remaining Phase 6 work is native product integration: pair/configure a device
-from the desktop UI, replace the demo renderer with the production React/native
-panels, add permission-backed approval resolution for desktop-originated protected
-actions, and ship terminal/Monaco/WebRTC/updater adapters. These are deliberately
-not represented as completed acceptance criteria until they run against a paired
-host end to end.
+The remaining Phase 6 work includes transcript hydration and filtering by
+conversation, actual protected interaction resolution, streamed Computer pixels,
+real data for the remaining workspace surfaces, command palette integration,
+and terminal/Monaco/WebRTC/updater adapters. Pairing and real turn submission
+have automated protocol coverage but have not been verified on a production
+paired host end to end.
 
 Start only after Phases 1–4 stabilize. Build `apps/desktop` with Electron, React, TypeScript, Vite, Zustand, TanStack Query, SQLite cache, OS credential storage, xterm.js, Monaco, native notifications, WebRTC voice/video, and the shared protocol.
 

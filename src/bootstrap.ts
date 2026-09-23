@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { discoverPlugins } from "./plugin-packages.js";
+import { bindActivePluginCatalog, discoverPlugins } from "../packages/plugin-packages.js";
 import {
   PLUGIN_BOOTSTRAP_DEFERRED,
   PLUGIN_BOOTSTRAP_DISPOSER,
@@ -186,6 +186,7 @@ export async function activateConfiguredPlugins(
   const config = await readBootstrapConfig(configPath);
   const plugins = await discoverPlugins(config.plugins);
   const bootstrap = createPluginBootstrapSession();
+  const unbindCatalog = bindActivePluginCatalog(config.plugins);
 
   try {
     for (const entry of plugins.filter((plugin) => plugin.enabled)) {
@@ -194,6 +195,7 @@ export async function activateConfiguredPlugins(
     }
     await bootstrap.complete();
   } catch (error) {
+    unbindCatalog();
     try {
       await bootstrap.dispose();
     } catch (cleanupError) {
@@ -204,5 +206,5 @@ export async function activateConfiguredPlugins(
     throw error;
   }
 
-  return Object.freeze({ dispose: () => bootstrap.dispose() });
+  return Object.freeze({ dispose: async () => { try { await bootstrap.dispose(); } finally { unbindCatalog(); } } });
 }

@@ -5,6 +5,17 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const PLUGIN_API_VERSION = "1";
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
+let activeCatalog: readonly string[] | undefined;
+
+/** Bound by the host bootstrap so the client plugin can manage the same packages. */
+export function bindActivePluginCatalog(configured: readonly string[]): () => void {
+  activeCatalog = configured;
+  return () => { if (activeCatalog === configured) activeCatalog = undefined; };
+}
+
+export function activePluginCatalog(): readonly string[] | undefined {
+  return activeCatalog;
+}
 
 export interface InstalledPlugin {
   readonly id: string;

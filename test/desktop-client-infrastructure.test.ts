@@ -59,4 +59,17 @@ describe("desktop client infrastructure", () => {
       })}`,
     });
   });
+
+  it("submits a desktop pairing request before a credential has been approved", async () => {
+    let request: { url: string; body: Record<string, unknown> } | undefined;
+    const client = createDesktopGatewayClient({
+      baseUrl: "http://127.0.0.1:8787", deviceId: "first-device", sign: async () => "unused",
+      fetcher: async (url, init) => {
+        request = { url: String(url), body: JSON.parse(String(init?.body)) as Record<string, unknown> };
+        return new Response(JSON.stringify({ pairingId: "pending-1", expiresAt: "2026-09-23T00:00:00Z" }), { status: 202 });
+      },
+    });
+    await expect(client.beginPairing({ deviceId: "first-device", name: "Desktop", publicKey: "public" })).resolves.toMatchObject({ pairingId: "pending-1" });
+    expect(request).toEqual({ url: "http://127.0.0.1:8787/v1/pairings", body: { deviceId: "first-device", name: "Desktop", publicKey: "public", type: "desktop" } });
+  });
 });

@@ -1,38 +1,21 @@
 # F.R.I.D.A.Y desktop
 
-This is the dependency-light desktop client shell for Phase 6. It implements the
-core workflow used by the client:
+The renderer uses the authenticated Client Gateway for turns, event replay, conversations, plugin enablement, pairing and Computer control. It shows Gateway errors instead of manufacturing approvals, artifacts or screen images. Other workspace surfaces and approval prompts still require server implementations. Closing the app does not stop a running turn.
 
-`conversation → background job → approval → artifact → Computer panel`
-
-The renderer is intentionally dependency-light so it can be previewed without a
-large native toolchain. `src/core.ts` is the typed, framework-independent client
-cache and reducer. `src/gateway.ts` provides authenticated HTTP and reconnecting
-WebSocket transport, `src/storage.ts` provides versioned bounded cache storage,
-`src/deep-links.ts` validates `friday://` routes, and `src/commands.ts` powers the
-command palette. The authenticated gateway exposes conversations, profiles,
-projects, Computer control, turns, background jobs, and artifact metadata. The
-client owns no durable data, credentials, Agent execution, or Computer authority;
-those remain behind the gateway.
-
-## Run the desktop client
+## Run
 
 ```bash
 npm --prefix apps/desktop run build
-npm --prefix apps/desktop run preview
-# open http://127.0.0.1:4173 in a desktop browser
 ```
 
-The Electron host is in [`electron/main.cjs`](electron/main.cjs), with an isolated
-preload bridge for OS-encrypted credentials, deep links, and single-instance
-behavior. Install the Electron toolchain in the app workspace before launching it.
+The renderer runs in the Electron host (`electron/main.cjs`). Its preload bridge stores the Ed25519 private key through Electron OS encryption and signs requests without exposing the private key to the renderer. A browser preview can display the interface, but cannot pair a device because it does not have the secure bridge.
 
-## Integration boundary
+1. Start FRIDAY. Its Gateway binds to `127.0.0.1:8787` by default.
+2. In Desktop Settings, enter the Gateway URL and request pairing.
+3. For the first device, on the FRIDAY host run `friday device approve PAIRING_ID` using the displayed ID. The temporary bootstrap secret is a mode 0600 file under `FRIDAY_HOME` and is valid only before a device has been paired.
+4. Reconnect Desktop. An existing operator device can approve further devices under Settings.
+5. Open Plugins to toggle built-in or installed packages. Changes take effect after a Core restart. The capability kernel cannot be disabled.
 
-The visible renderer runs in demo mode when no paired host is configured, which
-makes the shell safe to preview. A production deployment connects the renderer to
-`createDesktopGatewayClient`, supplies a device signer from the preload bridge,
-and maps Gateway event types to the reducer. React/Zustand/TanStack Query,
-terminal, WebRTC, and updater packaging are intentionally separate follow-up
-adapters; they can consume these stable client boundaries without moving
-authority into the app.
+For remote use, configure TLS and a trusted reverse proxy as described in [`docs/CLIENT_GATEWAY.md`](../../docs/CLIENT_GATEWAY.md). The Gateway allows the opaque Electron renderer origin and local browser preview origins to access HTTP endpoints; signed device requests still require pairing.
+
+The event stream exposes only events published by Core. Its current generic reducer displays text and job status when events contain those fields. Full transcript hydration, pending approvals, streamed computer pixels, richer Activity, Android and Channel removal remain open.
