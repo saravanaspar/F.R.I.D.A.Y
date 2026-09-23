@@ -7,6 +7,9 @@ import { installFatalCrashHandlers, recordFatalCrash } from "./crash-log.js";
 import { FRIDAY_VERSION } from "./version.js";
 import { runDoctor } from "./doctor.js";
 import { runComputerBrowserSupervisor } from "./computer-browser-supervisor.js";
+import { readBootstrapConfig } from "./bootstrap.js";
+import { discoverPlugins, installPlugin, setPluginEnabled } from "./plugin-packages.js";
+import { resolve } from "node:path";
 
 
 
@@ -21,11 +24,40 @@ function help(): void {
     "  friday backup ...          Create, verify, list, or restore full-state backups",
     "  friday doctor [options]    Health/security/recovery diagnostics with one-line repair guides",
     "  friday vault recovery ...  Create or restore a passphrase-encrypted recovery kit",
+    "  friday plugin list          Show built-in and installed plugins",
+    "  friday plugin install DIR   Install a local plugin package (requires restart)",
+    "  friday plugin enable ID     Enable a plugin (requires restart)",
+    "  friday plugin disable ID    Disable a plugin (requires restart)",
     "  friday --version",
     "",
     maintenanceHelp(),
     "",
   ].join("\n"));
+}
+
+async function runPluginCli(args: readonly string[]): Promise<void> {
+  const configPath = resolve(process.env.FRIDAY_BOOTSTRAP_CONFIG?.trim() || resolve(process.cwd(), "friday.config.json"));
+  const config = await readBootstrapConfig(configPath);
+  const [action, argument, ...extra] = args;
+  if (extra.length > 0 || (action !== "list" && (!argument || argument.length === 0)) || (action === "list" && argument)) {
+    throw new Error("Usage: friday plugin list | install DIR | enable ID | disable ID");
+  }
+  if (action === "list") {
+    const plugins = await discoverPlugins(config.plugins);
+    for (const plugin of plugins) process.stdout.write(`${plugin.id}\t${plugin.builtIn ? "built-in" : plugin.version}\t${plugin.enabled ? "enabled" : "disabled"}\n`);
+    return;
+  }
+  if (action === "install" && argument) {
+    const installed = await installPlugin(argument, config.plugins);
+    process.stdout.write(`Installed ${installed.id}; restart FRIDAY to activate.\n`);
+    return;
+  }
+  if ((action === "enable" || action === "disable") && argument) {
+    await setPluginEnabled(argument, action === "enable", config.plugins);
+    process.stdout.write(`${action === "enable" ? "Enabled" : "Disabled"} ${argument}; restart FRIDAY to apply.\n`);
+    return;
+  }
+  throw new Error("Usage: friday plugin list | install DIR | enable ID | disable ID");
 }
 
 export async function runFridayCli(args: readonly string[] = process.argv.slice(2)): Promise<void> {
@@ -36,6 +68,7 @@ export async function runFridayCli(args: readonly string[] = process.argv.slice(
     return runSetupCli(rest);
   }
   if (command === "backup") return runBackupCli(rest);
+  if (command === "plugin") return runPluginCli(rest);
   if (command === "doctor") { process.exitCode = await runDoctor(rest); return; }
   if (command === "vault" && rest[0] === "recovery") return runVaultRecoveryCli(rest.slice(1));
   if (command === "setup") return runSetupCli(rest);

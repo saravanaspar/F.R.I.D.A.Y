@@ -1,8 +1,8 @@
 # Client Gateway operations
 
-Phase 1 includes a transport adapter that is intentionally disabled until an operator starts it. It binds to loopback by default and exposes a small HTTP API plus an authenticated WebSocket stream. Public TLS belongs at the deployment edge.
+The normal `friday` runtime starts the transport after the full plugin graph is ready, on `127.0.0.1:8787` by default. Set `FRIDAY_GATEWAY_PORT` to another integer from 0 to 65535 to select a port (0 chooses a random free port). It exposes a small HTTP API plus an authenticated WebSocket stream. Direct test/plugin-graph assembly still requires an explicit start. Public TLS belongs at the deployment edge.
 
-Start it from a trusted System action or a local integration:
+To start it explicitly from a trusted System action or a local integration:
 
 ```ts
 const gateway = requireCapability(CLIENT_GATEWAY_CAPABILITY);
@@ -12,7 +12,7 @@ await gateway.start({ host: "127.0.0.1", port: 3180 });
 Health check:
 
 ```bash
-curl --fail http://127.0.0.1:3180/health
+curl --fail http://127.0.0.1:8787/health
 ```
 
 The device flow is:
@@ -29,7 +29,7 @@ The gateway must remain behind an authenticated TLS reverse proxy when exposed o
 
 ```caddyfile
 friday.example.com {
-    reverse_proxy 127.0.0.1:3180
+    reverse_proxy 127.0.0.1:8787
 }
 ```
 
@@ -130,7 +130,7 @@ git diff --check
 
 For a manual deployment check, start the gateway on loopback and verify:
 
-1. `curl --fail http://127.0.0.1:3180/health` returns a healthy response.
+1. `curl --fail http://127.0.0.1:8787/health` returns a healthy response.
 2. An unapproved device cannot request an authentication challenge.
 3. A paired device can sign a challenge and open `/v1/stream`.
 4. Reconnecting with the previous `afterSequence` returns only later durable events.

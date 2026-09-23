@@ -4,6 +4,8 @@ This roadmap defines the target platform and an implementation sequence. It is a
 
 ## Current foundation
 
+Plugin packaging migration has begun: the bootstrap can discover local packages from `FRIDAY_HOME/plugins`, the CLI can install/list/enable/disable them, and normal runtime startup brings up the loopback Client Gateway. Built-ins remain bundled in the current executable and external packages still run inside Core; process isolation, signed updates, Desktop plugin controls, first-device bootstrap, Activity, interactions, Channel removal, and native CUA remain open work. See [plugin package workflow](PLUGIN_DEVELOPMENT.md#installed-packages-initial-local-workflow) and [Gateway operations](CLIENT_GATEWAY.md).
+
 F.R.I.D.A.Y already provides the core runtime: Turn Loop, Sessions, Session Jobs, Memory, Scheduler, Tools, Sandbox, Permissions, Vault, Events, Artifacts, Skills, MCP, Subagents, observability, and verified self-improvement. These remain authoritative. New features must compose them instead of creating duplicate agents, queues, memory stores, permission systems, or file systems.
 
 The model-context layer now follows the same ownership discipline. Prompt

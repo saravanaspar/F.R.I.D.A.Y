@@ -2,6 +2,33 @@
 
 F.R.I.D.A.Y is plugin-first. A feature belongs in a plugin when it owns reusable domain behavior, an integration/transport, model-facing tooling, durable state, or an authority boundary. `src/` is reserved for host boot, setup/CLI, and generic composition.
 
+## Installed packages (initial local workflow)
+
+The existing capability kernel also accepts local plugin packages without rebuilding the source runtime. A package is a directory containing `manifest.json` and a built JavaScript entrypoint:
+
+```json
+{
+  "id": "example.plugin",
+  "name": "Example",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "entrypoint": "./dist/index.mjs"
+}
+```
+
+The entrypoint must default-export a `FridayPlugin` bootstrap function, usually produced by bundling a plugin that calls `definePlugin(...)`. It must provide its own runtime dependencies. The manifest and entrypoint remain within the package directory; links and special files are rejected on install. Plugin capability declarations and dependency resolution continue to live in the existing typed `definePlugin` manifest, rather than a second list of capability names in the package metadata.
+
+```bash
+friday plugin install ./built-example-plugin
+friday plugin list
+friday plugin disable example.plugin
+friday plugin enable example.plugin
+```
+
+Packages install in `FRIDAY_HOME/plugins/<id>/` (`~/.friday/plugins` by default). Built-in plugins appear as `built-in` in `friday plugin list`. Enablement is saved in `FRIDAY_HOME/plugin-state.json` and applied on the next restart. Dependency validation by the kernel is fail-closed: disabling a provider required by an enabled plugin prevents startup. The `capabilities` kernel cannot be disabled. Existing explicit source config entries still load as before.
+
+**Trust boundary:** this initial package loader runs installed code in the FRIDAY process with the host user's privileges. Only install locally reviewed packages. Isolated plugin hosts, signatures, package upgrades/rollback, an authenticated gateway management API, and Desktop controls are future work; the CLI does not claim to provide these protections. The bundled release still contains the built-in plugins for compatibility, while packages are attached from the installation directory at runtime.
+
 ## 1. Start with a contract
 
 A plugin declares what it **requires**, what it can **optionally consume**, what it **provides**, and any typed multi-provider **contributions**. Do not import another plugin's implementation package directly just because it is convenient.

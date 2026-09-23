@@ -110,6 +110,15 @@ const clientsPlugin: FridayPlugin = definePlugin({
     serverStatus: (): ClientGatewayServerStatus => transport?.status() ?? Object.freeze({ running: false, connections: service.connections().length, latestSequence: service.latestSequence() }),
   });
   ctx.services.provide(CLIENT_GATEWAY_CAPABILITY, service);
+  if (process.env.FRIDAY_GATEWAY_PORT !== undefined) {
+    ctx.afterReady(async () => {
+      const port = Number(process.env.FRIDAY_GATEWAY_PORT);
+      if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) {
+        throw new Error("FRIDAY_GATEWAY_PORT must be an integer from 0 to 65535");
+      }
+      await service.start({ port });
+    });
+  }
   ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, { id: "clients", label: "Client Gateway", snapshot: () => service.serverStatus() });
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
     id: "clients.start", label: "Start client gateway", description: "Start the loopback HTTP/WebSocket gateway. Put Caddy in front for public TLS.",
