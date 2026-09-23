@@ -1124,7 +1124,8 @@ describe("plugin boundaries", () => {
     expect(names).toContain("system");
     expect(names).toContain("runtime-settings");
     expect(names).toContain("integrations");
-    expect(names).toContain("computer");
+    expect(names).toContain("cua");
+    expect(names).not.toContain("computer");
     expect(names[0]).toBe("capabilities");
     const selfImprovementManifest = getPluginManifest(selfImprovementPlugin)!;
     expect(selfImprovementManifest.activation).toBe("last");

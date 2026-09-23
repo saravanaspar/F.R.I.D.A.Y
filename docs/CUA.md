@@ -1,0 +1,11 @@
+# CUA desktop and browser integration
+
+FRIDAY's configured computer-use plugin is `plugins/cua`. It connects to the upstream [Cua Driver](https://github.com/trycua/cua/tree/main/libs/cua-driver) through its local `cua-driver mcp` stdio interface. The same driver exposes native window and browser tools. FRIDAY does not download or silently install the native driver; follow the [official installation instructions](https://github.com/trycua/cua/blob/main/docs/content/docs/how-to-guides/driver/install.mdx), then run `cua-driver doctor`. On Linux, start the driver daemon as documented there. On macOS, grant permissions to the installed `CuaDriver.app`.
+
+`cua-driver` must be on FRIDAY's `PATH`. `FRIDAY_CUA_DRIVER_BIN` may instead point to a trusted installed binary. Restart FRIDAY after updating the executable. Calls use a persistent MCP stdio process; FRIDAY closes it on shutdown. Unavailable binaries fail the first CUA call with an actionable error without preventing FRIDAY startup.
+
+Browser/UI requests routed to the `computer` utility profile receive `cua_list_tools` and `cua_call_tool`, and the CUA guidance prompt. First list tools to learn the installed driver's schemas. Use `browser_prepare` with an isolated profile, then `get_browser_state` for exact session-scoped browser target and tab IDs; call the browser tools using fresh references. Native apps use `list_windows` and `get_window_state` before actions. CUA's upstream driver enforces its own native permissions and stale-reference rules. FRIDAY also authorizes read/write operations through its Permissions service before sending a tool call.
+
+Attaching an existing logged-in Chromium profile needs [explicit CUA authorization](https://github.com/trycua/cua/blob/main/libs/cua-driver/README.md#permission-modes); the default configuration does not grant it. Browser and desktop tool calls can include screenshots or page content. Avoid sensitive inputs and keep higher-impact external actions subject to FRIDAY's permission prompts.
+
+The previous Linux X11/AT-SPI/managed CDP Computer plugin is no longer registered in `friday.config.json`. Existing saved `computer-node` project targets and legacy desktop lease APIs still require migration before they can use CUA; choose a normal execution target for new browser tasks.

@@ -198,7 +198,6 @@ friday setup execution-python
 friday setup self-repository /path/to/F.R.I.D.A.Y
 friday setup whatsapp
 friday setup voice
-friday setup computer
 friday setup service
 friday setup privileges broker
 friday setup privileges none
@@ -218,7 +217,7 @@ The core assistant does not silently install privileged host software. Enable on
 | Self-improvement from source | Git + npm + a clean F.R.I.D.A.Y checkout | Save the canonical checkout with `friday setup self-repository /path/to/F.R.I.D.A.Y`. Release-binary self-improvement builds, verifies, stages, and hands off to a new host-native binary before activation. |
 | WhatsApp bridge | npm/Node tooling | Provision bridge dependencies with `friday setup whatsapp`. |
 | Voice | Provider API access | Configure and preflight STT/TTS with `friday setup voice`. OpenAI reuses the canonical model-provider Vault credential; Deepgram and ElevenLabs keys are stored in Voice-owned Vault refs. |
-| Linux Computer | X11 desktop; Brave/Chrome/Chromium | Configure with `friday setup computer`. The default opens FRIDAY-owned windows in the normal browser profile so existing logins are shared; the installed binary checks/provisions the fixed approved host dependencies when broker mode is enabled. |
+| Desktop and browser control | [Cua Driver](https://github.com/trycua/cua/tree/main/libs/cua-driver) installed on the host | Install and validate `cua-driver` with the [upstream guide](https://github.com/trycua/cua/blob/main/docs/content/docs/how-to-guides/driver/install.mdx). FRIDAY starts `cua-driver mcp` on demand and exposes its native and browser tools through the CUA plugin. For browser work, use CUA's `browser_prepare` to create an isolated profile; attaching an existing profile requires CUA's explicit authorization. |
 | Always-on user service | systemd user manager | Install/update the bundled unit with `friday setup service`; no source-tree `cp` step is required. |
 
 Run `friday doctor` at any time for a sectioned installation, configuration, security, tooling, and recovery report. Every actionable warning/error includes a one-line repair guide. Doctor is non-interactive by default, does not make outbound network calls, and never reads plaintext Vault secrets. Use `friday doctor --fix` only when you want guided, confirmed repairs for deterministic fixes, or `friday doctor --json` for machine-readable diagnostics.

@@ -1,4 +1,5 @@
 import { chmod } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { readSavedChannels } from "../plugins/channels/config.js";
@@ -8,7 +9,6 @@ import { hasFridayPrivilegedHelper } from "../plugins/host-privileges/privileged
 import type { DoctorCheck, DoctorLevel, DoctorRepairId, DoctorSection } from "../plugins/host-doctor/contract.js";
 import { getFridayHome, loadRuntimeEnvironment, readRuntimeSettings } from "../plugins/runtime-settings/runtime-env.js";
 import { selectSandboxProvider } from "../plugins/sandbox/providers/index.js";
-import { inspectConfiguredComputerProvider } from "../plugins/computer/providers/index.js";
 import { voiceCredentialVaultRef } from "../plugins/voice/credential-ref.js";
 import { readVoiceSettings } from "../plugins/voice/settings.js";
 import { memoryEmbeddingHealth } from "../plugins/memory/health.js";
@@ -78,14 +78,24 @@ const CLI_DOCTOR_SOURCES: DoctorSources = Object.freeze({
       repairHint: provider.repairHint(status),
     });
   },
-  computer: (environment: NodeJS.ProcessEnv) => inspectConfiguredComputerProvider(environment),
+  async computer(environment: NodeJS.ProcessEnv) {
+    const executable = environment.FRIDAY_CUA_DRIVER_BIN?.trim() || "cua-driver";
+    const result = spawnSync(executable, ["--version"], { encoding: "utf8", timeout: 5_000 });
+    return Object.freeze({
+      configured: result.status === 0,
+      provider: "cua-driver",
+      status: result.status === 0 ? "ok" as const : "unavailable" as const,
+      nodes: result.status === 0 ? 1 : 0,
+      issues: result.status === 0 ? Object.freeze([]) : Object.freeze([result.error?.message ?? result.stderr?.trim() ?? "cua-driver is not installed"]),
+    });
+  },
 });
 
 export async function collectDoctorChecks(environment: NodeJS.ProcessEnv = process.env): Promise<readonly DoctorCheck[]> {
   // Doctor must inspect the same binary-owned runtime configuration that the
   // long-running FRIDAY process will use. Desktop shells can retain stale
-  // FRIDAY_COMPUTER_* values across a rerunnable `friday setup computer`; the
-  // runtime loader intentionally replaces those Computer keys with runtime.env.
+  // Keep the doctor environment aligned with runtime.env for the remaining
+  // runtime settings and the configured CUA executable path.
   const effectiveEnvironment: NodeJS.ProcessEnv = { ...environment };
   await loadRuntimeEnvironment({ environment: effectiveEnvironment });
   return collectCanonicalDoctorChecks(effectiveEnvironment, {

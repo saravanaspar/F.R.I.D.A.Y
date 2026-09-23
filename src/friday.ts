@@ -6,7 +6,6 @@ import { pathToFileURL } from "node:url";
 import { installFatalCrashHandlers, recordFatalCrash } from "./crash-log.js";
 import { FRIDAY_VERSION } from "./version.js";
 import { runDoctor } from "./doctor.js";
-import { runComputerBrowserSupervisor } from "./computer-browser-supervisor.js";
 import { readBootstrapConfig } from "./bootstrap.js";
 import { discoverPlugins, installPlugin, setPluginEnabled } from "../packages/plugin-packages.js";
 import { resolve } from "node:path";
@@ -91,10 +90,6 @@ export async function runFridayCli(args: readonly string[] = process.argv.slice(
   if (command === "doctor") { process.exitCode = await runDoctor(rest); return; }
   if (command === "vault" && rest[0] === "recovery") return runVaultRecoveryCli(rest.slice(1));
   if (command === "setup") return runSetupCli(rest);
-  if (command === "computer-browser-supervisor") {
-    if (rest.length > 0) throw new Error("Unexpected computer-browser-supervisor arguments");
-    return runComputerBrowserSupervisor();
-  }
   if (command === "--help" || command === "-h" || command === "help") { help(); return; }
   if (command === "--version" || command === "-v") { process.stdout.write(`${FRIDAY_VERSION}\n`); return; }
   throw new Error(`Unknown FRIDAY command: ${command}`);

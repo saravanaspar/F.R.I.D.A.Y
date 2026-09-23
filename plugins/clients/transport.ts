@@ -167,7 +167,7 @@ function desktopOrigin(value: string | undefined): string | undefined {
   try {
     const url = new URL(value);
     if (url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]")) return url.origin;
-  } catch { /* invalid origins never receive CORS permission */ }
+  } catch { return undefined; }
   return undefined;
 }
 
@@ -185,7 +185,11 @@ async function localBootstrap(port: number): Promise<{ readonly token: string; r
     try {
       const current = JSON.parse(await readFile(file, "utf8")) as { token?: string };
       if (current.token === token) await rm(file, { force: true });
-    } catch { /* a removed or replaced token file belongs to another process */ }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        reportOperationalError({ component: "clients", operation: "remove pairing bootstrap", error, severity: "warn", outcome: "degraded" });
+      }
+    }
   } };
 }
 

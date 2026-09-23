@@ -18,7 +18,6 @@ let pendingPairing: { pairingId: string; expiresAt: string } | undefined;
 let otherPairings: readonly { pairingId: string; device: { name: string; type: string }; expiresAt: string }[] = [];
 let conversationTitle = "Conversation";
 let profileId: string | undefined;
-let screenLeaseId: string | undefined;
 let plugins: readonly { id: string; name: string; version: string; builtIn: boolean; enabled: boolean }[] = [];
 let sending = false;
 let draft = "";
@@ -48,24 +47,19 @@ function messages(): string {
 function settings(): string {
   return `<section class="surface-page"><span class="eyebrow">Connection</span><h2>Gateway and device</h2><p>Enter the FRIDAY Gateway address. Approve the first device on the host with <code>friday device approve PAIRING_ID</code>.</p><label>Gateway URL <input id="gateway-url" value="${escapeHtml(gatewayUrl)}" /></label><button class="primary-button" data-action="save-gateway">Save and connect</button><div class="surface-note"><strong>Device identity</strong><span>${identity ? escapeHtml(identity.deviceId) : "No device identity stored in this host"}</span></div>${pendingPairing ? `<div class="surface-note"><strong>Pairing pending until ${escapeHtml(pendingPairing.expiresAt)}</strong><span>Approve pairing ID <code>${escapeHtml(pendingPairing.pairingId)}</code>, then select Reconnect.</span></div>` : ""}<button class="primary-button" data-action="pair">Request pairing</button>${state.connection === "online" ? `<h3>Pending devices</h3>${otherPairings.map((pairing) => `<div class="plugin-row"><div><strong>${escapeHtml(pairing.device.name)}</strong><small>${escapeHtml(pairing.device.type)} · ${escapeHtml(pairing.pairingId)}</small></div><button data-action="approve-pairing" data-pairing-id="${escapeHtml(pairing.pairingId)}">Approve</button></div>`).join("") || "<p>No pending pairings.</p>"}<button class="ghost-button" data-action="refresh-pairings">Refresh</button>` : ""}</section>`;
 }
-function computer(): string {
-  return `<section class="surface-page"><span class="eyebrow">Computer</span><h2>Leased screen</h2><p>${screenLeaseId ? `Lease ${escapeHtml(screenLeaseId)} · ${escapeHtml(state.computer.control)} control` : "No leased screen is available. Start a Computer task on the host first."}</p>${screenLeaseId ? `<button class="primary-button" data-action="${state.computer.control === "human" ? "hand-back" : "takeover"}">${state.computer.control === "human" ? "Hand control back" : "Take control"}</button>` : ""}<button class="ghost-button" data-action="refresh-computer">Refresh leases</button><div class="surface-note">The Gateway reports control state. Screen pixels are not streamed in this client yet.</div></section>`;
-}
 function surface(): string {
   if (state.activeSurface === "settings") return settings();
-  if (state.activeSurface === "computer") return computer();
   if (state.activeSurface === "plugins") return `<section class="surface-page"><span class="eyebrow">Plugins</span><h2>Installed packages</h2><p>Changes take effect after FRIDAY restarts. Built-in plugins ship with Core; installed packages load from the host.</p>${plugins.map((plugin) => `<div class="plugin-row"><div><strong>${escapeHtml(plugin.name)}</strong><small>${escapeHtml(plugin.id)} · ${plugin.builtIn ? "Built-in" : escapeHtml(plugin.version)}</small></div><button data-action="toggle-plugin" data-plugin-id="${escapeHtml(plugin.id)}" data-enabled="${plugin.enabled}" ${plugin.id === "capabilities" ? "disabled" : ""}>${plugin.enabled ? "Disable" : "Enable"}</button></div>`).join("") || `<p>${state.connection === "online" ? "No plugins found." : "Connect to see installed plugins."}</p>`}<button class="ghost-button" data-action="refresh-plugins">Refresh</button></section>`;
   return `<section class="surface-page"><span class="eyebrow">${escapeHtml(state.activeSurface)}</span><h2>${escapeHtml(state.activeSurface)}</h2><p>This surface is waiting for a Gateway-backed view.</p></section>`;
 }
 function render(): void {
-  const tabs: readonly DesktopSurface[] = ["conversations", "computer", "plugins", "settings"];
+  const tabs: readonly DesktopSurface[] = ["conversations", "plugins", "settings"];
   const body = state.activeSurface === "conversations" ? messages() : surface();
   const composer = state.activeSurface === "conversations" ? `<div class="composer"><div class="composer-box"><textarea id="composer-input" rows="2" placeholder="Ask F.R.I.D.A.Y…" ${sending || state.connection !== "online" ? "disabled" : ""}>${escapeHtml(draft)}</textarea><button class="send-button" data-action="send" ${sending || state.connection !== "online" ? "disabled" : ""}>↑</button></div><div class="composer-hint">${sending ? "Waiting for the server turn…" : "Enter to send · Shift+Enter for a new line"}</div></div>` : "";
   appRoot.innerHTML = `<div class="app-shell"><header class="topbar"><div class="brand"><span class="brand-mark">F</span> F.R.I.D.A.Y <span class="brand-context">/ desktop</span></div><div class="top-actions"><span class="connection connection-${state.connection}"><i></i>${state.connection === "online" ? "Gateway online" : state.connection === "connecting" ? "Connecting…" : "Gateway offline"}</span><button class="ghost-button" data-action="reconnect">↻ Reconnect</button></div></header><div class="workspace"><nav class="sidebar"><span class="side-label">Workspace</span>${tabs.map((tab) => `<button class="nav-item ${state.activeSurface === tab ? "active" : ""}" data-surface="${tab}">${tab[0]?.toUpperCase()}${tab.slice(1)}</button>`).join("")}<div class="sidebar-footer">${identity ? `Device ${escapeHtml(identity.name)}` : "Pair a device in Settings"}</div></nav><main class="conversation"><div class="conversation-head"><div><span class="eyebrow">${escapeHtml(state.activeSurface)}</span><h1>${escapeHtml(state.activeSurface === "conversations" ? conversationTitle : state.activeSurface)}</h1><p>${state.connection === "online" ? "Connected to FRIDAY Core" : "Connect in Settings to use FRIDAY"}</p></div></div><div class="message-list">${body}</div>${composer}</main><aside class="activity-panel"><div class="panel-heading"><div><span class="eyebrow">Gateway events</span><h2>Activity</h2></div></div><div class="activity-timeline"><div class="timeline-item"><span class="timeline-dot ${state.connection === "online" ? "done" : ""}"></span><div><strong>${state.connection === "online" ? "Stream connected" : "Waiting for Gateway"}</strong><small>Last event sequence ${state.lastSequence}</small></div></div>${state.jobs.slice(-3).map((job) => `<div class="timeline-item"><span class="timeline-dot"></span><div><strong>${escapeHtml(job.title)}</strong><small>${escapeHtml(job.status)}</small></div></div>`).join("")}</div></aside></div>${state.notice ? `<div class="toast" role="status">${escapeHtml(state.notice)}<button data-action="clear-notice">×</button></div>` : ""}</div>`;
   appRoot.querySelectorAll<HTMLElement>("[data-surface]").forEach((el) => el.addEventListener("click", () => {
     const selected = el.dataset.surface as DesktopSurface;
     dispatch({ type: "surface", surface: selected });
-    if (selected === "computer") void refreshComputer().catch(report);
     if (selected === "plugins") void refreshPlugins().catch(report);
     if (selected === "settings" && state.connection === "online") void refreshPairings().catch(report);
   }));
@@ -76,12 +70,10 @@ function render(): void {
     else if (action === "pair") void pair().catch(report);
     else if (action === "reconnect") void connect().catch(report);
     else if (action === "send") void send().catch(report);
-    else if (action === "refresh-computer") void refreshComputer().catch(report);
     else if (action === "refresh-plugins") void refreshPlugins().catch(report);
     else if (action === "toggle-plugin") void togglePlugin(el.dataset.pluginId, el.dataset.enabled === "true").catch(report);
     else if (action === "refresh-pairings") void refreshPairings().catch(report);
     else if (action === "approve-pairing") void approvePairing(el.dataset.pairingId).catch(report);
-    else if (action === "takeover" || action === "hand-back") void changeControl(action).catch(report);
   }));
   appRoot.querySelector<HTMLTextAreaElement>("#composer-input")?.addEventListener("input", (event) => { draft = (event.target as HTMLTextAreaElement).value; });
   appRoot.querySelector<HTMLTextAreaElement>("#composer-input")?.addEventListener("keydown", (event) => {
@@ -159,17 +151,6 @@ async function send(): Promise<void> {
     if (!accepted) draft = value;
   }
 }
-async function refreshComputer(): Promise<void> {
-  const { leases } = await client().request<{ leases: readonly { screenLeaseId: string; nodeId: string; screenId: string; control?: { holder: "agent" | "human" } }[] }>("/v1/computer/leases");
-  const lease = leases[0];
-  screenLeaseId = lease?.screenLeaseId;
-  dispatch({ type: "computer-state", nodeLabel: lease?.nodeId ?? "Computer node", screenLabel: lease?.screenId ?? "Screen", url: "", control: lease?.control?.holder ?? "agent" });
-}
-async function changeControl(action: "takeover" | "hand-back"): Promise<void> {
-  if (!screenLeaseId) throw new Error("No screen lease is available.");
-  await client().request(action === "takeover" ? "/v1/computer/takeover" : "/v1/computer/hand-back", { screenLeaseId });
-  await refreshComputer();
-}
 async function refreshPlugins(): Promise<void> {
   const response = await client().request<{ plugins: typeof plugins }>("/v1/plugins/list");
   plugins = response.plugins;
@@ -193,6 +174,6 @@ async function approvePairing(id: string | undefined): Promise<void> {
   dispatch({ type: "notice", message: "Device approved. It can now reconnect." });
 }
 const initialLink = parseDesktopDeepLink(globalThis.location.href);
-if (initialLink) state = reduceDesktopState(state, { type: "surface", surface: initialLink.kind === "computer" ? "computer" : "conversations" });
+if (initialLink) state = reduceDesktopState(state, { type: "surface", surface: "conversations" });
 render();
 if (saved?.deviceId) void connect().catch(report);
