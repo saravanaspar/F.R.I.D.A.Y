@@ -489,13 +489,13 @@ async function whatsappToolingCheck(environment: NodeJS.ProcessEnv, home: string
 
 async function computerCheck(environment: NodeJS.ProcessEnv, sources: DoctorSources): Promise<DoctorCheck> {
   if (!sources.computer) {
-    return check("computer-linux", "Tooling", "info", "Agent Computer", "not configured", { detail: "Optional until a Computer provider is enabled." });
+    return check("cua-driver", "Tooling", "info", "Cua Driver", "not configured", { detail: "Install Cua Driver for desktop and browser control." });
   }
   try {
     const snapshot = await sources.computer(environment);
     if (!snapshot.configured) {
-      return check("computer-linux", "Tooling", "info", "Agent Computer", "not configured", {
-        detail: "Run `friday setup computer` to configure the native X11 Linux provider using the installed binary.",
+      return check("cua-driver", "Tooling", "info", "Cua Driver", "not installed", {
+        detail: "Install Cua Driver from trycua/cua, then run `friday setup cua`.",
       });
     }
     const detail = [
@@ -504,17 +504,17 @@ async function computerCheck(environment: NodeJS.ProcessEnv, sources: DoctorSour
       ...snapshot.issues.slice(0, 6),
     ].filter(Boolean).join(" · ");
     if (snapshot.status === "ok") {
-      return check("computer-linux", "Tooling", "ok", "Agent Computer", "Linux provider ready", { detail });
+      return check("cua-driver", "Tooling", "ok", "Cua Driver", "installed", { detail });
     }
-    return check("computer-linux", "Tooling", snapshot.status === "unavailable" ? "error" : "warn", "Agent Computer",
-      snapshot.status === "unavailable" ? "Linux provider unavailable" : "Linux provider needs attention", {
+    return check("cua-driver", "Tooling", snapshot.status === "unavailable" ? "error" : "warn", "Cua Driver",
+      snapshot.status === "unavailable" ? "driver unavailable" : "driver needs attention", {
         detail,
-        fix: "Run `friday setup computer`, repair any listed host/session dependency, then rerun: friday doctor",
+        fix: "Install Cua Driver from trycua/cua, then run: friday setup cua",
       });
   } catch (error) {
-    return check("computer-linux", "Tooling", "error", "Agent Computer", "Linux provider could not be inspected", {
+    return check("cua-driver", "Tooling", "error", "Cua Driver", "driver could not be inspected", {
       detail: error instanceof Error ? error.message : String(error),
-      fix: "Run `friday setup computer`, then rerun: friday doctor",
+      fix: "Install Cua Driver from trycua/cua, then rerun: friday doctor",
     });
   }
 }

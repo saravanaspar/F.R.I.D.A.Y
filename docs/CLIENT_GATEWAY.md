@@ -1,8 +1,8 @@
 # Client Gateway operations
 
-Phase 1 includes a transport adapter that is intentionally disabled until an operator starts it. It binds to loopback by default and exposes a small HTTP API plus an authenticated WebSocket stream. Public TLS belongs at the deployment edge.
+The normal `friday` runtime starts the transport after the full plugin graph is ready, on `127.0.0.1:8787` by default. Set `FRIDAY_GATEWAY_PORT` to another integer from 0 to 65535 to select a port (0 chooses a random free port). It exposes a small HTTP API plus an authenticated WebSocket stream. Direct test/plugin-graph assembly still requires an explicit start. Public TLS belongs at the deployment edge.
 
-Start it from a trusted System action or a local integration:
+To start it explicitly from a trusted System action or a local integration:
 
 ```ts
 const gateway = requireCapability(CLIENT_GATEWAY_CAPABILITY);
@@ -12,13 +12,13 @@ await gateway.start({ host: "127.0.0.1", port: 3180 });
 Health check:
 
 ```bash
-curl --fail http://127.0.0.1:3180/health
+curl --fail http://127.0.0.1:8787/health
 ```
 
 The device flow is:
 
 1. `POST /v1/pairings` with `deviceId`, `name`, `type`, and a public key.
-2. A trusted operator reviews `devices.pairings` and runs `devices.approve-pairing`.
+2. On the first Desktop, run `friday device approve PAIRING_ID` on the host. The runtime keeps a short-lived bootstrap token in a mode 0600 file under `FRIDAY_HOME` and accepts it only before any device is paired. After that, a paired operator reviews `/v1/pairings/pending` and approves with `/v1/pairings/approve` in Desktop Settings (or uses the trusted System actions).
 3. The device calls `POST /v1/auth/challenge`.
 4. The device signs the returned challenge with its private key.
 5. The device calls `POST /v1/events/replay` or opens `/v1/stream` and sends a `client.authenticate` message.
@@ -29,13 +29,15 @@ The gateway must remain behind an authenticated TLS reverse proxy when exposed o
 
 ```caddyfile
 friday.example.com {
-    reverse_proxy 127.0.0.1:3180
+    reverse_proxy 127.0.0.1:8787
 }
 ```
 
 Caddy handles HTTPS and WebSocket upgrades. Do not expose the Events database, Vault, shell, internal plugin services, or the gateway’s loopback port directly. Use a firewall and, when WebRTC media is enabled, add a separately managed TURN service.
 
-The gateway does not provide an unauthenticated administrative approval endpoint. Pairing approval and device revocation remain trusted System actions backed by the existing Permissions and Audit boundaries.
+`/v1/pairings/bootstrap-approve` requires the private host bootstrap token, rejects attempts after the first device, and is rate limited. Treat the bootstrap file as a host credential. Device revocation remains a trusted System action. The Gateway accepts CORS requests from Electron's opaque file origin and local HTTP preview origins; nonlocal browser origins are rejected.
+
+Paired operators can call `/v1/plugins/list` and `/v1/plugins/set-enabled` to inspect and persist package enablement. Responses omit entrypoint paths. Changes require a restart; write requests pass through the normal Gateway permission check.
 
 ## Profile and Conversation APIs
 
@@ -130,7 +132,7 @@ git diff --check
 
 For a manual deployment check, start the gateway on loopback and verify:
 
-1. `curl --fail http://127.0.0.1:3180/health` returns a healthy response.
+1. `curl --fail http://127.0.0.1:8787/health` returns a healthy response.
 2. An unapproved device cannot request an authentication challenge.
 3. A paired device can sign a challenge and open `/v1/stream`.
 4. Reconnecting with the previous `afterSequence` returns only later durable events.

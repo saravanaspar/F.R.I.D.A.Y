@@ -13,8 +13,9 @@ import { ARTIFACTS_CAPABILITY } from "../artifacts/contract.js";
 import { PERMISSIONS_CAPABILITY } from "../permissions/contract.js";
 import { PERMISSIONS_TRUSTED_CAPABILITY } from "../permissions/trusted-contract.js";
 import { SYSTEM_ACTION_CONTRIBUTION, SYSTEM_STATUS_CONTRIBUTION } from "../system/contract.js";
-import { CLIENT_GATEWAY_CAPABILITY, type ClientConnection, type ClientConnectInput, type ClientEventMessage, type ClientGatewayListenOptions, type ClientGatewayServerStatus, type ClientGatewayService } from "./contract.js";
+import { CLIENT_GATEWAY_CAPABILITY, type ClientConnection, type ClientConnectInput, type ClientEventMessage, type ClientGatewayListenOptions, type ClientGatewayServerStatus, type ClientGatewayService, type ClientPluginManagement } from "./contract.js";
 import { startClientTransport, type ClientTransportController } from "./transport.js";
+import { activePluginCatalog, discoverPlugins, setPluginEnabled } from "../../packages/plugin-packages.js";
 
 function eventMessage(event: EventRecord, requestId: string): ClientEventMessage {
   return Object.freeze({
@@ -39,6 +40,15 @@ const clientsPlugin: FridayPlugin = definePlugin({
   const permissionsTrusted = ctx.services.require(PERMISSIONS_TRUSTED_CAPABILITY);
   const connections = new Map<string, { readonly connectionId: string; readonly deviceId: string; readonly role: "read-only" | "operator"; readonly connectedAt: string; readonly close: () => void }>();
   let transport: ClientTransportController | undefined;
+  const configuredCatalog = (): readonly string[] => {
+    const entries = activePluginCatalog();
+    if (!entries) throw new Error("plugin management is unavailable outside configured runtime");
+    return entries;
+  };
+  let pluginManagement: ClientPluginManagement = {
+    list: async () => (await discoverPlugins(configuredCatalog())).map(({ id, name, version, builtIn, enabled }) => ({ id, name, version, builtIn, enabled })),
+    setEnabled: (id, enabled) => setPluginEnabled(id, enabled, configuredCatalog()),
+  };
 
   const service: ClientGatewayService = Object.freeze({
     connect: async (input: ClientConnectInput) => {
@@ -89,8 +99,13 @@ const clientsPlugin: FridayPlugin = definePlugin({
     },
     connections: () => Object.freeze([...connections.values()].map(({ connectionId, deviceId, role, connectedAt }) => Object.freeze({ connectionId, deviceId, role, connectedAt }))),
     latestSequence: () => events.storageStatus().latestSequence,
+    configurePluginManagement: (configured: ClientPluginManagement) => { pluginManagement = configured; },
     start: async (options: ClientGatewayListenOptions = {}) => {
       if (!transport) transport = await startClientTransport(service, devices, permissions, permissionsTrusted, options, {
+        pluginManagement: {
+          list: () => pluginManagement.list(),
+          setEnabled: (id, enabled) => pluginManagement.setEnabled(id, enabled),
+        },
         agentProfiles: ctx.services.optional(AGENT_PROFILES_CAPABILITY),
         conversations: ctx.services.optional(CONVERSATIONS_CAPABILITY),
         turnRuntime: ctx.services.optional(TURN_LOOP_CAPABILITY),
@@ -110,6 +125,15 @@ const clientsPlugin: FridayPlugin = definePlugin({
     serverStatus: (): ClientGatewayServerStatus => transport?.status() ?? Object.freeze({ running: false, connections: service.connections().length, latestSequence: service.latestSequence() }),
   });
   ctx.services.provide(CLIENT_GATEWAY_CAPABILITY, service);
+  if (process.env.FRIDAY_GATEWAY_PORT !== undefined) {
+    ctx.afterReady(async () => {
+      const port = Number(process.env.FRIDAY_GATEWAY_PORT);
+      if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) {
+        throw new Error("FRIDAY_GATEWAY_PORT must be an integer from 0 to 65535");
+      }
+      await service.start({ port });
+    });
+  }
   ctx.contribute(SYSTEM_STATUS_CONTRIBUTION, { id: "clients", label: "Client Gateway", snapshot: () => service.serverStatus() });
   ctx.contribute(SYSTEM_ACTION_CONTRIBUTION, {
     id: "clients.start", label: "Start client gateway", description: "Start the loopback HTTP/WebSocket gateway. Put Caddy in front for public TLS.",

@@ -7,6 +7,8 @@ import { acquireRuntimeLease, isVerifiedLifecycleSuccessor } from "./runtime-coo
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { installFatalCrashHandlers, recordFatalCrash } from "./crash-log.js";
+import { pluginHome } from "../packages/plugin-packages.js";
+import { join } from "node:path";
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 
@@ -63,6 +65,10 @@ export async function runRuntime(): Promise<void> {
     process.env.FRIDAY_BOOTSTRAP_CONFIG = bootstrapConfigPath;
     await loadRuntimeEnvironment();
     await prepareRuntimeWorkspace(process.env);
+    // A first-party client needs a predictable loopback endpoint on ordinary boot.
+    // Tests that assemble the plugin graph directly do not inherit this runtime policy.
+    process.env.FRIDAY_GATEWAY_PORT ??= "8787";
+    process.env.FRIDAY_PAIRING_BOOTSTRAP_FILE ??= join(pluginHome(), "gateway-pairing-bootstrap.json");
     const verifiedLifecycleSuccessor = await isVerifiedLifecycleSuccessor(process.env);
     releaseRuntimeLease = await acquireRuntimeLease({
       allowConcurrent: verifiedLifecycleSuccessor,

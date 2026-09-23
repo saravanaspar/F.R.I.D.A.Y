@@ -721,7 +721,7 @@ function contributionTools(
   const capabilitySelected = capabilityProfile === "none"
     ? []
     : capabilityProfile === "computer"
-      ? contributions.filter((contribution) => contribution.sourcePluginId === "computer")
+      ? contributions.filter((contribution) => contribution.sourcePluginId === "cua" || contribution.sourcePluginId === "computer")
       : contributions;
   const selected = enabledPlugins.length === 0
     ? capabilitySelected
@@ -1337,7 +1337,8 @@ export function createAgentTurnExecutor(
               if (capabilityProfile === "none" && rendered.authority !== "user-config") return [];
               if (capabilityProfile === "computer"
                 && rendered.authority !== "user-config"
-                && !contribution.id.startsWith("computer-")) return [];
+                && !contribution.id.startsWith("computer-")
+                && !contribution.id.startsWith("cua-")) return [];
               const content = rendered.content.trim();
               return content ? [{ id: contribution.id, content, authority: rendered.authority, cache: rendered.cache }] : [];
             })
@@ -1660,6 +1661,7 @@ export function createAgentTurnExecutor(
             throw new Error(`Capability profile ${capabilityProfile} is only valid for utility Agent execution`);
           }
           const computerCapabilityRequested = capabilityProfile === "computer";
+          const cuaAvailable = dependencies.toolContributions?.().some((tool) => tool.sourcePluginId === "cua") === true;
           activeRunToolTurns = 0;
           activeRunToolTurnLimitReached = false;
           activeRunToolTurnLimit = computerCapabilityRequested ? maxComputerToolTurns : maxToolTurns;
@@ -1670,7 +1672,7 @@ export function createAgentTurnExecutor(
           activeComputerNoProgressLoopDetected = false;
           if (computerCapabilityRequested
             && (profile?.enabledPlugins.length ?? 0) > 0
-            && profile?.enabledPlugins.includes("computer") !== true) {
+            && profile?.enabledPlugins.includes(cuaAvailable ? "cua" : "computer") !== true) {
             throw new Error(`Computer capability is disabled by Agent Profile ${profile!.id}`);
           }
 
@@ -1702,7 +1704,7 @@ export function createAgentTurnExecutor(
           let computerService: ComputerService | undefined;
           let computerExecution: ComputerExecutionBinding | undefined;
           let computerLeaseKeeper: { stop(): Promise<void> } | undefined;
-          if (projectWorkspace?.target.kind === "computer-node" || computerCapabilityRequested) {
+          if (projectWorkspace?.target.kind === "computer-node" || (computerCapabilityRequested && !cuaAvailable)) {
             const projectComputerNodeId = projectWorkspace?.target.kind === "computer-node"
               ? projectWorkspace.target.computerNodeId
               : undefined;
@@ -1836,8 +1838,8 @@ export function createAgentTurnExecutor(
           let tools: AgentTool[];
           try {
             tools = buildTools(extensionContext, capabilityProfile);
-            if (capabilityProfile === "computer" && !tools.some((tool) => tool.name.startsWith("computer_"))) {
-              throw new Error("Computer capability was routed for this turn, but no Computer Agent tools are registered");
+            if (capabilityProfile === "computer" && !tools.some((tool) => tool.name.startsWith(cuaAvailable ? "cua_" : "computer_"))) {
+              throw new Error("Computer capability was routed for this turn, but no computer-use Agent tools are registered");
             }
           } catch (error) {
             if (computerLeaseKeeper) {
@@ -2237,7 +2239,8 @@ export function createAgentTurnExecutor(
         });
       }
 
-      if (context.decision.execution.capabilityProfile === "computer" && isComputerStatusQuery(context.turn.text)) {
+      const cuaAvailable = dependencies.toolContributions?.().some((tool) => tool.sourcePluginId === "cua") === true;
+      if (!cuaAvailable && context.decision.execution.capabilityProfile === "computer" && isComputerStatusQuery(context.turn.text)) {
         if (!computerServiceForControl) return Object.freeze({ text: "Computer status is unavailable because the Computer capability is not active." });
         const recent = recentComputerStatusBinding(context.turn);
         if (!recent) {
@@ -2246,7 +2249,7 @@ export function createAgentTurnExecutor(
         return Object.freeze({ text: await computerStatusReply(computerServiceForControl, recent, context.signal) });
       }
 
-      const trackedComputerTurn = context.decision.execution.capabilityProfile === "computer";
+      const trackedComputerTurn = !cuaAvailable && context.decision.execution.capabilityProfile === "computer";
       const markerPath = trackedComputerTurn ? computerTurnMarkerPath(context.turn) : undefined;
       if (markerPath) {
         const previous = readComputerTurnMarker(markerPath);

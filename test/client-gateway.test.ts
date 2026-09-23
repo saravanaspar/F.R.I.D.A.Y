@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { clientRequestSigningPayload, clientWebSocketSigningPayload } from "@friday/client-protocol";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -34,6 +34,7 @@ import { createPermissionsController } from "../plugins/permissions/policy.js";
 const execFileAsync = promisify(execFile);
 const roots: string[] = [];
 const originalStateDir = process.env.FRIDAY_STATE_DIR;
+const originalPairingFile = process.env.FRIDAY_PAIRING_BOOTSTRAP_FILE;
 
 function installTestPermissions(stateDir: string): void {
   const controller = createPermissionsController({ stateDir: join(stateDir, "permissions"), approve: async () => true });
@@ -51,10 +52,41 @@ afterEach(async () => {
   uninstallCapabilityRegistry();
   if (originalStateDir === undefined) delete process.env.FRIDAY_STATE_DIR;
   else process.env.FRIDAY_STATE_DIR = originalStateDir;
+  if (originalPairingFile === undefined) delete process.env.FRIDAY_PAIRING_BOOTSTRAP_FILE;
+  else process.env.FRIDAY_PAIRING_BOOTSTRAP_FILE = originalPairingFile;
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 describe("Phase 1 client gateway", () => {
+  it("approves only the first device with a private local bootstrap token", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "friday-first-device-"));
+    roots.push(stateDir);
+    process.env.FRIDAY_STATE_DIR = stateDir;
+    const bootstrapFile = join(stateDir, "bootstrap.json");
+    process.env.FRIDAY_PAIRING_BOOTSTRAP_FILE = bootstrapFile;
+    const host = new PluginTestHost();
+    await host.activatePlugin(capabilitiesPlugin);
+    installTestPermissions(stateDir);
+    await host.activatePlugin(createEventsPlugin({ autoStartWorker: false }));
+    await host.activatePlugin(devicesPlugin);
+    await host.activatePlugin(clientsPlugin);
+    await host.completePluginBootstrap();
+    const gateway = requireCapability(CLIENT_GATEWAY_CAPABILITY);
+    const devices = requireCapability(DEVICES_CAPABILITY);
+    const status = await gateway.start({ port: 0 });
+    const base = `http://127.0.0.1:${status.port}`;
+    const keys = generateKeyPairSync("ed25519");
+    const first = await devices.beginPairing({ deviceId: "first-desktop", name: "First desktop", type: "desktop", publicKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString() });
+    const { token } = JSON.parse(await readFile(bootstrapFile, "utf8")) as { token: string };
+    const approve = (pairingId: string, credential: string) => fetch(`${base}/v1/pairings/bootstrap-approve`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pairingId, token: credential }) });
+    expect((await approve(first.pairingId, "incorrect")).status).toBe(400);
+    expect((await approve(first.pairingId, token)).status).toBe(200);
+    expect(devices.devices()).toMatchObject([{ deviceId: "first-desktop", role: "operator" }]);
+    const second = await devices.beginPairing({ deviceId: "second-desktop", name: "Second desktop", type: "desktop", publicKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString() });
+    expect((await approve(second.pairingId, token)).status).toBe(400);
+    await gateway.stop();
+    await host.dispose();
+  });
   it("lets two clients observe the same session and job event history", async () => {
     const stateDir = await mkdtemp(join(tmpdir(), "friday-client-gateway-"));
     roots.push(stateDir);
@@ -134,7 +166,28 @@ describe("Phase 1 client gateway", () => {
     const status = await gateway.start({ port: 0 });
     expect(status.running).toBe(true);
     const base = `http://127.0.0.1:${status.port}`;
+    let enabled = true;
+    gateway.configurePluginManagement({
+      list: async () => [{ id: "sample", name: "Sample", version: "1.0.0", builtIn: false, enabled }],
+      setEnabled: async (id, next) => { if (id !== "sample") throw new Error("unknown plugin"); enabled = next; },
+    });
+    const pluginPost = async (path: string, payload: Record<string, unknown> = {}) => {
+      const issued = await devices.issueChallenge(descriptor.deviceId);
+      return fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(signedRequestBody(descriptor.deviceId, issued.challenge, path, payload, keys.privateKey)) });
+    };
+    const pluginList = await pluginPost("/v1/plugins/list");
+    expect(pluginList.status).toBe(200);
+    expect(await pluginList.json()).toMatchObject({ plugins: [{ id: "sample", enabled: true }] });
+    const toggled = await pluginPost("/v1/plugins/set-enabled", { id: "sample", enabled: false });
+    expect(toggled.status).toBe(200);
+    expect(await toggled.json()).toMatchObject({ requiresRestart: true, plugins: [{ id: "sample", enabled: false }] });
     expect((await fetch(`${base}/health`)).status).toBe(200);
+    const preflight = await fetch(`${base}/v1/turns`, { method: "OPTIONS", headers: { origin: "null", "access-control-request-method": "POST", "access-control-request-headers": "content-type" } });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe("null");
+    const untrusted = await fetch(`${base}/v1/turns`, { method: "OPTIONS", headers: { origin: "https://untrusted.example" } });
+    expect(untrusted.status).toBe(403);
+    expect(untrusted.headers.get("access-control-allow-origin")).toBeNull();
     const challengeResponse = await fetch(`${base}/v1/auth/challenge`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceId: descriptor.deviceId }) });
     const challenge = await challengeResponse.json() as { challenge: string };
     const replayBody = { afterSequence: 0 };

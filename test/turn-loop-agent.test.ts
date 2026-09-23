@@ -1198,6 +1198,54 @@ describe("Turn Loop agent executor", () => {
     }
   });
 
+  it("routes a browser utility turn to CUA without requiring a legacy Computer lease", async () => {
+    process.env.FRIDAY_MODEL_PROVIDER = "faux";
+    process.env.FRIDAY_MODEL_ID = "faux-1";
+    const friday = new PluginTestHost();
+    for (const plugin of [capabilitiesPlugin, sessionResourcesPlugin, sessionsPlugin, promptsPlugin, modelPlugin, agentPlugin]) {
+      await friday.activatePlugin(plugin);
+    }
+    const faux = modelRuntime.registerFauxProvider({ provider: "faux" });
+    const models = withTestModel(requireCapability(MODEL_CAPABILITY), faux);
+    const tools = { createTool() { throw new Error("not used"); }, createAllTools() { return {}; } } as unknown as ToolsService;
+    const executor = createAgentTurnExecutor({
+      agent: requireCapability(AGENT_CAPABILITY),
+      model: models,
+      prompts: requireCapability(PROMPTS_CAPABILITY),
+      sessionResources: requireCapability(SESSION_RESOURCES_CAPABILITY),
+      sessions: requireCapability(SESSIONS_CAPABILITY),
+      tools,
+      toolContributions: () => [
+        { id: "cua-list-test", sourcePluginId: "cua", name: "cua_list_tools", label: "CUA tools", description: "Discover CUA", parameters: { type: "object", properties: {} }, async execute() { return { output: [] }; } },
+        { id: "tools-unrelated-test", sourcePluginId: "tools", name: "unrelated_tool", label: "Other", description: "Other", parameters: { type: "object", properties: {} }, async execute() { return { output: [] }; } },
+      ],
+      promptSectionContributions: () => [
+        { id: "cua-driver-guidance", render: () => ({ content: "CUA BROWSER GUIDANCE", authority: "host-policy", cache: "stable" }) },
+      ],
+    }, { stateDir: tempRoot() });
+    try {
+      let exposed: string[] = [];
+      let prompt = "";
+      faux.setResponses([(context) => {
+        const request = context as unknown as { tools?: readonly { name?: string }[]; systemPrompt?: string };
+        exposed = (request.tools ?? []).flatMap((tool) => tool.name ? [tool.name] : []);
+        prompt = request.systemPrompt ?? "";
+        return modelRuntime.fauxAssistantMessage("Browser ready");
+      }]);
+      const result = await executor.execute({
+        turn: turn("cua-browser-u1", "open a browser"),
+        decision: { messageId: "cua-browser-u1", destination: { kind: "transient", id: "transient:utility" }, execution: { profile: "utility", capabilityProfile: "computer" }, confidence: 1 },
+      });
+      expect(result).toEqual({ text: "Browser ready" });
+      expect(exposed).toEqual(["cua_list_tools"]);
+      expect(prompt).toContain("CUA BROWSER GUIDANCE");
+    } finally {
+      await executor.dispose();
+      faux.unregister();
+      await friday.dispose();
+    }
+  });
+
   it("leases a Computer screen and exposes only Computer tools for a transient Computer utility turn", async () => {
     process.env.FRIDAY_MODEL_PROVIDER = "faux";
     process.env.FRIDAY_MODEL_ID = "faux-1";

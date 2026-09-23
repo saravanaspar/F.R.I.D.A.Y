@@ -26,6 +26,7 @@ export interface PairingRequest {
 }
 
 export interface DevicesService {
+  initialize(): Promise<void>;
   beginPairing(device: DeviceDescriptor, options?: { readonly ttlMs?: number | undefined }): Promise<PairingRequest>;
   approvePairing(pairingId: string, options?: { readonly role?: DeviceRole | undefined }): Promise<DeviceRecord>;
   pendingPairings(): readonly PairingRequest[];

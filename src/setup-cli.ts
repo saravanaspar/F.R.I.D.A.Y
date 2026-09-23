@@ -13,7 +13,6 @@ import { initializeOnboardingState, updateOnboardingStep, type OnboardingStepId 
 import type { HostPrivilegeMode } from "../plugins/runtime-settings/runtime-env.js";
 import { selectSandboxProvider } from "../plugins/sandbox/providers/index.js";
 import { recordSetupLog } from "./setup-log.js";
-import { setupComputer } from "./computer-setup.js";
 import { setupFridayUserService } from "./user-service-setup.js";
 
 async function setupSelfRepository(path: string): Promise<void> {
@@ -47,7 +46,7 @@ function setupHelp(): void {
     "  friday setup sandbox            Prepare the configured sandbox provider and its approved image",
     "  friday setup whatsapp           Install the optional WhatsApp bridge dependencies",
     "  friday setup voice              Configure hosted/local STT + TTS and automatically provision selected local models",
-    "  friday setup computer [shared|managed-cdp] [1-8]  Configure Linux X11 Computer; shared keeps your normal browser logins/windows",
+    "  friday setup cua               Verify the installed Cua Driver MCP connection",
     "  friday setup service            Install/update the always-on FRIDAY user service from the release binary",
     "  friday setup privileges [broker|none]  Locally enable the restricted privilege broker or disable all FRIDAY sudo operations",
     "  friday setup self-repository <path>  Save the canonical FRIDAY source checkout for self-improvement",
@@ -150,11 +149,6 @@ async function runCustomOptionalSetup(io: OnboardingIO, home: string, hostPrivil
   });
   await optionalStep(io, home, "sandbox", "Prepare the coding sandbox now?", setupSandbox);
   await optionalStep(io, home, "executionPython", "Provision the private execution Python environment now?", async () => { await setupExecutionPython(home); });
-
-  const computer = io.confirm
-    ? await io.confirm("Configure Linux Computer/browser automation now?", false)
-    : ["y", "yes"].includes((await io.question("Configure Linux Computer/browser automation now? [y/N] ")).trim().toLowerCase());
-  if (computer) await setupComputer();
 
   const service = io.confirm
     ? await io.confirm("Install FRIDAY as an always-on user service now?", false)
@@ -282,28 +276,15 @@ async function runSetupCliInternal(args: readonly string[]): Promise<void> {
       : "[privileges] policy=none: FRIDAY will not invoke sudo; root-required operations must be run manually on this host.\n");
     return;
   }
-  if (component === "computer") {
-    if (rest.length > 2) throw new Error("Usage: friday setup computer [shared|managed-cdp] [1-8]");
-    let mode: "shared" | "managed-cdp" | undefined;
-    let agentScreens: number | undefined;
-    for (const raw of rest) {
-      const value = raw.trim().toLowerCase();
-      if (value === "shared" || value === "managed-cdp") {
-        if (mode !== undefined) throw new Error("Usage: friday setup computer [shared|managed-cdp] [1-8]");
-        mode = value;
-        continue;
-      }
-      if (/^[1-8]$/.test(value)) {
-        if (agentScreens !== undefined) throw new Error("Usage: friday setup computer [shared|managed-cdp] [1-8]");
-        agentScreens = Number(value);
-        continue;
-      }
-      throw new Error("Usage: friday setup computer [shared|managed-cdp] [1-8]");
-    }
-    await setupComputer({
-      ...(mode === undefined ? {} : { browserMode: mode }),
-      ...(agentScreens === undefined ? {} : { agentScreens }),
-    });
+  if (component === "computer") throw new Error("Legacy Computer setup has been retired. Install Cua Driver and run `friday setup cua`.");
+  if (component === "cua") {
+    if (rest.length) throw new Error("Usage: friday setup cua");
+    const { CuaDriver } = await import("../plugins/cua/driver.js");
+    const driver = new CuaDriver();
+    try {
+      const tools = await driver.listTools();
+      process.stdout.write(`[cua] Driver ready: ${tools.length} desktop/browser tools available.\n`);
+    } finally { await driver.close(); }
     return;
   }
   if (component === "service") {

@@ -62,6 +62,7 @@ describe("friday doctor", () => {
       // Keep this fixture independent from a developer host that already has
       // the Linux Computer provider enabled through environment.d/systemd.
       FRIDAY_COMPUTER_PROVIDER: "none",
+      FRIDAY_CUA_DRIVER_BIN: "/friday-test/nonexistent-cua-driver",
     };
     const checks = await collectDoctorChecks(environment);
     const byId = new Map(checks.map((entry) => [entry.id, entry]));
@@ -75,7 +76,7 @@ describe("friday doctor", () => {
     expect(byId.get("channel-access")).toMatchObject({ level: "ok" });
     expect(byId.get("permission-mode")).toMatchObject({ level: "ok", message: "ask" });
     expect(byId.get("sandbox-network")).toMatchObject({ level: "ok" });
-    expect(byId.get("computer-linux")).toMatchObject({ level: "info", message: "not configured" });
+    expect(byId.get("cua-driver")).toMatchObject({ level: "info", message: "not installed" });
     expect(byId.get("vault")?.level).not.toBe("error");
     expect(byId.get("self-repository")).toMatchObject({ level: "ok" });
     expect(byId.get("node-toolchain")).toMatchObject({ level: "ok" });
@@ -115,7 +116,7 @@ describe("friday doctor", () => {
     expect(credential?.detail).toBe(modelOAuthCredentialVaultRef("anthropic"));
   });
 
-  it("uses persisted binary-owned Computer settings instead of stale shell Computer variables", async () => {
+  it("reports CUA health without activating persisted X11 Computer settings", async () => {
     const home = await temp("friday-doctor-computer-env-home-");
     const workspace = await temp("friday-doctor-computer-env-workspace-");
     await saveRuntimeSettings({
@@ -147,14 +148,14 @@ describe("friday doctor", () => {
       FRIDAY_COMPUTER_CDP_URL: "http://127.0.0.1:9222/",
       FRIDAY_COMPUTER_CDP_PORT: "9222",
       FRIDAY_COMPUTER_BROWSER_PROFILE_DIR: "/tmp/stale-friday-profile",
+      FRIDAY_CUA_DRIVER_BIN: "/friday-test/nonexistent-cua-driver",
     };
 
     const checks = await collectDoctorChecks(environment);
-    const computer = checks.find((entry) => entry.id === "computer-linux");
+    const cua = checks.find((entry) => entry.id === "cua-driver");
 
-    expect(computer?.detail).toContain("provider=linux-x11");
-    expect(computer?.detail).not.toContain("Configured FRIDAY X11 desktop 3 does not exist");
-    expect(computer?.detail).not.toContain("managed browser CDP fallback");
+    expect(cua).toMatchObject({ level: "info", message: "not installed" });
+    expect(cua?.detail).toContain("friday setup cua");
   });
 
   it("fails health when first-run configuration is missing and gives one-line fixes", async () => {

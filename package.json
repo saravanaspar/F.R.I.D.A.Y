@@ -46,8 +46,8 @@
     "generate:builtin-plugins": "node scripts/generate-builtin-plugins.mjs",
     "clean:workspace-node-modules": "node scripts/workspace-packages.mjs clean-node-modules",
     "check:workspace-node-modules": "node scripts/workspace-packages.mjs check-node-modules",
-    "presetup:computer": "npm run build:workspaces",
-    "setup:computer": "tsx src/friday.ts setup computer",
+    "presetup:cua": "npm run build:workspaces",
+    "setup:cua": "tsx src/friday.ts setup cua",
     "presetup:service": "npm run build:workspaces",
     "setup:service": "tsx src/friday.ts setup service",
     "verify:report": "node scripts/verify-report.mjs"

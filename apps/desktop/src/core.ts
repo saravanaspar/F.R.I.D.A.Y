@@ -57,6 +57,9 @@ export type DesktopAction =
   | { readonly type: "connection"; readonly status: DesktopConnection }
   | { readonly type: "surface"; readonly surface: DesktopSurface }
   | { readonly type: "send-message"; readonly text: string; readonly now?: string; readonly messageId?: string; readonly jobId?: string }
+  | { readonly type: "message-received"; readonly text: string; readonly role: DesktopMessageRole; readonly messageId?: string }
+  | { readonly type: "conversation-selected"; readonly conversationId: string }
+  | { readonly type: "computer-state"; readonly nodeLabel: string; readonly screenLabel: string; readonly url: string; readonly control: "agent" | "human" }
   | { readonly type: "job-update"; readonly jobId: string; readonly status: DesktopJobStatus; readonly progress: number; readonly approvalLabel?: string; readonly artifactId?: string }
   | { readonly type: "artifact-added"; readonly artifact: DesktopArtifact }
   | { readonly type: "computer-toggle" }
@@ -116,6 +119,9 @@ export function createDesktopState(conversationId = "conversation-demo"): Deskto
 export function reduceDesktopState(state: DesktopState, action: DesktopAction): DesktopState {
   switch (action.type) {
     case "connection": return { ...state, connection: action.status };
+    case "conversation-selected": return { ...state, conversationId: action.conversationId, messages: [], jobs: [], artifacts: [] };
+    case "message-received": return { ...state, messages: [...state.messages, { id: action.messageId ?? crypto.randomUUID(), role: action.role, text: action.text, createdAt: new Date().toISOString() }] };
+    case "computer-state": return { ...state, computer: { ...state.computer, nodeLabel: action.nodeLabel, screenLabel: action.screenLabel, url: action.url, control: action.control } };
     case "surface": return { ...state, activeSurface: action.surface, computer: action.surface === "computer" ? { ...state.computer, open: true } : state.computer };
     case "notice": {
       if (action.message !== undefined) return { ...state, notice: action.message };
