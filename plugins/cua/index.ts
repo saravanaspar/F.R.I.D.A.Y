@@ -1,8 +1,9 @@
+import { createHash } from "node:crypto";
 import type { FridayPlugin } from "../../src/plugin.js";
 import { definePlugin } from "../capabilities/protocol.js";
 import { PERMISSIONS_CAPABILITY, type PermissionEffect } from "../permissions/contract.js";
 import { AGENT_PROMPT_SECTION_CONTRIBUTION, AGENT_TOOL_CONTRIBUTION, type AgentExtensionJsonValue, type AgentToolContributionContent, type AgentToolExecutionContext } from "../turn-loop/contract.js";
-import { CuaDriver } from "./driver.js";
+import { CuaDriver, type CuaTool } from "./driver.js";
 import { CUA_CAPABILITY } from "./contract.js";
 
 const READ_TOOLS = new Set([
@@ -34,6 +35,14 @@ function jsonValue(value: unknown): AgentExtensionJsonValue {
     Object.entries(value).filter(([, item]) => item !== undefined).map(([key, item]) => [key, jsonValue(item)]),
   );
   throw new Error("CUA driver returned non-JSON data");
+}
+
+/** Force a host-owned CUA lifecycle session when the upstream tool supports it. */
+export function scopedCuaArguments(tool: CuaTool, args: Record<string, unknown>, context?: Pick<AgentToolExecutionContext, "ownerScope" | "sessionId">): Record<string, unknown> {
+  const properties = tool.inputSchema.properties;
+  if (!properties || typeof properties !== "object" || Array.isArray(properties) || !("session" in properties)) return args;
+  const session = createHash("sha256").update(`${context?.ownerScope ?? "local"}:${context?.sessionId ?? "local"}`).digest("hex").slice(0, 20);
+  return { ...args, session: `friday-${session}` };
 }
 
 export interface CuaPluginOptions {
@@ -90,7 +99,9 @@ export function createCuaPlugin(options: CuaPluginOptions = {}): FridayPlugin {
         const name = requiredString(input.tool, "tool");
         const args = toolArgs(input.arguments);
         await authorize(name, context);
-        const result = await driver.callTool(name, args, signal);
+        const descriptor = (await driver.listTools(signal)).find((tool) => tool.name === name);
+        if (!descriptor) throw new Error(`CUA driver has no tool named ${name}`);
+        const result = await driver.callTool(name, scopedCuaArguments(descriptor, args, context), signal);
         if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("CUA driver returned an invalid tool result");
         const response = result as { isError?: boolean; structuredContent?: unknown; content?: unknown };
         if (response.isError) return { isError: true, output: jsonValue(response.structuredContent ?? response.content ?? "CUA tool failed") };
