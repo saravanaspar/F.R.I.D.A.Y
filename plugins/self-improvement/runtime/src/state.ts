@@ -34,7 +34,7 @@ function assertPrivateStateDir(stateDir: string, create: boolean): void {
   if (info.isSymbolicLink() || !info.isDirectory()) {
     throw new Error(`Self-improvement state directory must be a private directory: ${stateDir}`);
   }
-  if ((info.mode & 0o077) !== 0) {
+  if (process.platform !== "win32" && (info.mode & 0o077) !== 0) {
     throw new Error(`Self-improvement state directory permissions are too broad: ${stateDir}`);
   }
 }

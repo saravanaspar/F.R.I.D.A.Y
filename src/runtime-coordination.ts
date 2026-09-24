@@ -60,7 +60,7 @@ async function privateDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
   await chmod(path, 0o700);
   const info = await lstat(path);
-  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0) {
+  if (!info.isDirectory() || info.isSymbolicLink() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
     throw new Error(`FRIDAY runtime coordination requires a private directory: ${path}`);
   }
 }
@@ -167,7 +167,7 @@ export async function isVerifiedLifecycleSuccessor(environment: NodeJS.ProcessEn
   if (supplied === 0) return false;
   if (supplied !== 3 || !statusPath || !requestId || !token) throw new Error("Incomplete lifecycle restart environment");
   const info = await lstat(statusPath);
-  if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 || info.size > 64 * 1024) {
+  if (!info.isFile() || info.isSymbolicLink() || (process.platform !== "win32" && (info.mode & 0o077) !== 0) || info.size > 64 * 1024) {
     throw new Error(`Lifecycle restart status is unsafe: ${statusPath}`);
   }
   let raw: unknown;
@@ -278,7 +278,7 @@ async function liveLeases(root: string): Promise<ProcessLease[]> {
       throw new Error(`Unsafe runtime lease entry: ${path}`);
     }
     const info = await lstat(path);
-    if ((info.mode & 0o077) !== 0 || info.size > 16 * 1024) throw new Error(`Runtime lease is not private and bounded: ${path}`);
+    if ((process.platform !== "win32" && (info.mode & 0o077) !== 0) || info.size > 16 * 1024) throw new Error(`Runtime lease is not private and bounded: ${path}`);
     const lease = parseLease(await readFile(path, "utf8"), path);
     if (entry.name !== `${lease.pid}-${lease.token}.json`) throw new Error(`Runtime lease filename disagrees with contents: ${path}`);
     if (await leaseProcessAlive(lease)) live.push(lease);

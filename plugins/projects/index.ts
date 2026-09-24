@@ -204,7 +204,7 @@ async function privateStateRoot(override: string | undefined, create: boolean): 
   const root = stateRoot(override);
   try {
     const info = await lstat(root);
-    if (info.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o077) !== 0) throw new Error("project state directory must be private");
+    if (info.isSymbolicLink() || !info.isDirectory() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) throw new Error("project state directory must be private");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT" && !create) return;
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -218,7 +218,7 @@ async function readState(override?: string): Promise<readonly Project[]> {
   try {
     const file = statePath(override);
     const info = await lstat(file);
-    if (info.isSymbolicLink() || !info.isFile() || (info.mode & 0o077) !== 0) throw new Error("project state file must be private");
+    if (info.isSymbolicLink() || !info.isFile() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) throw new Error("project state file must be private");
     const parsed = JSON.parse(await readFile(file, "utf8")) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid project state");
     const raw = parsed as Record<string, unknown>;

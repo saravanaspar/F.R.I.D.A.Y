@@ -83,7 +83,7 @@ async function ensurePrivateParent(path: string): Promise<void> {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await chmod(dir, 0o700);
   const info = await lstat(dir);
-  if (info.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o077) !== 0) {
+  if (info.isSymbolicLink() || !info.isDirectory() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
     throw new Error(`Persona state directory is not private: ${dir}`);
   }
 }
@@ -134,7 +134,7 @@ async function readState(home: string): Promise<PersonaState> {
   const path = statePath(home);
   try {
     const info = await lstat(path);
-    if (info.isSymbolicLink() || !info.isFile() || (info.mode & 0o077) !== 0) {
+    if (info.isSymbolicLink() || !info.isFile() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
       throw new Error(`Persona state file is not a private regular file: ${path}`);
     }
     const parsed = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;

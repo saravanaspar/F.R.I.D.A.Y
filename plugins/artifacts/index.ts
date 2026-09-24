@@ -73,14 +73,14 @@ async function assertPrivateRoot(root: string, create: boolean): Promise<void> {
   try {
     const info = await lstat(root);
     if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`Artifact root must be a private directory: ${root}`);
-    if ((info.mode & 0o077) !== 0) throw new Error(`Artifact root permissions are too broad: ${root}`);
+    if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error(`Artifact root permissions are too broad: ${root}`);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     if (!create) return;
     await mkdir(root, { recursive: true, mode: 0o700 });
     await chmod(root, 0o700);
     const info = await lstat(root);
-    if (info.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o077) !== 0) {
+    if (info.isSymbolicLink() || !info.isDirectory() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
       throw new Error(`Artifact root could not be made private: ${root}`);
     }
   }
@@ -103,7 +103,7 @@ async function ensurePrivateDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
   await chmod(path, 0o700);
   const info = await lstat(path);
-  if (info.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o077) !== 0) {
+  if (info.isSymbolicLink() || !info.isDirectory() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
     throw new Error(`Prepared attachment directory must remain private: ${path}`);
   }
 }
@@ -189,7 +189,7 @@ function idFromRef(ref: string): string {
 async function assertPrivateRegular(path: string): Promise<void> {
   const info = await lstat(path);
   if (info.isSymbolicLink() || !info.isFile()) throw new Error(`Artifact path is not a regular file: ${path}`);
-  if ((info.mode & 0o077) !== 0) throw new Error(`Artifact permissions are too broad: ${path}`);
+  if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error(`Artifact permissions are too broad: ${path}`);
 }
 
 function recordPath(root: string, id: string): string { return join(root, `${id}.json`); }

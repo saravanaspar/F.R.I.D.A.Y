@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { collectContributions, definePlugin, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
@@ -255,7 +255,7 @@ describe("runtime settings", () => {
       timezone: "UTC",
       selfRepository: "/srv/friday-source",
     }, home);
-    await expect(readRuntimeSettings(home)).resolves.toMatchObject({ selfRepository: "/srv/friday-source" });
+    await expect(readRuntimeSettings(home)).resolves.toMatchObject({ selfRepository: resolve("/srv/friday-source") });
 
     await updateRuntimeSettings({ selfRepository: null }, home);
     const cleared = await readRuntimeSettings(home);

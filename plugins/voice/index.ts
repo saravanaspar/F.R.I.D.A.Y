@@ -37,7 +37,9 @@ import { readVoiceSettings, saveVoiceSettings } from "./settings.js";
 
 type VoiceSynthesisOptions = Parameters<VoiceRuntime["synthesize"]>[1];
 const AUDIO_EXTENSIONS = /\.(?:aac|flac|m4a|mp3|mp4|mpeg|mpga|ogg|opus|wav|webm)$/i;
-const MANUAL_VOICE_DEPENDENCIES = "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake curl git ffmpeg python3 python3-venv ca-certificates";
+const MANUAL_VOICE_DEPENDENCIES = process.platform === "win32"
+  ? "winget install --id Git.Git Kitware.CMake Gyan.FFmpeg Python.Python.3.11"
+  : "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential cmake curl git ffmpeg python3 python3-venv ca-certificates";
 
 function audioRecord(record: ArtifactRecord): boolean {
   return record.mimeType?.toLowerCase().startsWith("audio/") === true || AUDIO_EXTENSIONS.test(record.fileName);
@@ -370,7 +372,11 @@ const voicePlugin: FridayPlugin = definePlugin({
           const hostPrivileges = ctx.services.optional(HOST_PRIVILEGES_CAPABILITY);
           if (!hostPrivileges) throw new Error("Restricted host-privilege service is unavailable; run local setup/repair before retrying voice setup");
           const status = await hostPrivileges.status();
-          if (!status.privilegedHelperInstalled) throw new Error("Restricted privilege broker is selected but not installed. Run `friday setup privileges broker` locally; FRIDAY never requests a sudo password through chat.");
+          if (!status.privilegedHelperInstalled) {
+            throw new Error(process.platform === "win32"
+              ? "Restricted privilege broker is selected but not installed. Run `friday setup privileges broker` locally."
+              : "Restricted privilege broker is selected but not installed. Run `friday setup privileges broker` locally; FRIDAY never requests a sudo password through chat.");
+          }
           await hostPrivileges.installApprovedVoiceDependencies();
         }
         await provisionLocalVoice(candidate, home);

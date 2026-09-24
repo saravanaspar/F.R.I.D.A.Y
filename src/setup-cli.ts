@@ -49,7 +49,7 @@ function setupHelp(): void {
     "  friday setup voice              Configure hosted/local STT + TTS and automatically provision selected local models",
     "  friday setup computer [shared|managed-cdp] [1-8]  Configure Linux X11 Computer; shared keeps your normal browser logins/windows",
     "  friday setup service            Install/update the always-on FRIDAY user service from the release binary",
-    "  friday setup privileges [broker|none]  Locally enable the restricted privilege broker or disable all FRIDAY sudo operations",
+    "  friday setup privileges [broker|none]  Locally enable the restricted privilege broker or disable all FRIDAY privileged operations",
     "  friday setup self-repository <path>  Save the canonical FRIDAY source checkout for self-improvement",
     "  friday setup --help",
     "",
@@ -58,7 +58,7 @@ function setupHelp(): void {
     "the existing terminal model/runtime/voice/sandbox/Python sections as optional steps. The main reasoning model is optional during bootstrap.",
     "",
     "When FRIDAY is running, onboarding and plugin-owned administration can continue from trusted ingress channels.",
-    "Local setup remains fully available; sudo authentication and privilege-broker installation are always terminal-only.",
+    "Local setup remains fully available; privilege-broker installation is always terminal-only.",
     "",
   ].join("\n"));
 }
@@ -278,8 +278,12 @@ async function runSetupCliInternal(args: readonly string[]): Promise<void> {
     const home = getFridayHome(process.env);
     if (await readRuntimeSettings(home)) await updateRuntimeSettings({ hostPrivilegeMode: mode }, home);
     process.stdout.write(mode === "broker"
-      ? "[privileges] policy=broker: FRIDAY may run only explicitly allowlisted privileged helper operations; the model has no arbitrary sudo tool or password access.\n"
-      : "[privileges] policy=none: FRIDAY will not invoke sudo; root-required operations must be run manually on this host.\n");
+      ? (process.platform === "win32"
+          ? "[privileges] policy=broker: FRIDAY may run only explicitly allowlisted privileged helper operations.\n"
+          : "[privileges] policy=broker: FRIDAY may run only explicitly allowlisted privileged helper operations; the model has no arbitrary sudo tool or password access.\n")
+      : (process.platform === "win32"
+          ? "[privileges] policy=none: FRIDAY will not invoke privileged operations; maintenance must be run manually on this host.\n"
+          : "[privileges] policy=none: FRIDAY will not invoke sudo; root-required operations must be run manually on this host.\n"));
     return;
   }
   if (component === "computer") {

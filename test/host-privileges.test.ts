@@ -4,12 +4,16 @@ import capabilitiesPlugin from "../plugins/capabilities/index.js";
 import { definePlugin, requireCapability, uninstallCapabilityRegistry } from "../plugins/capabilities/protocol.js";
 import { HOST_PRIVILEGES_CAPABILITY } from "../plugins/host-privileges/contract.js";
 import hostPrivilegesPlugin from "../plugins/host-privileges/index.js";
-import { fridaySudoersTarget, privilegeBrokerMetadataIsSecure, privilegedProcessEnv } from "../plugins/host-privileges/privileged.js";
+import { fridaySudoersTarget, hasFridayPrivilegedHelper, installFridayPrivilegeBroker, privilegeBrokerMetadataIsSecure, privilegedProcessEnv } from "../plugins/host-privileges/privileged.js";
 import { RUNTIME_SETTINGS_CAPABILITY, type RuntimeSettingsService } from "../plugins/runtime-settings/contract.js";
 
 afterEach(() => uninstallCapabilityRegistry());
 
 describe("host privilege boundary", () => {
+  it.runIf(process.platform === "win32")("installs and validates the Windows privileged helper", async () => {
+    await installFridayPrivilegeBroker();
+    expect(await hasFridayPrivilegedHelper()).toBe(true);
+  });
   it("uses an includedir-safe deterministic sudoers filename even for dotted usernames", () => {
     const target = fridaySudoersTarget("john.smith");
     const filename = target.split("/").at(-1)!;

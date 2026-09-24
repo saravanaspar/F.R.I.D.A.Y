@@ -28,4 +28,15 @@ describe("binary-owned user-service setup", () => {
       "systemctl --user restart friday.service",
     ]);
   });
+
+  it("installs a startup script on windows", async () => {
+    const root = await mkdtemp(join(tmpdir(), "friday-service-setup-win-")); roots.push(root);
+    const appData = join(root, "appdata");
+    const target = await setupFridayUserService({
+      environment: { APPDATA: appData },
+      platform: "win32",
+    });
+    expect(target).toBe(join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "FRIDAY.cmd"));
+    expect(await readFile(target, "utf8")).toContain("@echo off");
+  });
 });

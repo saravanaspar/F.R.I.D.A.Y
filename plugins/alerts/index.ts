@@ -28,14 +28,14 @@ async function assertPrivateRoot(root: string, create: boolean): Promise<void> {
   try {
     const info = await lstat(root);
     if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`Alert state directory must be a private directory: ${root}`);
-    if ((info.mode & 0o077) !== 0) throw new Error(`Alert state directory permissions are too broad: ${root}`);
+    if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error(`Alert state directory permissions are too broad: ${root}`);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     if (!create) return;
     await mkdir(root, { recursive: true, mode: 0o700 });
     await chmod(root, 0o700);
     const info = await lstat(root);
-    if (info.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o077) !== 0) {
+    if (info.isSymbolicLink() || !info.isDirectory() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
       throw new Error(`Alert state directory could not be made private: ${root}`);
     }
   }
@@ -89,7 +89,7 @@ async function readState(): Promise<AlertState> {
   try {
     const info = await lstat(path);
     if (info.isSymbolicLink() || !info.isFile()) throw new Error("alert state is not a regular file");
-    if ((info.mode & 0o077) !== 0) throw new Error("alert state permissions are too broad");
+    if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error("alert state permissions are too broad");
     const parsed = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
     if (parsed.schema !== 1 || !Array.isArray(parsed.rules)) throw new Error("alert state schema is unsupported");
     const rules = parsed.rules.map(parseRule);

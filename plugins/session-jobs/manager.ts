@@ -316,7 +316,7 @@ async function assertPrivateFile(path: string, allowMissing: boolean): Promise<v
   try {
     const info = await lstat(path);
     if (info.isSymbolicLink() || !info.isFile()) throw new Error(`Session-jobs state must be a regular file: ${path}`);
-    if ((info.mode & 0o077) !== 0) throw new Error(`Session-jobs state permissions are too broad: ${path}`);
+    if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error(`Session-jobs state permissions are too broad: ${path}`);
   } catch (error) {
     if (allowMissing && (error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;

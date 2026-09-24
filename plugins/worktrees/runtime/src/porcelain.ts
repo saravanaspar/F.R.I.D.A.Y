@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import type { ListedWorktree } from "./types.js";
 
 function finish(current: Partial<ListedWorktree> | undefined): ListedWorktree | undefined {
@@ -29,7 +30,7 @@ export function parseWorktreePorcelain(text: string): ListedWorktree[] {
       const entry = finish(current);
       if (entry) result.push(entry);
       current = {
-        directory: line.slice("worktree ".length),
+        directory: resolve(line.slice("worktree ".length)),
         detached: false,
         bare: false,
         prunable: false,

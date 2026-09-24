@@ -28,8 +28,8 @@ export class SpendingPolicyStore {
     if (!existsSync(this.#path)) return structuredClone(EMPTY);
     const directoryInfo = lstatSync(dirname(this.#path));
     const fileInfo = lstatSync(this.#path);
-    if (directoryInfo.isSymbolicLink() || !directoryInfo.isDirectory() || (directoryInfo.mode & 0o077) !== 0) throw new Error("Spending policy directory must be private");
-    if (fileInfo.isSymbolicLink() || !fileInfo.isFile() || (fileInfo.mode & 0o077) !== 0) throw new Error("Spending policy file must be private");
+    if (directoryInfo.isSymbolicLink() || !directoryInfo.isDirectory() || (process.platform !== "win32" && (directoryInfo.mode & 0o077) !== 0)) throw new Error("Spending policy directory must be private");
+    if (fileInfo.isSymbolicLink() || !fileInfo.isFile() || (process.platform !== "win32" && (fileInfo.mode & 0o077) !== 0)) throw new Error("Spending policy file must be private");
     const parsed = JSON.parse(readFileSync(this.#path, "utf8")) as Partial<SpendingState>;
     if (parsed.schema !== 1 || parsed.currency !== "USD" || typeof parsed.warningRatio !== "number"
       || !parsed.projectLimits || typeof parsed.projectLimits !== "object" || Array.isArray(parsed.projectLimits)

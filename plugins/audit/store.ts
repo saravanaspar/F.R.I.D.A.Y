@@ -86,7 +86,7 @@ function privateMode(path: string, expectedType: "file" | "directory"): void {
   if (stat.isSymbolicLink()) throw new Error(`Audit ${expectedType} must not be a symbolic link: ${path}`);
   if (expectedType === "file" && !stat.isFile()) throw new Error(`Audit path is not a file: ${path}`);
   if (expectedType === "directory" && !stat.isDirectory()) throw new Error(`Audit path is not a directory: ${path}`);
-  if ((stat.mode & 0o077) !== 0) throw new Error(`Audit ${expectedType} permissions are too broad: ${path}`);
+  if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) throw new Error(`Audit ${expectedType} permissions are too broad: ${path}`);
 }
 
 function ensurePrivateDirectory(stateDir: string): string {

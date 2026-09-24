@@ -113,11 +113,30 @@ async function storeSecret(
   }
 }
 
+const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+async function promptAccountId(io: OnboardingIO, current = "default"): Promise<string> {
+  for (;;) {
+    const raw = (await prompt(io, "FRIDAY account id (profile name, press Enter for 'default')", current)).trim();
+    const value = raw || current;
+    if (ACCOUNT_ID_PATTERN.test(value)) return value;
+    if (value.includes(":")) {
+      io.write("Notice: That looks like a bot token or secret. The account id is a local profile name (e.g. \"default\"). You will be asked for the bot token in a moment.\n");
+    } else {
+      io.write("Account ID must start with an alphanumeric character and contain only letters, numbers, dots, hyphens, or underscores (up to 64 characters).\n");
+    }
+  }
+}
+
 async function accessPolicy(io: OnboardingIO, current?: SavedChannelConfig): Promise<Pick<SavedChannelConfig, "allowAll" | "allowedSenderIds" | "allowedConversationIds">> {
   io.write("Inbound access is default-deny. Add exact sender IDs; first-run setup will explicitly pair one as the operator.\n");
   const senders = csv(await prompt(io, "Allowed sender IDs (comma separated; blank = none)", current?.allowedSenderIds?.join(",") ?? ""));
   const conversations = csv(await prompt(io, "Allowed group/channel IDs (comma separated; blank = none)", current?.allowedConversationIds?.join(",") ?? ""));
-  const allowAll = await askConfirm(io, "Allow all transport ingress?", current?.allowAll === true);
+  let allowAll = await askConfirm(io, "Allow all transport ingress?", current?.allowAll === true);
+  if (senders.length === 0 && !allowAll) {
+    io.write("Note: At least one allowed sender ID or 'allow all' ingress is required to pair an operator.\n");
+    allowAll = await askConfirm(io, "Allow all transport ingress so you can pair as operator from the channel later?", true);
+  }
   return { allowedSenderIds: senders, allowedConversationIds: conversations, allowAll };
 }
 
@@ -148,7 +167,7 @@ async function configureOne(
   if (choice === "disable" || choice === "d") return Object.freeze({ ...(current ?? { enabled: false }), enabled: false });
   if (choice !== "enable" && choice !== "e") throw new Error("channel choice must be enable, disable, remove, or back");
 
-  const accountId = await prompt(io, "FRIDAY account id", current?.accountId ?? "default");
+  const accountId = await promptAccountId(io, current?.accountId ?? "default");
   const access = await accessPolicy(io, current);
   const settings: Record<string, string | number | boolean> = { ...(current?.settings ?? {}) };
   const secretRefs: Record<string, string> = { ...(current?.secretRefs ?? {}) };
@@ -225,19 +244,31 @@ async function ensureInitialPairing(
   config: SavedChannelConfig,
   io: OnboardingIO,
   home: string,
-): Promise<void> {
+): Promise<SavedChannelConfig | undefined> {
   const accountId = config.accountId ?? "default";
-  const allowed = config.allowedSenderIds ?? [];
-  const allowsAll = config.allowAll === true;
+  let allowed = [...(config.allowedSenderIds ?? [])];
+  let allowsAll = config.allowAll === true;
+  let updatedConfig: SavedChannelConfig | undefined;
   const stateDir = getPermissionsStateDir({ ...process.env, FRIDAY_HOME: home });
   const existing = loadTrustedIdentities(stateDir).find((identity) => identity.channel === id && identity.accountId === accountId && (allowsAll || allowed.includes(identity.senderId)));
-  if (existing?.role === "operator") return;
-  if (allowed.length === 0 && !allowsAll) throw new Error(`${id}/${accountId} requires an exact allowed sender ID before its initial operator can be paired`);
-  const initialSender = existing?.senderId ?? (allowed.length === 1 ? allowed[0]! : text(await prompt(io, "Exact sender ID to pair as initial operator", allowed[0]), "Initial operator sender ID", 256));
+  if (existing?.role === "operator") return undefined;
+  if (allowed.length === 0 && !allowsAll) {
+    io.write(`\n${id}/${accountId} requires an exact allowed sender ID before its initial operator can be paired.\n`);
+    const sender = (await prompt(io, `Enter your ${id} user ID to pair as operator (leave blank to allow all senders)`)).trim();
+    if (sender) {
+      allowed = [sender];
+      updatedConfig = Object.freeze({ ...config, allowedSenderIds: Object.freeze(allowed) });
+    } else {
+      allowsAll = true;
+      updatedConfig = Object.freeze({ ...config, allowAll: true });
+    }
+  }
+  const initialSender = existing?.senderId ?? (allowed.length === 1 ? allowed[0]! : (allowed.length > 1 ? text(await prompt(io, "Exact sender ID to pair as initial operator", allowed[0]), "Initial operator sender ID", 256) : "owner"));
   if (!allowsAll && !allowed.includes(initialSender)) throw new Error("Initial operator sender ID must be one of the allowed sender IDs");
   if (!await askConfirm(io, `${existing ? "Upgrade" : "Trust"} exactly ${id}/${accountId}/${initialSender} as the initial operator?`, true)) throw new Error("Initial operator pairing was not confirmed; channel setup cannot safely finish");
   upsertTrustedIdentity(stateDir, { channel: id, accountId, senderId: initialSender, role: "operator", label: `${id} initial operator` });
   io.write(`Paired exactly ${id}/${accountId}/${initialSender} as the initial operator. Other allowed senders remain untrusted.\n`);
+  return updatedConfig;
 }
 
 function hasUsablePairing(state: SavedChannelsStateLike, home: string): boolean {
@@ -342,7 +373,10 @@ export async function maybeManageChannels(
     const next = await configureOne(selectedId, io, home, vault, previous);
     await updateSavedChannel(selectedId, next, home);
     try {
-      if (next?.enabled) await ensureInitialPairing(selectedId, next, io, home);
+      if (next?.enabled) {
+        const updated = await ensureInitialPairing(selectedId, next, io, home);
+        if (updated) await updateSavedChannel(selectedId, updated, home);
+      }
     } catch (error) {
       // Do not leave a newly enabled channel without a paired identity if the
       // explicit trust confirmation fails. Restore the prior saved config.

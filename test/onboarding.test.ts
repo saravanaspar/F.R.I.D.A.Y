@@ -1,6 +1,6 @@
 import { chmod, mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runOnboarding as runOnboardingRaw, runRouterBootstrap, type OnboardingOptions } from "../src/onboarding.js";
 import { maybeManageChannels } from "../src/onboarding-channels.js";
@@ -103,7 +103,7 @@ describe("FRIDAY onboarding", () => {
       FRIDAY_WORKSPACE: join(dirname(home), "FRIDAY-workspace"),
     });
     expect(text).not.toMatch(/(?:API_KEY|TOKEN|PASSWORD|CREDENTIAL)=/i);
-    expect((await stat(path)).mode & 0o077).toBe(0);
+    if (process.platform !== "win32") expect((await stat(path)).mode & 0o077).toBe(0);
     expect(output.join("")).toContain("Sandbox image setup skipped");
   });
 
@@ -593,7 +593,7 @@ describe("FRIDAY onboarding", () => {
       hostPrivilegeMode: "none",
       timezone: expect.any(String),
       workspaceRoot: join(dirname(home), "FRIDAY-workspace"),
-      selfRepository: "/srv/friday-source",
+      selfRepository: resolve("/srv/friday-source"),
     });
   });
 
@@ -628,7 +628,7 @@ describe("FRIDAY onboarding", () => {
     expect(parsed.FRIDAY_MODEL_PROVIDER).toBe("main-provider");
   });
 
-  it("fails closed on broad or symlinked runtime defaults", async () => {
+  it.skipIf(process.platform === "win32")("fails closed on broad or symlinked runtime defaults", async () => {
     const broadHome = await temporaryDirectory();
     await runOnboarding({
       home: broadHome,
@@ -642,10 +642,12 @@ describe("FRIDAY onboarding", () => {
         write: () => undefined,
       },
     });
-    const broadPath = getRuntimeEnvironmentPath(broadHome);
-    await chmod(broadPath, 0o644);
-    await expect(loadRuntimeEnvironment({ home: broadHome, environment: {} }))
-      .rejects.toThrow("runtime environment permissions are too broad");
+    if (process.platform !== "win32") {
+      const broadPath = getRuntimeEnvironmentPath(broadHome);
+      await chmod(broadPath, 0o644);
+      await expect(loadRuntimeEnvironment({ home: broadHome, environment: {} }))
+        .rejects.toThrow("runtime environment permissions are too broad");
+    }
 
     const symlinkHome = await temporaryDirectory();
     const targetHome = await temporaryDirectory();
@@ -667,17 +669,19 @@ describe("FRIDAY onboarding", () => {
   });
 
 
-  it("fails closed when FRIDAY_HOME itself is broad or symlinked", async () => {
-    const broadHome = await temporaryDirectory();
-    await chmod(broadHome, 0o755);
-    await expect(runOnboarding({
-      home: broadHome,
-      provider: "provider",
-      model: "model",
-      permission: "ask",
-      setupSandbox: false,
-      io: { isInteractive: false, question: async () => { throw new Error("unexpected prompt"); }, write: () => undefined },
-    })).rejects.toThrow("FRIDAY home permissions are too broad");
+  it.skipIf(process.platform === "win32")("fails closed when FRIDAY_HOME itself is broad or symlinked", async () => {
+    if (process.platform !== "win32") {
+      const broadHome = await temporaryDirectory();
+      await chmod(broadHome, 0o755);
+      await expect(runOnboarding({
+        home: broadHome,
+        provider: "provider",
+        model: "model",
+        permission: "ask",
+        setupSandbox: false,
+        io: { isInteractive: false, question: async () => { throw new Error("unexpected prompt"); }, write: () => undefined },
+      })).rejects.toThrow("FRIDAY home permissions are too broad");
+    }
 
     const realHome = await temporaryDirectory();
     const parent = await temporaryDirectory();

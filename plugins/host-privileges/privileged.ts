@@ -1,11 +1,14 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
-import { lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir, userInfo } from "node:os";
+import { dirname, join } from "node:path";
 
-export const FRIDAY_PRIVILEGED_HELPER = "/usr/local/libexec/friday-privileged";
+export const FRIDAY_PRIVILEGED_HELPER = process.env.FRIDAY_PRIVILEGED_HELPER?.trim()
+  || (process.platform === "win32"
+    ? join(homedir(), ".friday", "bin", "friday-privileged.cmd")
+    : "/usr/local/libexec/friday-privileged");
 const FRIDAY_SUDOERS_PREFIX = "/etc/sudoers.d/friday-";
 const SAFE_USER = /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/;
 const POSIX_SYSTEM_PATHS = ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"] as const;
@@ -48,6 +51,33 @@ case "\${1:-}" in
 esac
 `;
 
+const WINDOWS_HELPER = `@echo off
+setlocal
+if "%~1"=="" (
+  echo friday-privileged: exactly one approved operation is required >&2
+  exit /b 64
+)
+if "%~1"=="voice-deps" (
+  echo friday-privileged: installing voice host dependencies...
+  where winget >nul 2>nul
+  if %ERRORLEVEL% equ 0 (
+    winget install --id Git.Git -e --source winget --accept-source-agreements --accept-package-agreements
+    winget install --id Kitware.CMake -e --source winget --accept-source-agreements --accept-package-agreements
+    winget install --id Gyan.FFmpeg -e --source winget --accept-source-agreements --accept-package-agreements
+    winget install --id Python.Python.3.11 -e --source winget --accept-source-agreements --accept-package-agreements
+    exit /b 0
+  )
+  echo friday-privileged: winget is not available on this system >&2
+  exit /b 1
+)
+if "%~1"=="computer-deps" (
+  echo friday-privileged: computer-deps is not required on Windows
+  exit /b 0
+)
+echo friday-privileged: unsupported operation >&2
+exit /b 64
+`;
+
 export function privilegedProcessEnv(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const name of PRIVILEGED_ENV_ALLOWLIST) {
@@ -63,9 +93,14 @@ export function privilegedProcessEnv(environment: NodeJS.ProcessEnv = process.en
 
 async function run(command: string, args: readonly string[], interactive: boolean): Promise<void> {
   await new Promise<void>((resolveRun, rejectRun) => {
-    const child = spawn(command, [...args], {
+    const isWin = process.platform === "win32";
+    const useCmd = isWin && (command.endsWith(".cmd") || command.endsWith(".bat"));
+    const execCommand = useCmd ? (process.env.COMSPEC || "cmd.exe") : command;
+    const execArgs = useCmd ? ["/d", "/c", command, ...args] : [...args];
+    const child = spawn(execCommand, execArgs, {
       stdio: interactive ? "inherit" : ["ignore", "pipe", "pipe"],
       env: privilegedProcessEnv(),
+      windowsHide: true,
     });
     let tail = "";
     if (!interactive && child.stdout && child.stderr) {
@@ -123,6 +158,14 @@ export function privilegeBrokerMetadataIsSecure(helper: BrokerFileMetadata, sudo
 }
 
 export async function hasFridayPrivilegedHelper(): Promise<boolean> {
+  if (process.platform === "win32") {
+    try {
+      const helper = await lstat(FRIDAY_PRIVILEGED_HELPER);
+      return !helper.isSymbolicLink() && helper.isFile();
+    } catch {
+      return false;
+    }
+  }
   if (process.platform !== "linux") return false;
   const username = currentUser();
   const targets = [fridaySudoersTarget(username), legacyFridaySudoersTarget(username)].filter(
@@ -140,7 +183,13 @@ export async function hasFridayPrivilegedHelper(): Promise<boolean> {
 }
 
 export async function installFridayPrivilegeBroker(): Promise<void> {
-  if (process.platform !== "linux") throw new Error("FRIDAY's privileged setup broker is currently supported on Linux hosts only");
+  if (process.platform === "win32") {
+    const helperTarget = FRIDAY_PRIVILEGED_HELPER;
+    await mkdir(dirname(helperTarget), { recursive: true });
+    await writeFile(helperTarget, WINDOWS_HELPER, { encoding: "utf8" });
+    return;
+  }
+  if (process.platform !== "linux") throw new Error("FRIDAY's privileged setup broker is currently supported on Linux and Windows hosts only");
   const username = currentUser();
   const scratch = await mkdtemp(join(tmpdir(), "friday-privileged-"));
   const helperSource = join(scratch, "friday-privileged");
@@ -161,7 +210,14 @@ export async function installFridayPrivilegeBroker(): Promise<void> {
 }
 
 export async function installVoiceHostDependencies(): Promise<void> {
-  if (process.platform !== "linux") throw new Error("Automatic host voice dependency installation is currently supported on Linux only");
+  if (process.platform === "win32") {
+    if (!(await hasFridayPrivilegedHelper())) {
+      throw new Error("FRIDAY privileged helper is not installed; run `friday setup privileges broker` locally first");
+    }
+    await run(FRIDAY_PRIVILEGED_HELPER, ["voice-deps"], false);
+    return;
+  }
+  if (process.platform !== "linux") throw new Error("Automatic host voice dependency installation is currently supported on Linux and Windows only");
   if (!(await hasFridayPrivilegedHelper())) {
     throw new Error("FRIDAY privileged helper is not installed; run `friday setup privileges broker` locally first");
   }
@@ -169,7 +225,14 @@ export async function installVoiceHostDependencies(): Promise<void> {
 }
 
 export async function installComputerHostDependencies(): Promise<void> {
-  if (process.platform !== "linux") throw new Error("Automatic host Computer dependency installation is currently supported on Linux only");
+  if (process.platform === "win32") {
+    if (!(await hasFridayPrivilegedHelper())) {
+      throw new Error("FRIDAY privileged helper is not installed; run `friday setup privileges broker` locally first");
+    }
+    await run(FRIDAY_PRIVILEGED_HELPER, ["computer-deps"], false);
+    return;
+  }
+  if (process.platform !== "linux") throw new Error("Automatic host Computer dependency installation is currently supported on Linux and Windows only");
   if (!(await hasFridayPrivilegedHelper())) {
     throw new Error("FRIDAY privileged helper is not installed; run `friday setup privileges broker` locally first");
   }

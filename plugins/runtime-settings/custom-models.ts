@@ -71,13 +71,13 @@ async function assertPrivateConfigDir(dir: string, create: boolean): Promise<voi
   try {
     const info = await lstat(dir);
     if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`Custom model config directory must be a private directory: ${dir}`);
-    if ((info.mode & 0o077) !== 0) throw new Error(`Custom model config directory permissions are too broad: ${dir}`);
+    if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error(`Custom model config directory permissions are too broad: ${dir}`);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     if (!create) return;
     await mkdir(dir, { recursive: true, mode: 0o700 });
     const info = await lstat(dir);
-    if (info.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o077) !== 0) {
+    if (info.isSymbolicLink() || !info.isDirectory() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
       throw new Error(`Custom model config directory could not be made private: ${dir}`);
     }
   }
@@ -132,7 +132,7 @@ function parseRecord(value: unknown): CustomModelRecord {
 async function assertPrivate(path: string): Promise<void> {
   const info = await lstat(path);
   if (info.isSymbolicLink() || !info.isFile()) throw new Error(`Custom model config is not a regular file: ${path}`);
-  if ((info.mode & 0o077) !== 0) throw new Error(`Custom model config permissions are too broad: ${path}`);
+  if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error(`Custom model config permissions are too broad: ${path}`);
 }
 
 export async function readCustomModels(home = getFridayHome()): Promise<readonly CustomModelRecord[]> {
@@ -180,7 +180,7 @@ async function saveCustomModels(models: readonly CustomModelRecord[], home = get
     });
   }
   const info = await stat(path);
-  if ((info.mode & 0o077) !== 0) throw new Error("Custom model config could not be made private");
+  if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error("Custom model config could not be made private");
 }
 
 function customModelRecord(input: CustomModelInput, existing?: CustomModelRecord): CustomModelRecord {

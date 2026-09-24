@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, copyFile, mkdir } from "node:fs/promises";
+import { chmod, copyFile, mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -27,8 +27,17 @@ async function defaultRun(command: string, args: readonly string[]): Promise<voi
 }
 
 export async function setupFridayUserService(options: UserServiceSetupOptions = {}): Promise<string> {
-  if ((options.platform ?? process.platform) !== "linux") throw new Error("FRIDAY user-service setup is currently supported on Linux only");
+  const platform = options.platform ?? process.platform;
+  if (platform !== "linux" && platform !== "win32") throw new Error("FRIDAY user-service setup is currently supported on Linux and Windows only");
   const environment = options.environment ?? process.env;
+  if (platform === "win32") {
+    const startupDir = join(environment.APPDATA || homedir(), "Microsoft", "Windows", "Start Menu", "Programs", "Startup");
+    await mkdir(startupDir, { recursive: true });
+    const target = join(startupDir, "FRIDAY.cmd");
+    const script = `@echo off\r\nstart "" "${process.execPath}" "${process.argv[1] || "friday"}"\r\n`;
+    await writeFile(target, script, "utf8");
+    return target;
+  }
   const home = resolve(environment.HOME?.trim() || homedir());
   const source = serviceAsset(environment);
   if (!existsSync(source)) throw new Error(`FRIDAY user-service asset is missing: ${source}`);

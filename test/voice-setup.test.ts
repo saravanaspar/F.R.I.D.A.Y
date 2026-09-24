@@ -120,12 +120,17 @@ describe("voice setup", () => {
       ["ffmpeg", "-version"],
     ]);
     for (const [command, expectedArg] of scripts) {
-      const path = join(bin, command);
-      await writeFile(path, `#!/bin/sh\n[ "\${1:-}" = "${expectedArg}" ]\n`, { mode: 0o755 });
+      if (process.platform === "win32") {
+        const cmdPath = join(bin, `${command}.cmd`);
+        await writeFile(cmdPath, `@echo off\r\nif "%~1"=="${expectedArg}" (exit /b 0) else (exit /b 1)\r\n`);
+      } else {
+        const path = join(bin, command);
+        await writeFile(path, `#!/bin/sh\n[ "\${1:-}" = "${expectedArg}" ]\n`, { mode: 0o755 });
+      }
     }
 
     const previousPath = process.env.PATH;
-    process.env.PATH = bin;
+    process.env.PATH = process.platform === "win32" ? `${bin};${process.env.PATH || ""}` : bin;
     try {
       const missing = missingLocalVoiceHostDependencies({
         schema: 1,

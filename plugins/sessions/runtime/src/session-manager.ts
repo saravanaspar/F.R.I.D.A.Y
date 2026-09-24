@@ -79,15 +79,16 @@ function statMetadataIfPresent(path: string): { mode: number; uid: number; gid: 
 
 function ensurePrivateDirectory(path: string): void {
 	mkdirSync(path, { recursive: true, mode: 0o700 });
-	chmodSync(path, 0o700);
+	if (process.platform !== "win32") chmodSync(path, 0o700);
 }
 
 function ensurePrivateSessionFile(path: string): void {
-	if (!existsSync(path)) return;
+	if (!existsSync(path) || process.platform === "win32") return;
 	chmodSync(path, 0o600);
 }
 
 function syncFile(path: string): void {
+	if (process.platform === "win32") return;
 	const descriptor = openSync(path, "r");
 	try {
 		fsyncSync(descriptor);
@@ -97,6 +98,7 @@ function syncFile(path: string): void {
 }
 
 function syncDirectory(path: string): void {
+	if (process.platform === "win32") return;
 	const descriptor = openSync(path, "r");
 	try {
 		fsyncSync(descriptor);

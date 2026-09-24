@@ -93,12 +93,24 @@ function check(
 }
 
 function command(commandName: string, args: readonly string[] = ["--version"]): { ok: boolean; output?: string } {
-  const result = spawnSync(commandName, [...args], {
+  const isWin = process.platform === "win32";
+  const useCmd = isWin && (commandName.endsWith(".cmd") || commandName.endsWith(".bat"));
+  const execCmd = useCmd ? (process.env.COMSPEC || "cmd.exe") : commandName;
+  const execArgs = useCmd ? ["/d", "/c", commandName, ...args] : [...args];
+  let result = spawnSync(execCmd, execArgs, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 5_000,
     windowsHide: true,
   });
+  if (isWin && !useCmd && result.error) {
+    result = spawnSync(process.env.COMSPEC || "cmd.exe", ["/d", "/c", commandName, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 5_000,
+      windowsHide: true,
+    });
+  }
   const firstLine = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim().split(/\r?\n/u)[0]?.trim();
   return { ok: result.error === undefined && result.status === 0, ...(firstLine ? { output: firstLine } : {}) };
 }
@@ -217,9 +229,8 @@ async function homeCheck(home: string): Promise<DoctorCheck> {
 function platformCheck(environment: NodeJS.ProcessEnv): DoctorCheck {
   const binary = environment.FRIDAY_SINGLE_BINARY === "1";
   if (process.platform === "win32") {
-    return check("platform", "Installation", "error", "Platform", "native Windows is not a hardened target", {
-      detail: `${process.platform}/${process.arch} · Node ${process.version}`,
-      fix: "Run F.R.I.D.A.Y inside WSL2 using scripts/install-release.ps1.",
+    return check("platform", "Installation", "ok", "Platform", `${process.platform}/${process.arch}`, {
+      detail: `Node ${process.version} · Windows 11 native runtime`,
     });
   }
   return check("platform", "Installation", "ok", "Platform", `${process.platform}/${process.arch}`, {
@@ -779,12 +790,18 @@ async function hostPrivilegeCheck(home: string, sources: DoctorSources): Promise
     }
     if (status.ready && status.privilegedHelperInstalled) {
       return check("host-privileges", "Security", "ok", "Host privileges", "restricted broker ready", {
-        detail: "Root-owned helper and sudoers metadata passed integrity checks; no arbitrary root shell is exposed.",
+        detail: process.platform === "win32"
+          ? "Windows privileged helper is installed; no arbitrary administrative access is exposed."
+          : "Root-owned helper and sudoers metadata passed integrity checks; no arbitrary root shell is exposed.",
       });
     }
     return check("host-privileges", "Security", "error", "Host privileges", "restricted broker is missing or unsafe", {
-      detail: "Broker mode is configured, but the root-owned helper/sudoers integrity checks did not pass.",
-      fix: "Run `friday setup privileges broker` locally on the FRIDAY host and complete the OS sudo prompt.",
+      detail: process.platform === "win32"
+        ? "Broker mode is configured, but the privileged helper is missing."
+        : "Broker mode is configured, but the root-owned helper/sudoers integrity checks did not pass.",
+      fix: process.platform === "win32"
+        ? "Run `friday setup privileges broker` locally on the FRIDAY host."
+        : "Run `friday setup privileges broker` locally on the FRIDAY host and complete the OS sudo prompt.",
     });
   } catch (error) {
     return check("host-privileges", "Security", "error", "Host privileges", "could not be validated", {

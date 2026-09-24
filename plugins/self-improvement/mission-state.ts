@@ -75,13 +75,13 @@ function assertPrivateStateDir(stateDir: string, create: boolean): void {
   }
   const info = lstatSync(stateDir);
   if (info.isSymbolicLink() || !info.isDirectory()) throw new SelfImprovementMissionStateError(`Self-improvement mission directory must be a private directory: ${stateDir}`);
-  if ((info.mode & 0o077) !== 0) throw new SelfImprovementMissionStateError(`Self-improvement mission directory permissions are too broad: ${stateDir}`);
+  if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new SelfImprovementMissionStateError(`Self-improvement mission directory permissions are too broad: ${stateDir}`);
 }
 
 function assertPrivateStateFile(path: string): void {
   const info = lstatSync(path);
   if (info.isSymbolicLink() || !info.isFile()) throw new SelfImprovementMissionStateError(`Self-improvement mission state must be a regular file: ${path}`);
-  if ((info.mode & 0o077) !== 0) throw new SelfImprovementMissionStateError(`Self-improvement mission state permissions are too broad: ${path}`);
+  if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new SelfImprovementMissionStateError(`Self-improvement mission state permissions are too broad: ${path}`);
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
