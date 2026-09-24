@@ -19,14 +19,20 @@ describe("saved channel configuration", () => {
       secretRefs: { botToken: "vault://channels/telegram/main/bot-token" },
     }, home);
     const path = getChannelsConfigPath(home);
-    expect((await stat(path)).mode & 0o077).toBe(0);
+    if (process.platform !== "win32") {
+      expect((await stat(path)).mode & 0o077).toBe(0);
+    }
     const raw = await readFile(path, "utf8");
     expect(raw).toContain("vault://channels/telegram/main/bot-token");
     expect(raw).not.toMatch(/(?:TOKEN|PASSWORD|SECRET)\s*[:=]\s*["']?(?!vault:\/\/)/i);
     expect(await readSavedChannels(home)).toMatchObject({ channels: { telegram: { enabled: true, accountId: "main" } } });
   });
 
-  it("rejects broad or symlinked channel configuration directories", async () => {
+  it("rejects broad or symlinked channel configuration directories", async (t) => {
+    if (process.platform === "win32") {
+      t.skip();
+      return;
+    }
     const broadHome = await temp();
     await updateSavedChannel("telegram", { enabled: false }, broadHome);
     await chmod(join(broadHome, "channels"), 0o755);

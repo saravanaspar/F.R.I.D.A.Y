@@ -27,7 +27,7 @@ async function privateRoot(create: boolean): Promise<void> {
   const root = rootDir();
   try {
     const info = await lstat(root);
-    if (info.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o077) !== 0) throw new Error("device state directory must be private");
+    if (info.isSymbolicLink() || !info.isDirectory() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) throw new Error("device state directory must be private");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT" && !create) return;
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -82,7 +82,7 @@ async function readJson<T>(name: string, fallback: T, parser: (value: unknown) =
   await privateRoot(false);
   try {
     const info = await lstat(pathFor(name));
-    if (info.isSymbolicLink() || !info.isFile() || (info.mode & 0o077) !== 0) throw new Error(`device state file ${name} is not private`);
+    if (info.isSymbolicLink() || !info.isFile() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) throw new Error(`device state file ${name} is not private`);
     return parser(JSON.parse(await readFile(pathFor(name), "utf8")) as unknown);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return fallback;

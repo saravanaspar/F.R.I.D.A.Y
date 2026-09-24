@@ -218,7 +218,7 @@ async function readRuntimeEnvironment(home: string): Promise<Partial<Record<Supp
   try {
     const rootInfo = await lstat(root);
     if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) throw new Error(`FRIDAY home must be a private directory: ${root}`);
-    if ((rootInfo.mode & 0o077) !== 0) throw new Error(`FRIDAY home permissions are too broad: ${root}`);
+    if (process.platform !== "win32" && (rootInfo.mode & 0o077) !== 0) throw new Error(`FRIDAY home permissions are too broad: ${root}`);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw error;
@@ -234,7 +234,7 @@ async function readRuntimeEnvironment(home: string): Promise<Partial<Record<Supp
   }
   if (metadata.isSymbolicLink()) throw new Error(`FRIDAY runtime environment must not be a symlink: ${path}`);
   if (!metadata.isFile()) throw new Error(`FRIDAY runtime environment must be a regular file: ${path}`);
-  if ((metadata.mode & 0o077) !== 0) throw new Error(`FRIDAY runtime environment permissions are too broad: ${path}`);
+  if (process.platform !== "win32" && (metadata.mode & 0o077) !== 0) throw new Error(`FRIDAY runtime environment permissions are too broad: ${path}`);
   const parsed = parseRuntimeEnvironment(await readFile(path, "utf8"));
   validateRuntimeEnvironment(parsed);
   return parsed;

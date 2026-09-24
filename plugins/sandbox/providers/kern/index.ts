@@ -171,7 +171,8 @@ function contained(root: string, target: string): boolean {
 }
 
 function ensureMountPath(path: string, label: string): void {
-  if (path.includes(":")) throw new Error(`${label} cannot contain ':' when using the kern provider: ${path}`);
+  const checkPath = process.platform === "win32" ? path.replace(/^[A-Za-z]:/, "") : path;
+  if (checkPath.includes(":")) throw new Error(`${label} cannot contain ':' when using the kern provider: ${path}`);
   if (/\r|\n|\0/.test(path)) throw new Error(`${label} is invalid`);
 }
 

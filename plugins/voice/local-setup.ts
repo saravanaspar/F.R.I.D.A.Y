@@ -98,7 +98,19 @@ function setupProcessEnv(overrides: Readonly<Record<string, string>> = {}): Node
 
 function commandAvailable(command: string, args?: readonly string[]): boolean {
   const probeArgs = args ?? HOST_COMMAND_PROBES[command as keyof typeof HOST_COMMAND_PROBES] ?? ["--version"];
-  const result = spawnSync(command, [...probeArgs], { stdio: "ignore", windowsHide: true, env: setupProcessEnv() });
+  const isWin = process.platform === "win32";
+  let result = spawnSync(command, [...probeArgs], {
+    stdio: "ignore",
+    windowsHide: true,
+    env: setupProcessEnv(),
+  });
+  if (isWin && result.error) {
+    result = spawnSync(process.env.COMSPEC || "cmd.exe", ["/d", "/c", command, ...probeArgs], {
+      stdio: "ignore",
+      windowsHide: true,
+      env: setupProcessEnv(),
+    });
+  }
   return result.status === 0 && result.error === undefined;
 }
 

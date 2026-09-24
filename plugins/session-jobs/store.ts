@@ -36,14 +36,14 @@ function assertPrivateDirectory(path: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 });
   chmodSync(path, 0o700);
   const info = lstatSync(path);
-  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0) {
+  if (!info.isDirectory() || info.isSymbolicLink() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
     throw new Error(`Session-jobs state must be a private directory: ${path}`);
   }
 }
 
 function assertPrivateFile(path: string): void {
   const info = lstatSync(path);
-  if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0) {
+  if (!info.isFile() || info.isSymbolicLink() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
     throw new Error(`Session-jobs state permissions are too broad or the path is unsafe: ${path}`);
   }
 }

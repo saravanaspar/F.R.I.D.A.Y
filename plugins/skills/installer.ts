@@ -49,13 +49,13 @@ async function atomicInstall(source: string, destination: string, replaceExistin
   try {
     const info = await lstat(root);
     if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`user skill root must be a private directory: ${root}`);
-    if ((info.mode & 0o077) !== 0) throw new Error(`user skill root permissions are too broad: ${root}`);
+    if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error(`user skill root permissions are too broad: ${root}`);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     await mkdir(root, { recursive: true, mode: 0o700 });
     await chmod(root, 0o700);
     const info = await lstat(root);
-    if (info.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o077) !== 0) throw new Error(`user skill root could not be made private: ${root}`);
+    if (info.isSymbolicLink() || !info.isDirectory() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) throw new Error(`user skill root could not be made private: ${root}`);
   }
   const staging = join(root, `.install-${randomUUID()}`);
   const backup = join(root, `.backup-${randomUUID()}`);

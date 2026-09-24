@@ -175,8 +175,8 @@ async function chooseTts(io: OnboardingIO, existing: VoiceSettings | undefined, 
 async function defaultEnsureLocalHostDependencies(settings: VoiceSettings, _home: string, io: OnboardingIO): Promise<void> {
   const missing = missingLocalVoiceHostDependencies(settings);
   if (missing.length === 0) return;
-  if (process.platform !== "linux") {
-    throw new Error(`Local voice is missing host dependencies: ${missing.join(", ")}. Automatic installation is currently supported on Debian/Ubuntu hosts only.`);
+  if (process.platform !== "linux" && process.platform !== "win32") {
+    throw new Error(`Local voice is missing host dependencies: ${missing.join(", ")}. Automatic installation is currently supported on Debian/Ubuntu and Windows hosts only.`);
   }
 
   showWarning(io, `Local voice needs host dependencies: ${missing.join(", ")}. FRIDAY will install its fixed approved dependency set automatically.`);
@@ -184,7 +184,9 @@ async function defaultEnsureLocalHostDependencies(settings: VoiceSettings, _home
     if (!io.isInteractive) {
       throw new Error(`Local voice is missing host dependencies: ${missing.join(", ")}. Run \`friday setup voice\` once in an interactive local terminal so FRIDAY can bootstrap its restricted privilege broker.`);
     }
-    showInfo(io, "A local sudo prompt may appear while FRIDAY installs its restricted voice-dependency broker. The password is handled by sudo, not by FRIDAY or the model.");
+    if (process.platform !== "win32") {
+      showInfo(io, "A local sudo prompt may appear while FRIDAY installs its restricted voice-dependency broker. The password is handled by sudo, not by FRIDAY or the model.");
+    }
     await task(io, "Installing FRIDAY privilege broker", () => installFridayPrivilegeBroker());
   }
 

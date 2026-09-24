@@ -92,13 +92,17 @@ describe("voice plugin", () => {
     const staged = await stageLocalVoiceReferenceBytes(bytes, "my voice.wav", home);
     expect(staged).toContain(join(home, "tooling", "voice", "references"));
     expect(staged).toMatch(/[a-f0-9]{64}-my-voice\.wav$/);
-    expect((await stat(staged)).mode & 0o077).toBe(0);
+    if (process.platform !== "win32") {
+      expect((await stat(staged)).mode & 0o077).toBe(0);
+    }
 
     const source = join(home, "source.wav");
     await writeFile(source, bytes, { mode: 0o600 });
     const stagedFromPath = await stageLocalVoiceReference(source, home);
     expect(stagedFromPath).toMatch(/[a-f0-9]{64}-source\.wav$/);
-    expect((await stat(stagedFromPath)).mode & 0o077).toBe(0);
+    if (process.platform !== "win32") {
+      expect((await stat(stagedFromPath)).mode & 0o077).toBe(0);
+    }
   });
 
   it("requires an explicit Chatterbox CPU/GPU choice only for a new GPU-capable setup", () => {
@@ -121,8 +125,10 @@ describe("voice plugin", () => {
       tts: { provider: "openai", model: "gpt-4o-mini-tts", voice: "alloy", format: "mp3" },
     }, home);
     expect(await readVoiceSettings(home)).toMatchObject({ schema: 1, stt: { provider: "openai" }, tts: { provider: "openai", voice: "alloy" } });
-    expect((await stat(join(home, "voice"))).mode & 0o077).toBe(0);
-    expect((await stat(join(home, "voice", "settings.json"))).mode & 0o077).toBe(0);
+    if (process.platform !== "win32") {
+      expect((await stat(join(home, "voice"))).mode & 0o077).toBe(0);
+      expect((await stat(join(home, "voice", "settings.json"))).mode & 0o077).toBe(0);
+    }
   });
 
   it("provides STT/TTS capability and enriches audio attachments without exposing credentials", async () => {

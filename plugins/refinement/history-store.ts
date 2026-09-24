@@ -43,13 +43,13 @@ function assertPrivateRoot(dir: string, create: boolean): void {
   }
   const info = lstatSync(dir);
   if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`Refinement history directory must be a private directory: ${dir}`);
-  if ((info.mode & 0o077) !== 0) throw new Error(`Refinement history directory permissions are too broad: ${dir}`);
+  if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error(`Refinement history directory permissions are too broad: ${dir}`);
 }
 
 function assertPrivateFile(path: string): void {
   const info = lstatSync(path);
   if (info.isSymbolicLink() || !info.isFile()) throw new Error(`Refinement history is not a regular file: ${path}`);
-  if ((info.mode & 0o077) !== 0) throw new Error(`Refinement history permissions are too broad: ${path}`);
+  if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error(`Refinement history permissions are too broad: ${path}`);
 }
 
 function loadState(root: string): RefinementHistoryState {
@@ -76,6 +76,7 @@ function loadState(root: string): RefinementHistoryState {
 }
 
 function syncPath(path: string): void {
+  if (process.platform === "win32") return;
   const descriptor = openSync(path, "r");
   try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
 }
@@ -87,10 +88,10 @@ function saveState(root: string, state: RefinementHistoryState): void {
   const mode = existsSync(path) ? statSync(path).mode & 0o777 : 0o600;
   try {
     writeFileSync(temp, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-    chmodSync(temp, 0o600);
+    if (process.platform !== "win32") chmodSync(temp, 0o600);
     syncPath(temp);
     renameSync(temp, path);
-    chmodSync(path, mode === 0o600 ? mode : 0o600);
+    if (process.platform !== "win32") chmodSync(path, mode === 0o600 ? mode : 0o600);
     syncPath(root);
   } finally {
     if (existsSync(temp)) unlinkSync(temp);

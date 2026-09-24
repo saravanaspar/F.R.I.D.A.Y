@@ -52,13 +52,13 @@ async function assertPrivateRoot(root: string, create: boolean): Promise<void> {
   try {
     const info = await lstat(root);
     if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`FRIDAY channel config directory must be a private directory: ${root}`);
-    if ((info.mode & 0o077) !== 0) throw new Error(`FRIDAY channel config directory permissions are too broad: ${root}`);
+    if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error(`FRIDAY channel config directory permissions are too broad: ${root}`);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     if (!create) return;
     await mkdir(root, { recursive: true, mode: 0o700 });
     const info = await lstat(root);
-    if (info.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o077) !== 0) {
+    if (info.isSymbolicLink() || !info.isDirectory() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
       throw new Error(`FRIDAY channel config directory could not be made private: ${root}`);
     }
   }
@@ -133,7 +133,7 @@ export async function readSavedChannels(home?: string): Promise<SavedChannelsSta
   try {
     const info = await lstat(path);
     if (info.isSymbolicLink() || !info.isFile()) throw new Error(`FRIDAY channel config must be a regular file: ${path}`);
-    if ((info.mode & 0o077) !== 0) throw new Error(`FRIDAY channel config permissions are too broad: ${path}`);
+    if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error(`FRIDAY channel config permissions are too broad: ${path}`);
     const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("FRIDAY channel config is malformed");
     const raw = parsed as Record<string, unknown>;

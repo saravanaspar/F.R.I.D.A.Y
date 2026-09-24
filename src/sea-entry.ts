@@ -21,7 +21,7 @@ function safeRelative(asset: string): string {
 
 async function assertPrivateDirectory(path: string): Promise<void> {
   const info = await lstat(path);
-  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0) {
+  if (!info.isDirectory() || info.isSymbolicLink() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
     throw new Error(`Bundled runtime directory is not private: ${path}`);
   }
 }

@@ -22,11 +22,12 @@ export function accountStatePath(channel: string, accountId: string, suffix: str
 function privateDirectory(path: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 });
   const info = lstatSync(path);
-  if (info.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o077) !== 0) throw new Error(`Channel state directory must be private: ${path}`);
-  chmodSync(path, 0o700);
+  if (info.isSymbolicLink() || !info.isDirectory() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) throw new Error(`Channel state directory must be private: ${path}`);
+  if (process.platform !== "win32") chmodSync(path, 0o700);
 }
 
 function syncPath(path: string): void {
+  if (process.platform === "win32") return;
   const descriptor = openSync(path, "r");
   try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
 }
@@ -34,7 +35,7 @@ function syncPath(path: string): void {
 export function readPrivateJson<T>(path: string, maxBytes = MAX_STATE_BYTES): T | undefined {
   if (!existsSync(path)) return undefined;
   const info = lstatSync(path);
-  if (info.isSymbolicLink() || !info.isFile() || info.size > maxBytes || (info.mode & 0o077) !== 0) throw new Error(`Channel state file must be a bounded private regular file: ${path}`);
+  if (info.isSymbolicLink() || !info.isFile() || info.size > maxBytes || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) throw new Error(`Channel state file must be a bounded private regular file: ${path}`);
   return JSON.parse(readFileSync(path, "utf8")) as T;
 }
 
@@ -45,10 +46,10 @@ export function writePrivateJson(path: string, value: unknown, maxBytes = MAX_ST
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
     writeFileSync(temporary, encoded, { mode: 0o600, flag: "wx" });
-    chmodSync(temporary, 0o600);
+    if (process.platform !== "win32") chmodSync(temporary, 0o600);
     syncPath(temporary);
     renameSync(temporary, path);
-    chmodSync(path, 0o600);
+    if (process.platform !== "win32") chmodSync(path, 0o600);
     syncPath(dirname(path));
   } finally {
     if (existsSync(temporary)) unlinkSync(temporary);

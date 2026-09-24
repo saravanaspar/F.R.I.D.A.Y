@@ -18,7 +18,7 @@ async function ensurePrivateDirectory(path: string, create: boolean): Promise<bo
   try {
     const info = await lstat(path);
     if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`Voice settings root must be a private directory: ${path}`);
-    if ((info.mode & 0o077) !== 0) throw new Error(`Voice settings root permissions are too broad: ${path}`);
+    if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error(`Voice settings root permissions are too broad: ${path}`);
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -26,7 +26,7 @@ async function ensurePrivateDirectory(path: string, create: boolean): Promise<bo
     await mkdir(path, { recursive: true, mode: 0o700 });
     await chmod(path, 0o700);
     const info = await lstat(path);
-    if (info.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o077) !== 0) {
+    if (info.isSymbolicLink() || !info.isDirectory() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
       throw new Error(`Voice settings root could not be made private: ${path}`);
     }
     return true;
@@ -45,7 +45,7 @@ export async function readVoiceSettings(home = voiceFridayHome()): Promise<Voice
     throw error;
   }
   if (info.isSymbolicLink() || !info.isFile()) throw new Error(`Voice settings must be a regular file: ${path}`);
-  if ((info.mode & 0o077) !== 0) throw new Error(`Voice settings permissions are too broad: ${path}`);
+  if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error(`Voice settings permissions are too broad: ${path}`);
   let parsed: unknown;
   try {
     parsed = JSON.parse(await readFile(path, "utf8"));

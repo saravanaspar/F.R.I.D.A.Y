@@ -224,13 +224,15 @@ export function cleanWorkspaceNodeModules(root = projectRoot) {
 function runScript(script) {
   const ordered = checkWorkspacePackages();
   let count = 0;
+  const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
   for (const workspace of ordered) {
     if (typeof workspace.manifest.scripts?.[script] !== "string") continue;
     process.stdout.write(`\n==> ${workspace.name} (${workspace.relativePath}) :: ${script}\n`);
-    const result = spawnSync("npm", ["run", script, "--workspace", workspace.name], {
+    const result = spawnSync(npmCommand, ["run", script, "--workspace", workspace.name], {
       cwd: projectRoot,
       env: process.env,
       stdio: "inherit",
+      shell: process.platform === "win32",
     });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`${workspace.name} ${script} failed with exit code ${result.status ?? "unknown"}`);

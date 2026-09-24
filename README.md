@@ -124,7 +124,19 @@ friday
 
 Setup creates a dedicated writable workspace at `~/FRIDAY-workspace` by default and persists it as `FRIDAY_WORKSPACE`. Protected state remains under `~/.friday`; do not use `$HOME`, `~/.friday`, or a parent of protected state as the model/tool workspace.
 
-On Windows, the supported path is **WSL2** rather than an unsafe native build. From PowerShell, download and run the WSL installer wrapper:
+On Windows, F.R.I.D.A.Y runs natively. From PowerShell:
+
+```powershell
+git clone https://github.com/saravanaspar/F.R.I.D.A.Y.git
+cd F.R.I.D.A.Y
+npm ci
+npm run friday -- setup
+npm run friday
+```
+
+Protected state is stored under `%USERPROFILE%\.friday`. On Windows, NTFS ACLs provide file privacy; the POSIX `stat.mode` permission checks are skipped since Node.js does not report meaningful Unix mode bits on Windows.
+
+Alternatively, you can use **WSL2** to run the Linux binary. From PowerShell, download and run the WSL installer wrapper:
 
 ```powershell
 $installer = Join-Path $env:TEMP "friday-install.ps1"
@@ -137,13 +149,13 @@ Remove-Item $installer -Force
 That installs the hardened Linux binary inside your default WSL2 distribution. Enter WSL2 and run `friday setup`, or invoke it from PowerShell with `wsl sh -lc '$HOME/.local/bin/friday setup'`.
 
 > [!NOTE]
-> The release installer requires a published GitHub Release for the requested platform. Native Windows release binaries are intentionally not published yet: F.R.I.D.A.Y relies on POSIX private-file permissions in security-sensitive state paths. The PowerShell installer uses WSL2 so those guarantees remain intact until equivalent native Windows ACL enforcement and tests exist.
+> The WSL2 release installer requires a published GitHub Release for the requested platform. For native Windows, build from source using the instructions above.
 
 ### Build from source
 
 Requirements:
 
-> On a Windows host, build and run F.R.I.D.A.Y inside **WSL2**. Native Windows execution is not yet a supported hardened security boundary.
+> On Windows, F.R.I.D.A.Y can be built and run natively. WSL2 is also supported as an alternative.
 
 - Node.js **22.22.2** and npm for the release-equivalent toolchain (`.node-version` pins this exact build runtime);
 - Git;

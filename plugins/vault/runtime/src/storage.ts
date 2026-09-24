@@ -53,7 +53,7 @@ function privateMode(path: string, expectedType: "file" | "directory"): void {
   if (stat.isSymbolicLink()) throw new Error(`Vault ${expectedType} must not be a symbolic link: ${path}`);
   if (expectedType === "file" && !stat.isFile()) throw new Error(`Vault path is not a file: ${path}`);
   if (expectedType === "directory" && !stat.isDirectory()) throw new Error(`Vault path is not a directory: ${path}`);
-  if ((stat.mode & 0o077) !== 0) {
+  if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) {
     throw new Error(`Vault ${expectedType} permissions are too broad: ${path}`);
   }
 }

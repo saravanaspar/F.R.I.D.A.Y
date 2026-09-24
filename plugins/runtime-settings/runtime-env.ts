@@ -303,13 +303,13 @@ async function assertPrivateRuntimeRoot(root: string, create: boolean): Promise<
   try {
     const info = await lstat(root);
     if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`FRIDAY home must be a private directory: ${root}`);
-    if ((info.mode & 0o077) !== 0) throw new Error(`FRIDAY home permissions are too broad: ${root}`);
+    if (process.platform !== "win32" && (info.mode & 0o077) !== 0) throw new Error(`FRIDAY home permissions are too broad: ${root}`);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     if (!create) return;
     await mkdir(root, { recursive: true, mode: 0o700 });
     const info = await lstat(root);
-    if (info.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o077) !== 0) {
+    if (info.isSymbolicLink() || !info.isDirectory() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
       throw new Error(`FRIDAY home could not be made private: ${root}`);
     }
   }
@@ -362,7 +362,7 @@ async function readParsedRuntimeEnvironment(home: string): Promise<Partial<Recor
   }
   if (metadata.isSymbolicLink()) throw new Error(`FRIDAY runtime environment must not be a symlink: ${path}`);
   if (!metadata.isFile()) throw new Error(`FRIDAY runtime environment must be a regular file: ${path}`);
-  if ((metadata.mode & 0o077) !== 0) {
+  if (process.platform !== "win32" && (metadata.mode & 0o077) !== 0) {
     throw new Error(`FRIDAY runtime environment permissions are too broad: ${path}`);
   }
   return parseRuntimeEnvironment(await readFile(path, "utf8"));
@@ -522,7 +522,7 @@ export async function saveRuntimeSettings(
     throw error;
   }
   const current = await stat(path);
-  if ((current.mode & 0o077) !== 0) {
+  if (process.platform !== "win32" && (current.mode & 0o077) !== 0) {
     throw new Error(`FRIDAY runtime environment permissions are too broad: ${path}`);
   }
   return path;

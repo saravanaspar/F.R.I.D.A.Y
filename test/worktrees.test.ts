@@ -41,7 +41,7 @@ describe("worktrees plugin", () => {
         name: "candidate",
         detached: true,
       });
-      expect(await readFile(join(candidate.directory, "base.txt"), "utf8")).toBe("base\n");
+      expect((await readFile(join(candidate.directory, "base.txt"), "utf8")).replace(/\r\n/g, "\n")).toBe("base\n");
       expect((await worktrees.listWorktrees({ repository })).some((entry) => entry.directory === candidate.directory)).toBe(true);
 
       await writeFile(join(candidate.directory, "base.txt"), "changed\n");
@@ -53,7 +53,7 @@ describe("worktrees plugin", () => {
       expect(diff.patch).toContain("-base");
       expect(diff.patch).toContain("+changed");
       await expect(worktrees.resetWorktree({ repository, directory: candidate.directory })).resolves.toBe(true);
-      expect(await readFile(join(candidate.directory, "base.txt"), "utf8")).toBe("base\n");
+      expect((await readFile(join(candidate.directory, "base.txt"), "utf8")).replace(/\r\n/g, "\n")).toBe("base\n");
 
       await expect(worktrees.removeWorktree({ repository, directory: candidate.directory, force: true })).resolves.toBe(true);
     } finally {
@@ -96,8 +96,8 @@ describe("worktrees plugin", () => {
       const promoted = await worktrees.promoteWorktree({ repository, directory: candidate.directory, strategy: "cherry-pick" });
       expect(promoted.changed).toBe(true);
       expect(promoted.strategy).toBe("cherry-pick");
-      expect(await readFile(join(repository, "base.txt"), "utf8")).toBe("candidate change\n");
-      expect(await readFile(join(repository, "primary.txt"), "utf8")).toBe("primary divergence\n");
+      expect((await readFile(join(repository, "base.txt"), "utf8")).replace(/\r\n/g, "\n")).toBe("candidate change\n");
+      expect((await readFile(join(repository, "primary.txt"), "utf8")).replace(/\r\n/g, "\n")).toBe("primary divergence\n");
 
       await worktrees.removeWorktree({ repository, directory: candidate.directory, force: true, deleteBranch: true });
       await friday.dispose();

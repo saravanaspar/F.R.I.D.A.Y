@@ -29,13 +29,13 @@ function safeCrashPath(): string {
   mkdirSync(logDir, { recursive: true, mode: 0o700 });
   chmodSync(logDir, 0o700);
   const dir = lstatSync(logDir);
-  if (!dir.isDirectory() || dir.isSymbolicLink() || (dir.mode & 0o077) !== 0) {
+  if (!dir.isDirectory() || dir.isSymbolicLink() || (process.platform !== "win32" && (dir.mode & 0o077) !== 0)) {
     throw new Error(`Crash log directory is unsafe: ${logDir}`);
   }
   const path = join(logDir, "crashes.ndjson");
   if (existsSync(path)) {
     const info = lstatSync(path);
-    if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0) {
+    if (!info.isFile() || info.isSymbolicLink() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) {
       throw new Error(`Crash log path is unsafe: ${path}`);
     }
   }
@@ -43,6 +43,7 @@ function safeCrashPath(): string {
 }
 
 function syncDirectory(path: string): void {
+  if (process.platform === "win32") return;
   const descriptor = openSync(path, "r");
   try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
 }
